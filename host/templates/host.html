@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Card Game Remote - Dealer</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>Card Game Remote</h1>
+        <div>
+            <span id="piStatus" class="status-badge disconnected">Pi: --</span>
+            <span id="remoteStatus" class="status-badge disconnected">Remote: --</span>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Game Selection -->
+        <section id="gameSection">
+            <h2>Game</h2>
+            <div class="game-selector">
+                <select id="gameSelect"></select>
+                <button class="btn-primary" onclick="newHand()">New Hand</button>
+                <button class="btn-warning" onclick="endHand()">End Hand</button>
+            </div>
+        </section>
+
+        <!-- Current Phase -->
+        <section id="phaseSection" style="display:none">
+            <h2>Current Phase</h2>
+            <div id="phaseDisplay" class="phase-indicator">--</div>
+            <div id="wildDisplay" class="wild-display" style="display:none"></div>
+            <div class="btn-group" style="margin-top:12px">
+                <button id="continueBtn" class="btn-secondary" onclick="continueBetting()" style="display:none">
+                    Continue (betting done)
+                </button>
+            </div>
+        </section>
+
+        <!-- Remote Player's Hand -->
+        <section>
+            <h2>Remote Player's Hand</h2>
+            <div id="handGrid" class="card-grid">
+                <span style="color:#666; font-style:italic">No cards dealt yet</span>
+            </div>
+        </section>
+
+        <!-- Dev Panel (simulate scans without Pi) -->
+        <section class="dev-panel">
+            <h2>Dev: Simulate Card Scan</h2>
+            <div class="manual-card-input">
+                <select id="simRank">
+                    <option value="A">A</option><option value="2">2</option>
+                    <option value="3">3</option><option value="4">4</option>
+                    <option value="5">5</option><option value="6">6</option>
+                    <option value="7">7</option><option value="8">8</option>
+                    <option value="9">9</option><option value="10">10</option>
+                    <option value="J">J</option><option value="Q">Q</option>
+                    <option value="K">K</option>
+                </select>
+                <select id="simSuit">
+                    <option value="hearts">Hearts</option>
+                    <option value="diamonds">Diamonds</option>
+                    <option value="clubs">Clubs</option>
+                    <option value="spades">Spades</option>
+                </select>
+                <button class="btn-primary btn-small" onclick="simulateScan()">Scan</button>
+                <button class="btn-secondary btn-small" onclick="peekScan()">Peek Scan</button>
+            </div>
+        </section>
+    </div>
+
+    <script src="/static/host.js"></script>
+</body>
+</html>

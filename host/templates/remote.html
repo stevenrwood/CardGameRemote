@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Card Game Remote - Player</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>Card Game Remote</h1>
+        <span id="connStatus" class="status-badge disconnected">Disconnected</span>
+    </header>
+
+    <div class="container">
+        <!-- Game info -->
+        <section>
+            <h2 id="gameTitle">Waiting for game...</h2>
+            <div id="wildDisplay" class="wild-display" style="display:none"></div>
+        </section>
+
+        <!-- Your Hand -->
+        <section>
+            <h2>Your Hand</h2>
+            <div id="handGrid" class="card-grid">
+                <span style="color:#666; font-style:italic">No cards yet</span>
+            </div>
+        </section>
+
+        <!-- Action Area (discard / challenge) -->
+        <section id="actionArea" class="action-area" style="display:none">
+            <p id="actionPrompt"></p>
+            <div class="btn-group" style="justify-content:center">
+                <button id="actionBtn" class="btn-primary" onclick="submitAction()" disabled>Submit</button>
+                <button id="passBtn" class="btn-secondary" onclick="passChallenge()" style="display:none">Pass</button>
+            </div>
+        </section>
+
+        <!-- Peek Cards (other players' cards shown via peek scan) -->
+        <section id="peekSection" style="display:none">
+            <h2>Table Cards</h2>
+            <div id="peekGrid" class="peek-cards"></div>
+        </section>
+    </div>
+
+    <script src="/static/remote.js"></script>
+</body>
+</html>
