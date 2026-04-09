@@ -267,56 +267,68 @@ class CalibrationUI:
         self._zone_idx = 0
         self._step = "circle_center"
         self._instructions = "Click the CENTER of the felt circle"
-        print(f"[calibration] {self._instructions}")
+        print(f"\n[calibration] === Step 1 of {2 + NUM_ZONES * 2}: {self._instructions}")
 
     def handle_click(self, x: int, y: int):
         if not self.active:
             return
 
+        total_steps = 2 + NUM_ZONES * 2
+
         if self._step == "circle_center":
             self.cal.circle_center = (x, y)
+            print(f"[calibration]   Circle center set at ({x}, {y})")
             self._step = "circle_edge"
             self._instructions = "Click the EDGE of the felt circle"
-            print(f"[calibration] {self._instructions}")
+            print(f"[calibration] === Step 2 of {total_steps}: {self._instructions}")
 
         elif self._step == "circle_edge":
             cx, cy = self.cal.circle_center
             self.cal.circle_radius = int(np.hypot(x - cx, y - cy))
+            print(f"[calibration]   Circle radius: {self.cal.circle_radius}px")
             self._step = "zone_tl"
             self._zone_idx = 0
+            step_num = 3
             self._instructions = f"Click TOP-LEFT of {PLAYER_NAMES[0]}'s zone"
-            print(f"[calibration] {self._instructions}")
+            print(f"[calibration] === Step {step_num} of {total_steps}: {self._instructions}")
 
         elif self._step == "zone_tl":
             self._zone_tl = (x, y)
             name = PLAYER_NAMES[self._zone_idx]
             self._step = "zone_br"
+            step_num = 3 + self._zone_idx * 2
             self._instructions = f"Click BOTTOM-RIGHT of {name}'s zone"
-            print(f"[calibration] {self._instructions}")
+            print(f"[calibration]   Top-left at ({x}, {y})")
+            print(f"[calibration] === Step {step_num + 1} of {total_steps}: {self._instructions}")
 
         elif self._step == "zone_br":
             name = PLAYER_NAMES[self._zone_idx]
             tl = self._zone_tl
-            self.cal.zones.append({
+            zone = {
                 "name": name,
                 "x1": min(tl[0], x),
                 "y1": min(tl[1], y),
                 "x2": max(tl[0], x),
                 "y2": max(tl[1], y),
-            })
-            print(f"[calibration] zone '{name}' defined")
+            }
+            self.cal.zones.append(zone)
+            w = zone["x2"] - zone["x1"]
+            h = zone["y2"] - zone["y1"]
+            print(f"[calibration]   Zone '{name}' defined — {w}x{h}px")
 
             self._zone_idx += 1
             if self._zone_idx < NUM_ZONES:
+                step_num = 3 + self._zone_idx * 2
                 self._step = "zone_tl"
                 self._instructions = f"Click TOP-LEFT of {PLAYER_NAMES[self._zone_idx]}'s zone"
-                print(f"[calibration] {self._instructions}")
+                print(f"[calibration] === Step {step_num} of {total_steps}: {self._instructions}")
             else:
                 self.cal.save()
                 self.active = False
                 self._step = ""
                 self._instructions = ""
-                print("[calibration] complete!")
+                print("\n[calibration] === Complete! All zones defined.")
+                print("[calibration] Press 'r' to capture empty-table baselines")
 
     def draw_instructions(self, frame: np.ndarray):
         if self.active and self._instructions:
@@ -421,8 +433,24 @@ def main():
     # -- Capture initial baselines if calibration already loaded ------------
     baselines_captured = False
 
-    print("\n--- Overhead Card Scanner ---")
-    print("  c = calibrate | r = reset baselines | s = snapshot | q = quit\n")
+    print("\n╔══════════════════════════════════════════╗")
+    print("║       Overhead Card Scanner              ║")
+    print("╠══════════════════════════════════════════╣")
+    print("║  Click on the CAMERA WINDOW first,       ║")
+    print("║  then use these keys:                    ║")
+    print("║                                          ║")
+    print("║    c = calibrate felt circle + zones     ║")
+    print("║    r = reset baselines (empty table)     ║")
+    print("║    s = save a snapshot                   ║")
+    print("║    q = quit                              ║")
+    print("╚══════════════════════════════════════════╝")
+
+    if cal.is_complete:
+        print(f"\n[startup] Calibration loaded — {len(cal.zones)} zones defined")
+        print("[startup] Press 'r' to capture empty-table baselines when ready")
+    else:
+        print("\n[startup] No calibration found")
+        print("[startup] Click on the camera window, then press 'c' to start calibration")
 
     while True:
         ret, frame = cap.read()
@@ -445,20 +473,32 @@ def main():
         draw_overlay(display, cal, monitor)
         cal_ui.draw_instructions(display)
 
-        # Show FPS
-        # (lightweight — no rolling average to keep things simple)
+        # Show status bar at bottom of frame
+        if cal_ui.active:
+            status = "CALIBRATING — click in the camera window"
+        elif not cal.is_complete:
+            status = "Press 'c' to calibrate (click camera window first)"
+        elif not baselines_captured:
+            status = "Press 'r' to capture empty-table baselines"
+        else:
+            status = "Monitoring zones | c=calibrate r=reset s=snapshot q=quit"
+
+        cv2.putText(display, status, (20, actual_h - 20),
+                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_CYAN, 2)
         cv2.putText(display, f"{actual_w}x{actual_h}", (actual_w - 300, actual_h - 20),
                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_WHITE, 2)
 
         cv2.imshow(window_name, display)
 
-        # -- Key handling ---------------------------------------------------
+        # -- Key handling (keys only work when camera window has focus) -----
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord("q"):
+            print("\n[quit] shutting down...")
             break
 
         elif key == ord("c"):
+            print("\n[calibrate] starting calibration...")
             cal_ui.start()
             baselines_captured = False
 
@@ -468,7 +508,7 @@ def main():
                 if ret2:
                     monitor.capture_baselines(fresh, cal.zones)
                     baselines_captured = True
-                    print("[baselines] recaptured")
+                    print("[baselines] recaptured — monitoring zones")
             else:
                 print("[baselines] calibrate first (press 'c')")
 
