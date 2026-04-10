@@ -466,10 +466,8 @@ class ZoneMonitor:
 
             self._save_training(name, crop, result)
 
-            # Voice announcement (serialized, never overlaps)
-            if "no card" in result.lower():
-                speech.say(f"{name}, try repositioning upcard")
-            else:
+            # Voice announcement — only on successful recognition
+            if "no card" not in result.lower():
                 speech.say(f"{name}, {result}")
 
         except Exception as exc:
