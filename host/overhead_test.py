@@ -137,6 +137,7 @@ class FrameCapture:
             path = str(output_path or CAPTURE_FILE)
             cmd = [
                 "ffmpeg", "-y", "-loglevel", "error",
+                "-nostdin",  # don't touch terminal settings
                 "-f", "avfoundation",
                 "-video_size", self.resolution,
                 "-framerate", "5",
@@ -145,7 +146,8 @@ class FrameCapture:
                 "-q:v", "2",
                 path
             ]
-            subprocess.run(cmd, capture_output=True, timeout=10)
+            subprocess.run(cmd, capture_output=True, timeout=10,
+                           stdin=subprocess.DEVNULL)
             frame = cv2.imread(path)
             return frame
         except Exception as e:
