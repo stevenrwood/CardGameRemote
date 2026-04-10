@@ -444,6 +444,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._serve_live(s)
         elif p == "/calibrate":
             self._serve_calibrate_page(s)
+        elif p == "/log":
+            self._r(200, "text/plain", "\n".join(log_buffer.get_lines()))
+        elif p == "/api/log":
+            self._r(200, "application/json", json.dumps({"lines": log_buffer.get_lines()[-50:]}))
         elif p == "/snapshot":
             self._serve_frame(s)
         elif p == "/snapshot/cropped":
@@ -491,36 +495,75 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body.encode("utf-8") if isinstance(body, str) else body)
 
     def _serve_dashboard(self, s):
-        zones_html = ""
-        for z in s.cal.zones:
-            name = z["name"]
-            card = s.monitor.last_card.get(name, "")
-            zs = s.monitor.zone_state.get(name, "empty")
-            color = {"recognized": "#4caf50", "processing": "#ff9800"}.get(zs, "#888")
-            zones_html += (
-                f'<div style="display:inline-block;margin:8px;padding:12px;'
-                f'border:2px solid {color};border-radius:8px;min-width:120px;text-align:center">'
-                f'<b>{name}</b><br>{zs}<br>'
-                f'<span style="color:{color};font-size:1.2em">{card}</span><br>'
-                f'<a href="/zone/{name}"><img src="/zone/{name}" width="150"></a></div>')
+        zone_names_js = json.dumps([z["name"] for z in s.cal.zones])
         res = f"{s.capture.width}x{s.capture.height}"
         self._r(200, "text/html", f"""<!DOCTYPE html>
 <html><head><title>Card Scanner Debug</title>
-<meta http-equiv="refresh" content="3">
-<style>body{{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}}
+<style>
+body{{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}}
 a{{color:#4fc3f7}}img{{border:1px solid #444;margin:4px}}
-pre{{background:#0d1117;padding:12px;border-radius:6px;max-height:400px;overflow:auto}}</style>
-</head><body>
+pre{{background:#0d1117;padding:12px;border-radius:6px;max-height:400px;overflow:auto;font-size:0.85em}}
+.zone{{display:inline-block;margin:8px;padding:12px;border:2px solid #888;border-radius:8px;min-width:120px;text-align:center}}
+</style></head><body>
 <h1>Overhead Card Scanner</h1>
-<p>Resolution: {res} | Monitoring: {'ON' if s.monitoring else 'OFF'} |
+<p>Resolution: {res} |
+Monitoring: <span id="mon">...</span> |
 Calibrated: {'Yes' if s.cal.is_complete else 'No'}</p>
 <p><a href="/live">Live View</a> | <a href="/calibrate">Calibrate</a></p>
-<h2>Snapshot</h2><a href="/snapshot"><img src="/snapshot" width="640"></a>
-<h2>Zones</h2>{zones_html}
-<h2>Log</h2><pre>{"<br>".join(log_buffer.get_lines()[-50:])}</pre>
+<h2>Snapshot</h2>
+<img id="snap" src="/snapshot" width="640" style="cursor:pointer" onclick="this.src='/snapshot?'+Date.now()">
+<h2>Zones</h2>
+<div id="zones"></div>
+<h2>Log (last 50 lines)</h2>
+<pre id="logpre"></pre>
 <p><a href="/log">Full log</a> | <a href="/calibration">Calibration JSON</a> |
 <a href="/training">Training data</a></p>
-</body></html>""")
+<script>
+var zoneNames={zone_names_js};
+function update(){{
+  // Update snapshot
+  var img=new Image();
+  img.onload=function(){{document.getElementById('snap').src=img.src}};
+  img.src='/snapshot?'+Date.now()+Math.random();
+  // Update zone images
+  zoneNames.forEach(function(n){{
+    var zi=document.getElementById('zimg_'+n);
+    if(zi){{var ni=new Image();ni.onload=function(){{zi.src=ni.src}};ni.src='/zone/'+n+'?'+Date.now()}}
+  }});
+  // Update state
+  fetch('/api/state').then(function(r){{return r.json()}}).then(function(d){{
+    document.getElementById('mon').textContent=d.monitoring?'ON':'OFF';
+    zoneNames.forEach(function(n){{
+      var z=d.zones[n]||{{}};
+      var el=document.getElementById('zstate_'+n);
+      var cl=document.getElementById('zcard_'+n);
+      var div=document.getElementById('zdiv_'+n);
+      if(el) el.textContent=z.state||'empty';
+      if(cl) cl.textContent=z.card||'';
+      if(div){{
+        var c={{'recognized':'#4caf50','processing':'#ff9800'}}[z.state]||'#888';
+        div.style.borderColor=c;
+        if(cl) cl.style.color=c;
+      }}
+    }});
+  }}).catch(function(){{}});
+  // Update log
+  fetch('/api/log').then(function(r){{return r.json()}}).then(function(d){{
+    document.getElementById('logpre').innerHTML=d.lines.join('<br>');
+  }}).catch(function(){{}});
+}}
+// Build zone divs
+var zh='';
+zoneNames.forEach(function(n){{
+  zh+='<div class="zone" id="zdiv_'+n+'"><b>'+n+'</b><br>'
+    +'<span id="zstate_'+n+'">empty</span><br>'
+    +'<span id="zcard_'+n+'" style="font-size:1.2em"></span><br>'
+    +'<img id="zimg_'+n+'" src="/zone/'+n+'" width="150"></div>';
+}});
+document.getElementById('zones').innerHTML=zh;
+setInterval(update,3000);
+update();
+</script></body></html>""")
 
     def _serve_live(self, s):
         self._r(200, "text/html", """<!DOCTYPE html>
