@@ -262,11 +262,14 @@ function refreshImage() {
     var newImg = new Image();
     newImg.onload = function() {
         document.getElementById('frame').src = newImg.src;
+        setTimeout(refreshImage, 2000);
     };
-    // Only replace if load succeeds — keeps last good image on failure
-    newImg.src = '/snapshot/cropped?' + Date.now();
+    newImg.onerror = function() {
+        setTimeout(refreshImage, 2000);
+    };
+    newImg.src = '/snapshot/cropped?t=' + Date.now() + Math.random();
 }
-setInterval(refreshImage, 2000);
+setTimeout(refreshImage, 2000);
 </script>
 </head><body>
 <img id="frame" src="/snapshot/cropped">
@@ -276,7 +279,13 @@ setInterval(refreshImage, 2000);
     def _serve_cropped_frame(self, state):
         # Serve the cached cropped JPEG if available
         if state.latest_cropped_jpg is not None:
-            self._respond(200, "image/jpeg", state.latest_cropped_jpg)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+            self.end_headers()
+            self.wfile.write(state.latest_cropped_jpg)
         else:
             self._respond(503, "text/plain", "No frame yet")
 
