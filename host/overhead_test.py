@@ -313,7 +313,8 @@ class ZoneMonitor:
 # Drawing helpers — circular zones
 # ---------------------------------------------------------------------------
 
-def draw_overlay(frame, cal, monitor, monitoring, cal_step="", preview_circle=None):
+def draw_overlay(frame, cal, monitor, monitoring, cal_step="", preview_circle=None,
+                 flash_zone=None, flash_on=False):
     # Felt circle
     if cal.circle_center and cal.circle_radius:
         cv2.circle(frame, cal.circle_center, cal.circle_radius, COLOR_WHITE, 2)
@@ -322,6 +323,14 @@ def draw_overlay(frame, cal, monitor, monitoring, cal_step="", preview_circle=No
     for zone in cal.zones:
         name = zone["name"]
         cx, cy, r = zone["cx"], zone["cy"], zone["r"]
+
+        # Flashing zone — alternate between red and off
+        if flash_zone == name:
+            if flash_on:
+                cv2.circle(frame, (cx, cy), r, COLOR_RED, 4)
+                cv2.putText(frame, name, (cx - 30, cy - r - 10),
+                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_RED, 2)
+            continue
 
         state = monitor.zone_state.get(name, "empty")
         if state == "recognized":
@@ -379,6 +388,14 @@ class AppState:
         self.zone_center_pending = None  # (cx, cy) waiting for radius click
         self.mouse_pos = None          # current mouse position in frame coords
 
+        # For flashing zones during test mode
+        self.flash_zone = None         # zone name to flash, or None
+        self.flash_start = 0.0         # time when flash started
+
+        # For test recognition mode
+        self.test_result = None        # result from test recognition
+        self.test_done = Event()
+
 
 # ---------------------------------------------------------------------------
 # Input thread
@@ -390,6 +407,7 @@ def input_thread(state):
         print("║       Overhead Card Scanner              ║")
         print("╠══════════════════════════════════════════╣")
         print("║  c = calibrate felt circle + zones       ║")
+        print("║  t = test recognition (zone by zone)     ║")
         print("║  m = start/stop monitoring               ║")
         print("║  r = reset baselines (clear table first) ║")
         print("║  s = save a snapshot                     ║")
@@ -413,6 +431,8 @@ def input_thread(state):
                 break
             elif cmd == "c":
                 do_calibrate_terminal(state)
+            elif cmd == "t":
+                do_test_recognition(state)
             elif cmd == "m":
                 do_monitor_toggle_terminal(state)
             elif cmd == "r":
@@ -545,6 +565,109 @@ def do_reset_baselines_terminal(state):
     print("  Baselines recaptured.")
 
 
+def do_test_recognition(state):
+    """Test recognition zone by zone with interactive feedback."""
+    if not state.cal.is_complete:
+        print("\n  Cannot test — calibrate first (press 'c')")
+        return
+
+    print("\n  Test Recognition Mode")
+    print("  This will test card recognition in each player's zone one at a time.")
+    print("  Make sure the table is CLEAR of all cards.")
+    input("  Press Enter when table is clear...")
+
+    # Capture fresh baselines
+    state.command_queue.put("capture_baselines")
+    time.sleep(0.5)
+
+    for zone in state.cal.zones:
+        name = zone["name"]
+        print(f"\n  --- Testing {name}'s zone ---")
+        print(f"  Place a face-up card in {name}'s zone.")
+
+        # Wait for card to be detected and recognized
+        recognized = False
+        attempts = 0
+        max_attempts = 3
+
+        while not recognized and attempts < max_attempts:
+            # Send test recognition command to main thread
+            state.test_result = None
+            state.test_done.clear()
+            state.command_queue.put(("test_recognize", name))
+
+            # Wait for result — flash zone while waiting
+            state.flash_zone = name
+            state.flash_start = time.time()
+
+            # Wait up to 10 seconds for recognition
+            got_result = state.test_done.wait(timeout=10.0)
+            state.flash_zone = None
+
+            if not got_result or state.test_result is None:
+                print(f"  No card detected in {name}'s zone.")
+                attempts += 1
+                if attempts < max_attempts:
+                    print(f"  Try repositioning the card... (attempt {attempts + 1}/{max_attempts})")
+                    speech.say(f"{name}, try repositioning upcard")
+                    time.sleep(2)  # Give time to reposition
+                continue
+
+            result = state.test_result
+            if result == "No card":
+                print(f"  Could not identify card in {name}'s zone.")
+                attempts += 1
+                if attempts < max_attempts:
+                    print(f"  Try repositioning the card... (attempt {attempts + 1}/{max_attempts})")
+                    speech.say(f"{name}, try repositioning upcard")
+                    time.sleep(2)
+                continue
+
+            # Card recognized — show it
+            print(f"  Recognized: {result}")
+            speech.say(f"{name}, {result}")
+
+            # Wait for click or 5 seconds
+            print(f"  Click in camera window to confirm, or wait 5s to retry...")
+            state.flash_zone = None
+
+            # Clear stale clicks
+            while not state.click_queue.empty():
+                try:
+                    state.click_queue.get_nowait()
+                except Empty:
+                    break
+
+            try:
+                state.click_queue.get(timeout=5.0)
+                # Click received — confirmed correct
+                print(f"  Confirmed!")
+                recognized = True
+            except Empty:
+                # No click in 5 seconds — flash and retry
+                attempts += 1
+                if attempts < max_attempts:
+                    print(f"  No confirmation. Retrying... (attempt {attempts + 1}/{max_attempts})")
+                    state.flash_zone = name
+                    state.flash_start = time.time()
+                    time.sleep(1)
+                    state.flash_zone = None
+
+        if not recognized:
+            print(f"  Skipping {name}'s zone after {max_attempts} attempts.")
+            speech.say(f"Skipping {name}")
+
+        # Wait for card to be removed before next player
+        if recognized:
+            print(f"  Remove the card from {name}'s zone.")
+            input("  Press Enter when card is removed...")
+
+    print("\n  Test complete!")
+    # Recapture baselines after test
+    state.command_queue.put("capture_baselines")
+    time.sleep(0.3)
+
+
 # ---------------------------------------------------------------------------
 # Main — OpenCV on main thread (required by macOS)
 # ---------------------------------------------------------------------------
@@ -632,6 +755,36 @@ def main():
                     snap_path = Path(__file__).parent / f"snapshot_{ts}.jpg"
                     cv2.imwrite(str(snap_path), frame)
                     print(f"\n  Snapshot saved to {snap_path}")
+                elif isinstance(cmd, tuple) and cmd[0] == "test_recognize":
+                    # Test recognition for a specific zone
+                    zone_name = cmd[1]
+                    zone = next((z for z in cal.zones if z["name"] == zone_name), None)
+                    if zone and state.baselines_captured:
+                        crop = monitor._crop_zone(frame, zone)
+                        if crop is not None and crop.size > 0:
+                            baseline = monitor.baselines.get(zone_name)
+                            if baseline is not None and crop.shape == baseline.shape:
+                                diff = cv2.absdiff(crop, baseline)
+                                mean_diff = float(np.mean(diff))
+                                if mean_diff > monitor.threshold:
+                                    # Card detected — run recognition
+                                    def _do_test_recognize(name, c):
+                                        monitor._recognize(name, c)
+                                        state.test_result = monitor.last_card.get(name, "No card")
+                                        state.test_done.set()
+                                    t = Thread(target=_do_test_recognize,
+                                               args=(zone_name, crop.copy()), daemon=True)
+                                    t.start()
+                                else:
+                                    # No card detected yet — signal done with None
+                                    state.test_result = None
+                                    state.test_done.set()
+                            else:
+                                state.test_result = None
+                                state.test_done.set()
+                        else:
+                            state.test_result = None
+                            state.test_done.set()
         except Empty:
             pass
 
@@ -639,10 +792,16 @@ def main():
         if state.monitoring and cal.is_complete and state.baselines_captured:
             monitor.check_zones(frame, cal.zones)
 
+        # Compute flash state (blink at 2Hz)
+        flash_on = False
+        if state.flash_zone:
+            elapsed = time.time() - state.flash_start
+            flash_on = int(elapsed * 4) % 2 == 0  # 4 toggles/sec = 2Hz blink
+
         # Draw overlay
         display = frame.copy()
         draw_overlay(display, cal, monitor, state.monitoring, state.cal_step,
-                     state.preview_circle)
+                     state.preview_circle, state.flash_zone, flash_on)
         cv2.imshow(window_name, display)
         cv2.waitKey(30)
 
