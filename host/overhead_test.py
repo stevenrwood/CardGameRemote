@@ -120,7 +120,6 @@ class FrameCapture:
         w, h = resolution.split("x")
         self.width = int(w)
         self.height = int(h)
-        self._lock = Lock()  # prevent concurrent ffmpeg calls
         self._check_ffmpeg()
 
     def _check_ffmpeg(self):
@@ -130,22 +129,20 @@ class FrameCapture:
             log_buffer.log("ERROR: ffmpeg not found. Install with: brew install ffmpeg")
             sys.exit(1)
 
-    def capture(self, output_path=None, wait=False):
-        if not self._lock.acquire(blocking=wait, timeout=10 if wait else -1):
-            return None  # another capture in progress, skip
+    def capture(self):
+        path = str(CAPTURE_FILE)
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-nostdin",
+            "-f", "avfoundation",
+            "-video_size", self.resolution,
+            "-framerate", "5",
+            "-i", f"{self.camera_index}:none",
+            "-frames:v", "1",
+            "-q:v", "2",
+            path
+        ]
         try:
-            path = str(output_path or CAPTURE_FILE)
-            cmd = [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-nostdin",  # don't touch terminal settings
-                "-f", "avfoundation",
-                "-video_size", self.resolution,
-                "-framerate", "5",
-                "-i", f"{self.camera_index}:none",
-                "-frames:v", "1",
-                "-q:v", "2",
-                path
-            ]
             subprocess.run(cmd, capture_output=True, timeout=10,
                            stdin=subprocess.DEVNULL)
             frame = cv2.imread(path)
@@ -153,8 +150,6 @@ class FrameCapture:
         except Exception as e:
             log_buffer.log(f"Capture error: {e}")
             return None
-        finally:
-            self._lock.release()
 
 
 # ---------------------------------------------------------------------------
@@ -795,8 +790,9 @@ def start_server(state):
 # Background capture loop
 # ---------------------------------------------------------------------------
 
-def capture_frame(state, wait=False):
-    frame = state.capture.capture(wait=wait)
+def update_frame(state):
+    """Called only by background capture thread."""
+    frame = state.capture.capture()
     if frame is not None:
         state.latest_frame = frame.copy()
         cropped = crop_to_felt_circle(frame, state.cal)
@@ -862,7 +858,7 @@ def do_test_recognition(state):
     print("  Make sure the table is CLEAR of all cards.")
     input("  Press Enter when table is clear...")
 
-    frame = capture_frame(state, wait=True)
+    frame = state.latest_frame
     if frame is None:
         print("  ERROR: Could not capture frame")
         return
@@ -881,7 +877,7 @@ def do_test_recognition(state):
             poll_start = time.time()
 
             while time.time() - poll_start < 30.0:
-                frame = capture_frame(state, wait=True)
+                frame = state.latest_frame
                 if frame is None:
                     time.sleep(2)
                     continue
@@ -931,7 +927,7 @@ def do_monitor(state):
     print("\n  Make sure all landing zones are EMPTY.")
     input("  Press Enter when table is clear...")
 
-    frame = capture_frame(state, wait=True)
+    frame = state.latest_frame
     if frame is None:
         print("  ERROR: Could not capture frame")
         return
@@ -942,7 +938,7 @@ def do_monitor(state):
 
     def loop():
         while state.monitoring and not state.quit_flag:
-            frame = capture_frame(state, wait=True)
+            frame = state.latest_frame
             if frame is not None:
                 state.monitor.check_zones(frame, state.cal.zones)
             time.sleep(2)
@@ -954,7 +950,7 @@ def do_monitor(state):
 
 
 def do_snapshot(state):
-    frame = capture_frame(state, wait=True)
+    frame = state.latest_frame
     if frame is not None:
         cropped = crop_to_felt_circle(frame, state.cal)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1023,7 +1019,7 @@ def main():
     # Background capture loop
     def bg_capture():
         while not state.quit_flag:
-            capture_frame(state)  # non-blocking, skips if locked
+            update_frame(state)
             time.sleep(2)
     Thread(target=bg_capture, daemon=True).start()
 
@@ -1052,11 +1048,11 @@ def main():
             elif cmd == "m":
                 do_monitor(state)
             elif cmd == "r":
-                frame = capture_frame(state, wait=True)
+                frame = state.latest_frame
                 if frame is not None:
                     print("  Clear table, then press Enter...")
                     input()
-                    frame = capture_frame(state, wait=True)
+                    frame = state.latest_frame
                     if frame:
                         state.monitor.capture_baselines(frame, state.cal.zones)
                         print("  Baselines recaptured.")
