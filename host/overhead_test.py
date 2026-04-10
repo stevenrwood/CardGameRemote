@@ -776,52 +776,55 @@ def do_test_recognition(state):
         name = zone["name"]
         print(f"\n  --- Testing {name}'s zone ---")
         print(f"  Place a face-up card in {name}'s zone.")
+        print(f"  (circle will flash while waiting for card)")
 
-        # Wait for card to be detected and recognized
         recognized = False
         attempts = 0
         max_attempts = 3
 
         while not recognized and attempts < max_attempts:
-            # Send test recognition command to main thread
-            state.test_result = None
-            state.test_done.clear()
-            state.command_queue.put(("test_recognize", name))
-
-            # Wait for result — flash zone while waiting
+            # Flash the zone circle while waiting
             state.flash_zone = name
             state.flash_start = time.time()
 
-            # Wait up to 10 seconds for recognition
-            got_result = state.test_done.wait(timeout=10.0)
+            # Poll for card detection — keep trying for 30 seconds
+            card_found = False
+            poll_start = time.time()
+            while time.time() - poll_start < 30.0:
+                state.test_result = None
+                state.test_done.clear()
+                state.command_queue.put(("test_recognize", name))
+
+                got_result = state.test_done.wait(timeout=2.0)
+
+                if got_result and state.test_result is not None:
+                    if state.test_result != "No card":
+                        card_found = True
+                        break
+                    # API said "No card" — keep trying, card might need repositioning
+                    log_buffer.log(f"[{name}] API returned 'No card' — retrying...")
+
+                time.sleep(1.0)  # wait between polls
+
             state.flash_zone = None
 
-            if not got_result or state.test_result is None:
-                print(f"  No card detected in {name}'s zone.")
+            if not card_found:
                 attempts += 1
                 if attempts < max_attempts:
-                    print(f"  Try repositioning the card... (attempt {attempts + 1}/{max_attempts})")
-                    speech.say(f"{name}, try repositioning upcard")
-                    time.sleep(2)  # Give time to reposition
+                    print(f"  No card recognized. Try repositioning... (attempt {attempts + 1}/{max_attempts})")
+                    # Flash circle to indicate failure — no voice
+                    state.flash_zone = name
+                    state.flash_start = time.time()
+                    time.sleep(3)
+                    state.flash_zone = None
                 continue
 
             result = state.test_result
-            if result == "No card":
-                print(f"  Could not identify card in {name}'s zone.")
-                attempts += 1
-                if attempts < max_attempts:
-                    print(f"  Try repositioning the card... (attempt {attempts + 1}/{max_attempts})")
-                    speech.say(f"{name}, try repositioning upcard")
-                    time.sleep(2)
-                continue
-
-            # Card recognized — show it
             print(f"  Recognized: {result}")
             speech.say(f"{name}, {result}")
 
-            # Wait for click or 5 seconds
+            # Wait for click (confirm) or 5 seconds (retry)
             print(f"  Click in camera window to confirm, or wait 5s to retry...")
-            state.flash_zone = None
 
             # Clear stale clicks
             while not state.click_queue.empty():
@@ -832,22 +835,20 @@ def do_test_recognition(state):
 
             try:
                 state.click_queue.get(timeout=5.0)
-                # Click received — confirmed correct
                 print(f"  Confirmed!")
                 recognized = True
             except Empty:
-                # No click in 5 seconds — flash and retry
+                # No click — flash and retry
                 attempts += 1
                 if attempts < max_attempts:
                     print(f"  No confirmation. Retrying... (attempt {attempts + 1}/{max_attempts})")
                     state.flash_zone = name
                     state.flash_start = time.time()
-                    time.sleep(1)
+                    time.sleep(2)
                     state.flash_zone = None
 
         if not recognized:
             print(f"  Skipping {name}'s zone after {max_attempts} attempts.")
-            speech.say(f"Skipping {name}")
 
         # Wait for card to be removed before next player
         if recognized:
@@ -855,7 +856,6 @@ def do_test_recognition(state):
             input("  Press Enter when card is removed...")
 
     print("\n  Test complete!")
-    # Recapture baselines after test
     state.command_queue.put("capture_baselines")
     time.sleep(0.3)
 
