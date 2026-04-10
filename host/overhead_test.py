@@ -158,7 +158,7 @@ class ZoneMonitor:
                     self.zone_state[name] = "empty"
                     self.last_card[name] = ""
 
-    def _crop_zone(self, frame: np.ndarray, zone: dict) -> np.ndarray | None:
+    def _crop_zone(self, frame: np.ndarray, zone: dict):
         h, w = frame.shape[:2]
         x1 = max(0, min(zone["x1"], w - 1))
         y1 = max(0, min(zone["y1"], h - 1))
