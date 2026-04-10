@@ -177,6 +177,10 @@ class DebugHandler(http.server.BaseHTTPRequestHandler):
 
         if self.path == "/" or self.path == "/debug":
             self._serve_dashboard(state)
+        elif self.path == "/live":
+            self._serve_live_view(state)
+        elif self.path == "/snapshot/cropped":
+            self._serve_cropped_frame(state)
         elif self.path == "/log":
             self._respond(200, "text/plain", "\n".join(log_buffer.get_lines()))
         elif self.path == "/snapshot":
@@ -245,6 +249,39 @@ Calibrated: {'Yes' if state.cal.is_complete else 'No'}</p>
 </ul>
 </body></html>"""
         self._respond(200, "text/html", html)
+
+    def _serve_live_view(self, state):
+        html = """<!DOCTYPE html>
+<html><head><title>Table View</title>
+<style>
+body { margin:0; background:#000; display:flex; justify-content:center; align-items:center; height:100vh; }
+img { max-width:100%; max-height:100vh; }
+</style>
+<script>
+setInterval(function() {
+    var img = document.getElementById('frame');
+    img.src = '/snapshot/cropped?' + Date.now();
+}, 2000);
+</script>
+</head><body>
+<img id="frame" src="/snapshot/cropped">
+</body></html>"""
+        self._respond(200, "text/html", html)
+
+    def _serve_cropped_frame(self, state):
+        frame = state.latest_frame
+        if frame is None:
+            self._respond(503, "text/plain", "No frame")
+            return
+        cropped = crop_to_felt_circle(frame, state.cal)
+        # Draw zone overlays on the cropped image
+        display = cropped.copy()
+        draw_overlay(display, state.cal, state.monitor)
+        ok, buf = cv2.imencode(".jpg", display, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if ok:
+            self._respond(200, "image/jpeg", buf.tobytes())
+        else:
+            self._respond(500, "text/plain", "Encode failed")
 
     def _serve_frame(self, state):
         frame = state.latest_frame
@@ -926,6 +963,10 @@ def main():
     state.latest_frame = frame
 
     start_debug_server(state)
+
+    # Open live view in default browser
+    subprocess.Popen(["open", f"http://localhost:{DEBUG_PORT}/live"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     if cal.is_complete:
         print(f"  Calibration loaded — {len(cal.zones)} zones defined")
