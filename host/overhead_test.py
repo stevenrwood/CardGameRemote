@@ -258,10 +258,15 @@ body { margin:0; background:#000; display:flex; justify-content:center; align-it
 img { max-width:100%; max-height:100vh; }
 </style>
 <script>
-setInterval(function() {
-    var img = document.getElementById('frame');
-    img.src = '/snapshot/cropped?' + Date.now();
-}, 2000);
+function refreshImage() {
+    var newImg = new Image();
+    newImg.onload = function() {
+        document.getElementById('frame').src = newImg.src;
+    };
+    // Only replace if load succeeds — keeps last good image on failure
+    newImg.src = '/snapshot/cropped?' + Date.now();
+}
+setInterval(refreshImage, 2000);
 </script>
 </head><body>
 <img id="frame" src="/snapshot/cropped">
@@ -269,19 +274,11 @@ setInterval(function() {
         self._respond(200, "text/html", html)
 
     def _serve_cropped_frame(self, state):
-        frame = state.latest_frame
-        if frame is None:
-            self._respond(503, "text/plain", "No frame")
-            return
-        cropped = crop_to_felt_circle(frame, state.cal)
-        # Draw zone overlays on the cropped image
-        display = cropped.copy()
-        draw_overlay(display, state.cal, state.monitor)
-        ok, buf = cv2.imencode(".jpg", display, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        if ok:
-            self._respond(200, "image/jpeg", buf.tobytes())
+        # Serve the cached cropped JPEG if available
+        if state.latest_cropped_jpg is not None:
+            self._respond(200, "image/jpeg", state.latest_cropped_jpg)
         else:
-            self._respond(500, "text/plain", "Encode failed")
+            self._respond(503, "text/plain", "No frame yet")
 
     def _serve_frame(self, state):
         frame = state.latest_frame
@@ -648,6 +645,7 @@ class AppState:
         self.monitoring = False
         self.baselines_captured = False
         self.latest_frame = None
+        self.latest_cropped_jpg = None   # pre-rendered JPEG for live view
         self.quit_flag = False
         self.flash_zone = None
         self.flash_start = 0.0
@@ -671,10 +669,17 @@ def print_menu():
 
 
 def capture_frame(state):
-    """Capture a frame and update state."""
+    """Capture a frame and update state, including cached cropped JPEG for live view."""
     frame = state.capture.capture()
     if frame is not None:
         state.latest_frame = frame.copy()
+        # Pre-render cropped JPEG for the live view endpoint
+        cropped = crop_to_felt_circle(frame, state.cal)
+        display = cropped.copy()
+        draw_overlay(display, state.cal, state.monitor)
+        ok, buf = cv2.imencode(".jpg", display, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if ok:
+            state.latest_cropped_jpg = buf.tobytes()
     return frame
 
 
@@ -964,7 +969,17 @@ def main():
 
     start_debug_server(state)
 
+    # Background capture loop — keeps live view fresh
+    def background_capture():
+        while not state.quit_flag:
+            capture_frame(state)
+            time.sleep(2)
+
+    bg_thread = Thread(target=background_capture, daemon=True)
+    bg_thread.start()
+
     # Open live view in default browser
+    time.sleep(1)  # let first background capture complete
     subprocess.Popen(["open", f"http://localhost:{DEBUG_PORT}/live"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
