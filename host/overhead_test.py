@@ -177,13 +177,28 @@ class ZoneMonitor:
                 continue
             if self.pending.get(name, False):
                 continue
+            # Don't re-scan zones that already have a recognized card
+            if self.zone_state.get(name) == "recognized":
+                # But check if card was removed (zone returned to baseline)
+                crop = self._crop_zone(frame, zone)
+                if crop is None or crop.size == 0:
+                    continue
+                baseline = self.baselines[name]
+                if crop.shape != baseline.shape:
+                    continue
+                diff = cv2.absdiff(crop, baseline)
+                mean_diff = float(np.mean(diff))
+                if mean_diff < self.threshold:
+                    # Card removed — reset to empty
+                    self.zone_state[name] = "empty"
+                    self.last_card[name] = ""
+                continue
 
             crop = self._crop_zone(frame, zone)
             if crop is None or crop.size == 0:
                 continue
 
             baseline = self.baselines[name]
-            # Baselines and crops must be same size
             if crop.shape != baseline.shape:
                 continue
 
@@ -191,15 +206,10 @@ class ZoneMonitor:
             mean_diff = float(np.mean(diff))
 
             if mean_diff > self.threshold:
-                if self.zone_state.get(name) != "processing":
-                    self.zone_state[name] = "processing"
-                    self.pending[name] = True
-                    t = Thread(target=self._recognize, args=(name, crop.copy()), daemon=True)
-                    t.start()
-            else:
-                if self.zone_state.get(name) == "recognized":
-                    self.zone_state[name] = "empty"
-                    self.last_card[name] = ""
+                self.zone_state[name] = "processing"
+                self.pending[name] = True
+                t = Thread(target=self._recognize, args=(name, crop.copy()), daemon=True)
+                t.start()
 
     def _crop_zone(self, frame, zone):
         """Crop a circular zone as a bounding-box rectangle."""
@@ -229,7 +239,7 @@ class ZoneMonitor:
 
             response = self.client.messages.create(
                 model=MODEL,
-                max_tokens=64,
+                max_tokens=20,
                 messages=[{
                     "role": "user",
                     "content": [
@@ -244,16 +254,18 @@ class ZoneMonitor:
                         {
                             "type": "text",
                             "text": (
-                                "Identify the single playing card in this image. "
-                                "Return only the rank and suit, e.g. 'Ace of Hearts'. "
-                                "If no card is clearly visible, say 'No card'."
+                                "What playing card is this? Reply with ONLY the rank "
+                                "and suit in exactly this format: 'Rank of Suit' "
+                                "(e.g. '4 of Clubs', 'King of Hearts'). "
+                                "If you cannot identify the card, reply with exactly: 'No card'"
                             ),
                         },
                     ],
                 }],
             )
 
-            result = response.content[0].text.strip()
+            raw_result = response.content[0].text.strip()
+            result = self._parse_card_result(raw_result)
             elapsed = time.time() - t0
 
             self.last_card[name] = result
@@ -274,10 +286,25 @@ class ZoneMonitor:
         finally:
             self.pending[name] = False
 
+    def _parse_card_result(self, raw):
+        """Extract 'Rank of Suit' from API response, handling verbose replies."""
+        import re
+        # Look for pattern like "4 of Clubs", "King of Hearts", "Ace of Spades"
+        match = re.search(
+            r'(Ace|King|Queen|Jack|10|[2-9])\s+of\s+(Hearts|Diamonds|Clubs|Spades)',
+            raw, re.IGNORECASE
+        )
+        if match:
+            rank = match.group(1).capitalize()
+            suit = match.group(2).capitalize()
+            return f"{rank} of {suit}"
+        return "No card"
+
     def _save_training(self, name, crop, result):
         TRAINING_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe = result.replace(" ", "_").replace("/", "-")
+        # Truncate result for filename — keep only first 30 chars
+        safe = result.replace(" ", "_").replace("/", "-")[:30]
         cv2.imwrite(str(TRAINING_DIR / f"{ts}_{name}_{safe}.jpg"), crop)
         (TRAINING_DIR / f"{ts}_{name}_{safe}.txt").write_text(result)
 
@@ -537,6 +564,8 @@ def main():
     if not cap.isOpened():
         sys.exit(f"  ERROR: cannot open camera index {args.camera}")
 
+    # Try to set 4K resolution — Brio supports it but macOS may limit it
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
 
