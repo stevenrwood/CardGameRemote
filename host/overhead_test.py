@@ -123,6 +123,9 @@ class ZoneMonitor:
     def capture_baselines(self, frame: np.ndarray, zones: list[dict]):
         for zone in zones:
             crop = self._crop_zone(frame, zone)
+            if crop is None:
+                print(f"  WARNING: zone '{zone['name']}' is out of frame bounds")
+                continue
             self.baselines[zone["name"]] = crop.copy()
             self.zone_state[zone["name"]] = "empty"
             self.last_card[zone["name"]] = ""
@@ -137,7 +140,11 @@ class ZoneMonitor:
                 continue
 
             crop = self._crop_zone(frame, zone)
+            if crop is None:
+                continue
             diff = cv2.absdiff(crop, self.baselines[name])
+            if diff is None or diff.size == 0:
+                continue
             mean_diff = float(np.mean(diff))
 
             if mean_diff > self.threshold:
@@ -151,8 +158,15 @@ class ZoneMonitor:
                     self.zone_state[name] = "empty"
                     self.last_card[name] = ""
 
-    def _crop_zone(self, frame: np.ndarray, zone: dict) -> np.ndarray:
-        return frame[zone["y1"]:zone["y2"], zone["x1"]:zone["x2"]]
+    def _crop_zone(self, frame: np.ndarray, zone: dict) -> np.ndarray | None:
+        h, w = frame.shape[:2]
+        x1 = max(0, min(zone["x1"], w - 1))
+        y1 = max(0, min(zone["y1"], h - 1))
+        x2 = max(0, min(zone["x2"], w))
+        y2 = max(0, min(zone["y2"], h))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return frame[y1:y2, x1:x2]
 
     def _recognize(self, name: str, crop: np.ndarray):
         t0 = time.time()
