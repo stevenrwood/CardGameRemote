@@ -23,6 +23,8 @@ from threading import Thread, Event, Lock
 from queue import Queue, Empty
 
 import cv2
+import http.server
+import io
 import numpy as np
 
 # ---------------------------------------------------------------------------
@@ -81,6 +83,196 @@ class SpeechQueue:
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 speech = SpeechQueue()
+
+# ---------------------------------------------------------------------------
+# Log buffer — keeps recent log lines for debug server
+# ---------------------------------------------------------------------------
+
+class LogBuffer:
+    """Thread-safe ring buffer of log lines."""
+
+    def __init__(self, max_lines=200):
+        self._lines = []
+        self._max = max_lines
+        self._lock = Lock()
+
+    def log(self, msg):
+        """Add a line and also print to terminal."""
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}"
+        print(f"  {msg}")
+        with self._lock:
+            self._lines.append(line)
+            if len(self._lines) > self._max:
+                self._lines = self._lines[-self._max:]
+
+    def get_lines(self):
+        with self._lock:
+            return list(self._lines)
+
+log_buffer = LogBuffer()
+
+# ---------------------------------------------------------------------------
+# Debug web server — access logs, snapshots, zone crops remotely
+# ---------------------------------------------------------------------------
+
+_debug_state = None  # set in main() before server starts
+
+class DebugHandler(http.server.BaseHTTPRequestHandler):
+    """Simple HTTP handler for remote debugging."""
+
+    def log_message(self, format, *args):
+        pass  # suppress default request logging
+
+    def do_GET(self):
+        state = _debug_state
+        if state is None:
+            self._respond(500, "text/plain", "Not initialized")
+            return
+
+        if self.path == "/" or self.path == "/debug":
+            self._serve_dashboard(state)
+        elif self.path == "/log":
+            lines = log_buffer.get_lines()
+            self._respond(200, "text/plain", "\n".join(lines))
+        elif self.path == "/snapshot":
+            self._serve_frame(state)
+        elif self.path.startswith("/zone/"):
+            zone_name = self.path[6:]
+            self._serve_zone_crop(state, zone_name)
+        elif self.path == "/calibration":
+            if CALIBRATION_FILE.exists():
+                self._respond(200, "application/json", CALIBRATION_FILE.read_text())
+            else:
+                self._respond(404, "text/plain", "No calibration")
+        elif self.path == "/training":
+            self._serve_training_list()
+        elif self.path.startswith("/training/"):
+            filename = self.path[10:]
+            self._serve_training_file(filename)
+        else:
+            self._respond(404, "text/plain", "Not found")
+
+    def _respond(self, code, content_type, body):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        self.wfile.write(body)
+
+    def _serve_dashboard(self, state):
+        zones_html = ""
+        for zone in state.cal.zones:
+            name = zone["name"]
+            card = state.monitor.last_card.get(name, "")
+            zstate = state.monitor.zone_state.get(name, "empty")
+            color = {"recognized": "#4caf50", "processing": "#ff9800"}.get(zstate, "#888")
+            zones_html += (
+                f'<div style="display:inline-block;margin:8px;padding:12px;'
+                f'border:2px solid {color};border-radius:8px;min-width:120px;text-align:center">'
+                f'<b>{name}</b><br>{zstate}<br>'
+                f'<span style="color:{color};font-size:1.2em">{card}</span><br>'
+                f'<a href="/zone/{name}"><img src="/zone/{name}" width="150"></a>'
+                f'</div>'
+            )
+
+        html = f"""<!DOCTYPE html>
+<html><head><title>Card Scanner Debug</title>
+<meta http-equiv="refresh" content="3">
+<style>body{{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}}
+a{{color:#4fc3f7}}img{{border:1px solid #444;margin:4px}}
+pre{{background:#0d1117;padding:12px;border-radius:6px;max-height:400px;overflow:auto;font-size:0.85em}}</style>
+</head><body>
+<h1>Overhead Card Scanner — Debug</h1>
+<p>Resolution: {state.actual_w}x{state.actual_h} |
+Monitoring: {'ON' if state.monitoring else 'OFF'} |
+Calibrated: {'Yes' if state.cal.is_complete else 'No'}</p>
+<h2>Live Snapshot</h2>
+<a href="/snapshot"><img src="/snapshot" width="640"></a>
+<h2>Zones</h2>
+{zones_html}
+<h2>Log (last 50 lines)</h2>
+<pre>{"<br>".join(log_buffer.get_lines()[-50:])}</pre>
+<h2>Links</h2>
+<ul>
+<li><a href="/log">Full log (text)</a></li>
+<li><a href="/calibration">Calibration JSON</a></li>
+<li><a href="/training">Training data files</a></li>
+</ul>
+</body></html>"""
+        self._respond(200, "text/html", html)
+
+    def _serve_frame(self, state):
+        frame = state.latest_frame
+        if frame is None:
+            self._respond(503, "text/plain", "No frame available")
+            return
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if ok:
+            self._respond(200, "image/jpeg", buf.tobytes())
+        else:
+            self._respond(500, "text/plain", "Encode failed")
+
+    def _serve_zone_crop(self, state, zone_name):
+        frame = state.latest_frame
+        if frame is None:
+            self._respond(503, "text/plain", "No frame")
+            return
+        zone = next((z for z in state.cal.zones if z["name"] == zone_name), None)
+        if zone is None:
+            self._respond(404, "text/plain", f"Zone '{zone_name}' not found")
+            return
+        crop = state.monitor._crop_zone(frame, zone)
+        if crop is None:
+            self._respond(500, "text/plain", "Crop failed")
+            return
+        ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if ok:
+            self._respond(200, "image/jpeg", buf.tobytes())
+        else:
+            self._respond(500, "text/plain", "Encode failed")
+
+    def _serve_training_list(self):
+        if not TRAINING_DIR.exists():
+            self._respond(200, "text/html", "<p>No training data yet</p>")
+            return
+        files = sorted(TRAINING_DIR.iterdir(), reverse=True)
+        html = "<html><body style='font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px'>"
+        html += "<h1>Training Data</h1>"
+        for f in files[:100]:
+            if f.suffix == ".jpg":
+                txt = f.with_suffix(".txt")
+                label = txt.read_text() if txt.exists() else ""
+                html += (f'<div style="display:inline-block;margin:8px;text-align:center">'
+                         f'<a href="/training/{f.name}"><img src="/training/{f.name}" width="200"></a>'
+                         f'<br><small>{f.name}</small><br>{label}</div>')
+        html += "</body></html>"
+        self._respond(200, "text/html", html)
+
+    def _serve_training_file(self, filename):
+        path = TRAINING_DIR / filename
+        if not path.exists():
+            self._respond(404, "text/plain", "Not found")
+            return
+        if path.suffix == ".jpg":
+            self._respond(200, "image/jpeg", path.read_bytes())
+        elif path.suffix == ".txt":
+            self._respond(200, "text/plain", path.read_text())
+        else:
+            self._respond(404, "text/plain", "Unknown file type")
+
+
+DEBUG_PORT = 8888
+
+def start_debug_server(state):
+    global _debug_state
+    _debug_state = state
+    server = http.server.HTTPServer(("0.0.0.0", DEBUG_PORT), DebugHandler)
+    t = Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    log_buffer.log(f"Debug server running at http://localhost:{DEBUG_PORT}")
+
 
 # ---------------------------------------------------------------------------
 # Calibration data — zones are now circles
@@ -153,10 +345,10 @@ class ZoneMonitor:
                 if api_key and api_key != "YOUR_KEY_HERE":
                     self._client = anthropic.Anthropic(api_key=api_key)
                 else:
-                    print("  WARNING: No valid API key. Card recognition disabled.")
-                    print("  Edit local/config.json to add your Anthropic API key.")
+                    log_buffer.log("WARNING: No valid API key. Card recognition disabled.")
+                    log_buffer.log("Edit local/config.json to add your Anthropic API key.")
             except ImportError:
-                print("  WARNING: anthropic package not installed.")
+                log_buffer.log("WARNING: anthropic package not installed.")
         return self._client
 
     def capture_baselines(self, frame, zones):
@@ -227,13 +419,13 @@ class ZoneMonitor:
         t0 = time.time()
         try:
             if self.client is None:
-                print(f"  [{name}] API not available — skipping")
+                log_buffer.log(f"[{name}] API not available — skipping")
                 self.zone_state[name] = "empty"
                 return
 
             ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
             if not ok:
-                print(f"  [{name}] failed to encode image")
+                log_buffer.log(f"[{name}] failed to encode image")
                 return
             b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
 
@@ -270,7 +462,7 @@ class ZoneMonitor:
 
             self.last_card[name] = result
             self.zone_state[name] = "recognized"
-            print(f"  {name}: {result}  ({elapsed:.1f}s)")
+            log_buffer.log(f"{name}: {result}  ({elapsed:.1f}s)")
 
             self._save_training(name, crop, result)
 
@@ -281,7 +473,7 @@ class ZoneMonitor:
                 speech.say(f"{name}, {result}")
 
         except Exception as exc:
-            print(f"  [{name}] API error: {exc}")
+            log_buffer.log(f"[{name}] API error: {exc}")
             self.zone_state[name] = "empty"
         finally:
             self.pending[name] = False
@@ -699,6 +891,9 @@ def main():
     state = AppState(cap, cal, monitor)
 
     print(f"  Camera resolution: {state.actual_w}x{state.actual_h}")
+
+    # Start debug web server
+    start_debug_server(state)
 
     window_name = "Overhead Card Scanner"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
