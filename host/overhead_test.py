@@ -111,6 +111,11 @@ class Calibration:
         self.circle_center = tuple(cc) if cc else None
         self.circle_radius = data.get("circle_radius")
         self.zones = data.get("zones", [])
+        # Validate zone format — must have cx/cy/r (circle), not x1/y1/x2/y2 (old rect)
+        if self.zones and "cx" not in self.zones[0]:
+            print("  Old rectangle calibration found — recalibration needed (press 'c')")
+            self.zones = []
+            return False
         return True
 
     @property
