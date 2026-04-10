@@ -120,6 +120,7 @@ class FrameCapture:
         w, h = resolution.split("x")
         self.width = int(w)
         self.height = int(h)
+        self._lock = Lock()  # prevent concurrent ffmpeg calls
         self._check_ffmpeg()
 
     def _check_ffmpeg(self):
@@ -130,24 +131,28 @@ class FrameCapture:
             sys.exit(1)
 
     def capture(self, output_path=None):
-        path = str(output_path or CAPTURE_FILE)
-        cmd = [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-f", "avfoundation",
-            "-video_size", self.resolution,
-            "-framerate", "5",
-            "-i", f"{self.camera_index}:none",
-            "-frames:v", "1",
-            "-q:v", "2",
-            path
-        ]
+        if not self._lock.acquire(blocking=False):
+            return None  # another capture in progress, skip
         try:
+            path = str(output_path or CAPTURE_FILE)
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "avfoundation",
+                "-video_size", self.resolution,
+                "-framerate", "5",
+                "-i", f"{self.camera_index}:none",
+                "-frames:v", "1",
+                "-q:v", "2",
+                path
+            ]
             subprocess.run(cmd, capture_output=True, timeout=10)
             frame = cv2.imread(path)
             return frame
         except Exception as e:
             log_buffer.log(f"Capture error: {e}")
             return None
+        finally:
+            self._lock.release()
 
 
 # ---------------------------------------------------------------------------
@@ -524,10 +529,18 @@ img{max-width:100%;max-height:100vh}
 </style>
 <script>
 function refresh(){
-  var img=new Image();
-  img.onload=function(){document.getElementById('f').src=img.src;setTimeout(refresh,2000)};
-  img.onerror=function(){setTimeout(refresh,2000)};
-  img.src='/snapshot/cropped?'+Date.now()+Math.random();
+  // Check if server is still running
+  fetch('/api/state').then(function(r){
+    if(!r.ok) return setTimeout(refresh,2000);
+    var img=new Image();
+    img.onload=function(){document.getElementById('f').src=img.src;setTimeout(refresh,2000)};
+    img.onerror=function(){setTimeout(refresh,2000)};
+    img.src='/snapshot/cropped?'+Date.now()+Math.random();
+  }).catch(function(){
+    // Server gone — close this tab
+    document.title='[Closed] Table View';
+    document.body.innerHTML='<p style="color:#666;font-size:2em">Scanner stopped</p>';
+  });
 }
 setTimeout(refresh,2000);
 </script></head><body><img id="f" src="/snapshot/cropped"></body></html>""")
@@ -537,23 +550,23 @@ setTimeout(refresh,2000);
         self._r(200, "text/html", f"""<!DOCTYPE html>
 <html><head><title>Calibrate</title>
 <style>
-body{{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}}
-canvas{{border:1px solid #444;cursor:crosshair;display:block;margin:10px 0}}
+body{{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px;margin:0}}
+canvas{{border:1px solid #444;cursor:crosshair;display:block;margin:10px 0;max-width:100%}}
 #status{{font-size:1.2em;color:#4fc3f7;margin:10px 0}}
 button{{padding:8px 16px;background:#e94560;color:#fff;border:none;border-radius:6px;cursor:pointer;margin:5px}}
 </style></head><body>
 <h1>Calibration</h1>
 <div id="status">Loading image...</div>
-<canvas id="canvas" width="1280" height="720"></canvas>
+<canvas id="canvas"></canvas>
 <button onclick="location.href='/'">Back to Dashboard</button>
 <script>
 var canvas=document.getElementById('canvas'),ctx=canvas.getContext('2d');
 var players={players_js};
 var steps=[];
-var step=0, clicks=[], circleCenter=null, circleRadius=null, zones=[];
+var step=0, circleCenter=null, circleRadius=null, zones=[];
 var previewCenter=null;
+var imgW=0, imgH=0;
 
-// Build step list
 steps.push({{prompt:'Click the CENTER of the felt circle',type:'circle_center'}});
 steps.push({{prompt:'Click the EDGE of the felt circle (at Bill\\'s position)',type:'circle_edge'}});
 for(var i=0;i<players.length;i++){{
@@ -563,39 +576,49 @@ for(var i=0;i<players.length;i++){{
 
 var img=new Image();
 img.onload=function(){{
-  canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;
+  imgW=img.naturalWidth; imgH=img.naturalHeight;
+  // Scale canvas to fit browser width (max 1200px)
+  var maxW=Math.min(window.innerWidth-40, 1200);
+  var scale=maxW/imgW;
+  canvas.width=Math.round(imgW*scale);
+  canvas.height=Math.round(imgH*scale);
+  canvas.dataset.scale=scale;
   redraw();
   document.getElementById('status').textContent=steps[0].prompt;
 }};
 img.src='/snapshot/raw?'+Date.now();
 
+function sc(){{ return parseFloat(canvas.dataset.scale)||1; }}
+
 function redraw(){{
-  ctx.drawImage(img,0,0);
+  var s=sc();
+  ctx.drawImage(img,0,0,canvas.width,canvas.height);
   // Draw circle
   if(circleCenter && circleRadius){{
     ctx.strokeStyle='#fff';ctx.lineWidth=2;
-    ctx.beginPath();ctx.arc(circleCenter[0],circleCenter[1],circleRadius,0,Math.PI*2);ctx.stroke();
+    ctx.beginPath();ctx.arc(circleCenter[0]*s,circleCenter[1]*s,circleRadius*s,0,Math.PI*2);ctx.stroke();
   }}
   // Draw zones
   for(var i=0;i<zones.length;i++){{
     ctx.strokeStyle='#0f0';ctx.lineWidth=2;
-    ctx.beginPath();ctx.arc(zones[i].cx,zones[i].cy,zones[i].r,0,Math.PI*2);ctx.stroke();
+    ctx.beginPath();ctx.arc(zones[i].cx*s,zones[i].cy*s,zones[i].r*s,0,Math.PI*2);ctx.stroke();
     ctx.fillStyle='#0f0';ctx.font='16px sans-serif';
-    ctx.fillText(zones[i].name,zones[i].cx-20,zones[i].cy-zones[i].r-8);
+    ctx.fillText(zones[i].name,zones[i].cx*s-20,zones[i].cy*s-zones[i].r*s-8);
   }}
   // Draw preview circle
   if(previewCenter){{
     ctx.strokeStyle='#ff0';ctx.lineWidth=2;ctx.setLineDash([5,5]);
-    ctx.beginPath();ctx.arc(previewCenter[0],previewCenter[1],previewCenter[2]||0,0,Math.PI*2);ctx.stroke();
+    ctx.beginPath();ctx.arc(previewCenter[0]*s,previewCenter[1]*s,(previewCenter[2]||0)*s,0,Math.PI*2);ctx.stroke();
     ctx.setLineDash([]);
   }}
 }}
 
 canvas.addEventListener('click',function(e){{
   var rect=canvas.getBoundingClientRect();
-  var sx=canvas.width/rect.width, sy=canvas.height/rect.height;
-  var x=Math.round((e.clientX-rect.left)*sx);
-  var y=Math.round((e.clientY-rect.top)*sy);
+  var s=sc();
+  // Convert click to image coordinates (not canvas coordinates)
+  var x=Math.round((e.clientX-rect.left)*(imgW/rect.width));
+  var y=Math.round((e.clientY-rect.top)*(imgH/rect.height));
 
   if(step>=steps.length) return;
   var s=steps[step];
@@ -643,9 +666,8 @@ canvas.addEventListener('click',function(e){{
 canvas.addEventListener('mousemove',function(e){{
   if(!previewCenter) return;
   var rect=canvas.getBoundingClientRect();
-  var sx=canvas.width/rect.width, sy=canvas.height/rect.height;
-  var x=Math.round((e.clientX-rect.left)*sx);
-  var y=Math.round((e.clientY-rect.top)*sy);
+  var x=Math.round((e.clientX-rect.left)*(imgW/rect.width));
+  var y=Math.round((e.clientY-rect.top)*(imgH/rect.height));
   var dx=x-previewCenter[0],dy=y-previewCenter[1];
   previewCenter[2]=Math.round(Math.sqrt(dx*dx+dy*dy));
   redraw();
