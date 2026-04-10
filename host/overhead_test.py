@@ -504,8 +504,15 @@ def main():
 
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
-            scale_x = state.actual_w / 1280
-            scale_y = state.actual_h / 720
+            # Get actual window size (may differ from requested 1280x720)
+            try:
+                _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
+                if win_w <= 0 or win_h <= 0:
+                    win_w, win_h = 1280, 720
+            except Exception:
+                win_w, win_h = 1280, 720
+            scale_x = state.actual_w / win_w
+            scale_y = state.actual_h / win_h
             fx = int(x * scale_x)
             fy = int(y * scale_y)
             state.click_queue.put((fx, fy))
