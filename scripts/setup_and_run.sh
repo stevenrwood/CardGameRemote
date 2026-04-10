@@ -79,7 +79,23 @@ fi
 info "Activating virtual environment..."
 source "$VENV_DIR/bin/activate"
 
-# --- Install dependencies ---
+# --- Install Homebrew if needed ---
+if ! command -v brew &>/dev/null; then
+    info "Installing Homebrew..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # Add brew to path for Apple Silicon
+    if [ -f /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    fi
+fi
+
+# --- Install ffmpeg if needed ---
+if ! command -v ffmpeg &>/dev/null; then
+    info "Installing ffmpeg..."
+    brew install ffmpeg
+fi
+
+# --- Install Python dependencies ---
 info "Installing/updating dependencies..."
 pip install --quiet --upgrade pip
 pip install --quiet opencv-python numpy anthropic

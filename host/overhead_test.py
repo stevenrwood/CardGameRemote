@@ -2,18 +2,22 @@
 """
 Overhead Camera Card Recognition Test Harness
 
-Captures video from a ceiling-mounted Logitech Brio 4K camera, monitors
-designated landing zones on a poker table for card placement, and uses
-Claude's vision API to identify cards.
+Captures still images from a Logitech Brio 4K camera using ffmpeg,
+monitors designated landing zones on a poker table for card placement,
+and uses Claude's vision API to identify cards.
+
+No live video — captures a JPEG every ~2 seconds. Terminal-only UI.
+Debug dashboard at http://localhost:8888.
 
 Usage:
-    python overhead_test.py [--camera 0] [--threshold 30.0]
+    python overhead_test.py [--camera 0] [--threshold 30.0] [--resolution 1920x1080]
 """
 
 import argparse
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -24,7 +28,6 @@ from queue import Queue, Empty
 
 import cv2
 import http.server
-import io
 import numpy as np
 
 # ---------------------------------------------------------------------------
@@ -34,14 +37,14 @@ import numpy as np
 PLAYER_NAMES = ["Steve", "Bill", "David", "Joe", "Rodney"]
 NUM_ZONES = len(PLAYER_NAMES)
 
-DEFAULT_CAMERA_INDEX = 0          # 0 = Brio on Neo, 1 = built-in camera
+DEFAULT_CAMERA_INDEX = 0
 DEFAULT_THRESHOLD = 30.0
-CAMERA_WIDTH = 3840
-CAMERA_HEIGHT = 2160
+DEFAULT_RESOLUTION = "1920x1080"
 
 CALIBRATION_FILE = Path(__file__).parent / "calibration.json"
 TRAINING_DIR = Path(__file__).parent / "training_data"
 CONFIG_FILE = Path(__file__).parent.parent / "local" / "config.json"
+CAPTURE_FILE = Path("/tmp/card_scanner_frame.jpg")
 
 MODEL = "claude-sonnet-4-20250514"
 
@@ -55,21 +58,17 @@ COLOR_RED    = (0, 0, 255)
 # ---------------------------------------------------------------------------
 
 class SpeechQueue:
-    """Speaks phrases one at a time, never overlapping. Drops stale messages."""
-
     def __init__(self):
         self._queue = Queue()
         self._thread = Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def say(self, phrase):
-        """Queue a phrase. If queue is backing up, only keep the latest per player."""
         self._queue.put(phrase)
 
     def _run(self):
         while True:
             phrase = self._queue.get()
-            # Drain any queued phrases — keep only the latest one per player
             latest = {phrase: phrase}
             try:
                 while True:
@@ -77,7 +76,6 @@ class SpeechQueue:
                     latest[p] = p
             except Empty:
                 pass
-            # Speak each unique phrase synchronously (blocks until done)
             for p in latest.values():
                 subprocess.run(["say", p],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -85,19 +83,16 @@ class SpeechQueue:
 speech = SpeechQueue()
 
 # ---------------------------------------------------------------------------
-# Log buffer — keeps recent log lines for debug server
+# Log buffer
 # ---------------------------------------------------------------------------
 
 class LogBuffer:
-    """Thread-safe ring buffer of log lines."""
-
     def __init__(self, max_lines=200):
         self._lines = []
         self._max = max_lines
         self._lock = Lock()
 
     def log(self, msg):
-        """Add a line and also print to terminal."""
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
         print(f"  {msg}")
@@ -113,16 +108,66 @@ class LogBuffer:
 log_buffer = LogBuffer()
 
 # ---------------------------------------------------------------------------
-# Debug web server — access logs, snapshots, zone crops remotely
+# Image capture via ffmpeg
 # ---------------------------------------------------------------------------
 
-_debug_state = None  # set in main() before server starts
+class FrameCapture:
+    """Captures still JPEG frames from a camera using ffmpeg."""
+
+    def __init__(self, camera_index, resolution):
+        self.camera_index = camera_index
+        self.resolution = resolution
+        w, h = resolution.split("x")
+        self.width = int(w)
+        self.height = int(h)
+        self._check_ffmpeg()
+
+    def _check_ffmpeg(self):
+        try:
+            subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
+        except FileNotFoundError:
+            log_buffer.log("ERROR: ffmpeg not found. Install with: brew install ffmpeg")
+            sys.exit(1)
+
+    def capture(self, output_path=None):
+        """Capture a single frame. Returns the image as numpy array, or None."""
+        path = str(output_path or CAPTURE_FILE)
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "avfoundation",
+            "-video_size", self.resolution,
+            "-framerate", "5",
+            "-i", f"{self.camera_index}:none",
+            "-frames:v", "1",
+            "-q:v", "2",
+            path
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=10)
+            if result.returncode != 0:
+                err = result.stderr.decode().strip()
+                if err:
+                    log_buffer.log(f"ffmpeg error: {err}")
+                return None
+            frame = cv2.imread(path)
+            return frame
+        except subprocess.TimeoutExpired:
+            log_buffer.log("ffmpeg capture timed out")
+            return None
+        except Exception as e:
+            log_buffer.log(f"Capture error: {e}")
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Debug web server
+# ---------------------------------------------------------------------------
+
+_debug_state = None
 
 class DebugHandler(http.server.BaseHTTPRequestHandler):
-    """Simple HTTP handler for remote debugging."""
-
     def log_message(self, format, *args):
-        pass  # suppress default request logging
+        pass
 
     def do_GET(self):
         state = _debug_state
@@ -133,13 +178,11 @@ class DebugHandler(http.server.BaseHTTPRequestHandler):
         if self.path == "/" or self.path == "/debug":
             self._serve_dashboard(state)
         elif self.path == "/log":
-            lines = log_buffer.get_lines()
-            self._respond(200, "text/plain", "\n".join(lines))
+            self._respond(200, "text/plain", "\n".join(log_buffer.get_lines()))
         elif self.path == "/snapshot":
             self._serve_frame(state)
         elif self.path.startswith("/zone/"):
-            zone_name = self.path[6:]
-            self._serve_zone_crop(state, zone_name)
+            self._serve_zone_crop(state, self.path[6:])
         elif self.path == "/calibration":
             if CALIBRATION_FILE.exists():
                 self._respond(200, "application/json", CALIBRATION_FILE.read_text())
@@ -148,8 +191,7 @@ class DebugHandler(http.server.BaseHTTPRequestHandler):
         elif self.path == "/training":
             self._serve_training_list()
         elif self.path.startswith("/training/"):
-            filename = self.path[10:]
-            self._serve_training_file(filename)
+            self._serve_training_file(self.path[10:])
         else:
             self._respond(404, "text/plain", "Not found")
 
@@ -177,6 +219,7 @@ class DebugHandler(http.server.BaseHTTPRequestHandler):
                 f'</div>'
             )
 
+        res = f"{state.capture.width}x{state.capture.height}" if state.capture else "?"
         html = f"""<!DOCTYPE html>
 <html><head><title>Card Scanner Debug</title>
 <meta http-equiv="refresh" content="3">
@@ -185,10 +228,10 @@ a{{color:#4fc3f7}}img{{border:1px solid #444;margin:4px}}
 pre{{background:#0d1117;padding:12px;border-radius:6px;max-height:400px;overflow:auto;font-size:0.85em}}</style>
 </head><body>
 <h1>Overhead Card Scanner — Debug</h1>
-<p>Resolution: {state.actual_w}x{state.actual_h} |
+<p>Resolution: {res} |
 Monitoring: {'ON' if state.monitoring else 'OFF'} |
 Calibrated: {'Yes' if state.cal.is_complete else 'No'}</p>
-<h2>Live Snapshot</h2>
+<h2>Latest Capture</h2>
 <a href="/snapshot"><img src="/snapshot" width="640"></a>
 <h2>Zones</h2>
 {zones_html}
@@ -275,14 +318,14 @@ def start_debug_server(state):
 
 
 # ---------------------------------------------------------------------------
-# Calibration data — zones are now circles
+# Calibration data — zones are circles
 # ---------------------------------------------------------------------------
 
 class Calibration:
     def __init__(self):
-        self.circle_center = None   # (x, y) felt circle center
-        self.circle_radius = None   # felt circle radius in pixels
-        self.zones = []             # [{"name", "cx", "cy", "r"}, ...]
+        self.circle_center = None
+        self.circle_radius = None
+        self.zones = []
 
     def save(self, path=CALIBRATION_FILE):
         data = {
@@ -303,7 +346,6 @@ class Calibration:
         self.circle_center = tuple(cc) if cc else None
         self.circle_radius = data.get("circle_radius")
         self.zones = data.get("zones", [])
-        # Validate zone format — must have cx/cy/r (circle), not x1/y1/x2/y2 (old rect)
         if self.zones and "cx" not in self.zones[0]:
             print("  Old rectangle calibration found — recalibration needed (press 'c')")
             self.zones = []
@@ -320,16 +362,63 @@ class Calibration:
 
 
 # ---------------------------------------------------------------------------
+# Image helpers
+# ---------------------------------------------------------------------------
+
+def crop_to_felt_circle(frame, cal):
+    """Mask frame to the felt circle, black outside."""
+    if cal.circle_center is None or cal.circle_radius is None:
+        return frame
+    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    cv2.circle(mask, cal.circle_center, cal.circle_radius, 255, -1)
+    result = cv2.bitwise_and(frame, frame, mask=mask)
+    return result
+
+def draw_overlay(frame, cal, monitor, flash_zone=None, flash_on=False):
+    """Draw zone circles and labels on frame."""
+    if cal.circle_center and cal.circle_radius:
+        cv2.circle(frame, cal.circle_center, cal.circle_radius, COLOR_WHITE, 2)
+
+    for zone in cal.zones:
+        name = zone["name"]
+        cx, cy, r = zone["cx"], zone["cy"], zone["r"]
+
+        if flash_zone == name:
+            if flash_on:
+                cv2.circle(frame, (cx, cy), r, COLOR_RED, 4)
+                cv2.putText(frame, name, (cx - 30, cy - r - 10),
+                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_RED, 2)
+            continue
+
+        zstate = monitor.zone_state.get(name, "empty")
+        if zstate == "recognized":
+            color = COLOR_GREEN
+        elif zstate == "processing":
+            color = COLOR_YELLOW
+        else:
+            color = COLOR_WHITE
+
+        cv2.circle(frame, (cx, cy), r, color, 2)
+        cv2.putText(frame, name, (cx - 30, cy - r - 10),
+                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        card = monitor.last_card.get(name, "")
+        if card:
+            cv2.putText(frame, card, (cx - 60, cy + r + 25),
+                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_GREEN, 2)
+
+
+# ---------------------------------------------------------------------------
 # Zone monitor — change detection + Claude API
 # ---------------------------------------------------------------------------
 
 class ZoneMonitor:
     def __init__(self, threshold):
         self.threshold = threshold
-        self.baselines = {}       # name -> baseline crop
-        self.last_card = {}       # name -> "Ace of Hearts"
-        self.zone_state = {}      # name -> "empty"|"processing"|"recognized"
-        self.pending = {}         # name -> True if API call in flight
+        self.baselines = {}
+        self.last_card = {}
+        self.zone_state = {}
+        self.pending = {}
         self._client = None
 
     @property
@@ -355,7 +444,7 @@ class ZoneMonitor:
         for zone in zones:
             crop = self._crop_zone(frame, zone)
             if crop is None or crop.size == 0:
-                print(f"  WARNING: zone '{zone['name']}' is out of frame bounds")
+                log_buffer.log(f"WARNING: zone '{zone['name']}' out of frame bounds")
                 continue
             self.baselines[zone["name"]] = crop.copy()
             self.zone_state[zone["name"]] = "empty"
@@ -369,9 +458,7 @@ class ZoneMonitor:
                 continue
             if self.pending.get(name, False):
                 continue
-            # Don't re-scan zones that already have a recognized card
             if self.zone_state.get(name) == "recognized":
-                # But check if card was removed (zone returned to baseline)
                 crop = self._crop_zone(frame, zone)
                 if crop is None or crop.size == 0:
                     continue
@@ -381,7 +468,6 @@ class ZoneMonitor:
                 diff = cv2.absdiff(crop, baseline)
                 mean_diff = float(np.mean(diff))
                 if mean_diff < self.threshold:
-                    # Card removed — reset to empty
                     self.zone_state[name] = "empty"
                     self.last_card[name] = ""
                 continue
@@ -389,11 +475,9 @@ class ZoneMonitor:
             crop = self._crop_zone(frame, zone)
             if crop is None or crop.size == 0:
                 continue
-
             baseline = self.baselines[name]
             if crop.shape != baseline.shape:
                 continue
-
             diff = cv2.absdiff(crop, baseline)
             mean_diff = float(np.mean(diff))
 
@@ -403,8 +487,29 @@ class ZoneMonitor:
                 t = Thread(target=self._recognize, args=(name, crop.copy()), daemon=True)
                 t.start()
 
+    def check_single_zone(self, frame, zone):
+        """Check a single zone for card presence. Returns crop if card detected, None otherwise."""
+        name = zone["name"]
+        if name not in self.baselines:
+            return None
+        crop = self._crop_zone(frame, zone)
+        if crop is None or crop.size == 0:
+            return None
+        baseline = self.baselines[name]
+        if crop.shape != baseline.shape:
+            return None
+        diff = cv2.absdiff(crop, baseline)
+        mean_diff = float(np.mean(diff))
+        if mean_diff > self.threshold:
+            return crop.copy()
+        return None
+
+    def recognize_sync(self, name, crop):
+        """Run recognition synchronously. Returns result string."""
+        self._recognize(name, crop)
+        return self.last_card.get(name, "No card")
+
     def _crop_zone(self, frame, zone):
-        """Crop a circular zone as a bounding-box rectangle."""
         h, w = frame.shape[:2]
         cx, cy, r = zone["cx"], zone["cy"], zone["r"]
         x1 = max(0, cx - r)
@@ -466,7 +571,6 @@ class ZoneMonitor:
 
             self._save_training(name, crop, result)
 
-            # Voice announcement — only on successful recognition
             if "no card" not in result.lower():
                 speech.say(f"{name}, {result}")
 
@@ -477,9 +581,6 @@ class ZoneMonitor:
             self.pending[name] = False
 
     def _parse_card_result(self, raw):
-        """Extract 'Rank of Suit' from API response, handling verbose replies."""
-        import re
-        # Look for pattern like "4 of Clubs", "King of Hearts", "Ace of Spades"
         match = re.search(
             r'(Ace|King|Queen|Jack|10|[2-9])\s+of\s+(Hearts|Diamonds|Clubs|Spades)',
             raw, re.IGNORECASE
@@ -493,64 +594,9 @@ class ZoneMonitor:
     def _save_training(self, name, crop, result):
         TRAINING_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Truncate result for filename — keep only first 30 chars
         safe = result.replace(" ", "_").replace("/", "-")[:30]
         cv2.imwrite(str(TRAINING_DIR / f"{ts}_{name}_{safe}.jpg"), crop)
         (TRAINING_DIR / f"{ts}_{name}_{safe}.txt").write_text(result)
-
-
-# ---------------------------------------------------------------------------
-# Drawing helpers — circular zones
-# ---------------------------------------------------------------------------
-
-def draw_overlay(frame, cal, monitor, monitoring, cal_step="", preview_circle=None,
-                 flash_zone=None, flash_on=False):
-    # Felt circle
-    if cal.circle_center and cal.circle_radius:
-        cv2.circle(frame, cal.circle_center, cal.circle_radius, COLOR_WHITE, 2)
-
-    # Landing zones (circles)
-    for zone in cal.zones:
-        name = zone["name"]
-        cx, cy, r = zone["cx"], zone["cy"], zone["r"]
-
-        # Flashing zone — alternate between red and off
-        if flash_zone == name:
-            if flash_on:
-                cv2.circle(frame, (cx, cy), r, COLOR_RED, 4)
-                cv2.putText(frame, name, (cx - 30, cy - r - 10),
-                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_RED, 2)
-            continue
-
-        state = monitor.zone_state.get(name, "empty")
-        if state == "recognized":
-            color = COLOR_GREEN
-        elif state == "processing":
-            color = COLOR_YELLOW
-        else:
-            color = COLOR_WHITE
-
-        cv2.circle(frame, (cx, cy), r, color, 2)
-        cv2.putText(frame, name, (cx - 30, cy - r - 10),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-
-        card = monitor.last_card.get(name, "")
-        if card:
-            cv2.putText(frame, card, (cx - 60, cy + r + 25),
-                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_GREEN, 2)
-
-    # Preview circle during calibration (follows mouse)
-    if preview_circle:
-        pcx, pcy, pr = preview_circle
-        cv2.circle(frame, (pcx, pcy), pr, COLOR_YELLOW, 2)
-
-    # Status text
-    if cal_step:
-        cv2.putText(frame, cal_step, (20, 50),
-                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, COLOR_WHITE, 3)
-    elif monitoring:
-        cv2.putText(frame, "MONITORING — place cards in zones", (20, 50),
-                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, COLOR_GREEN, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -558,89 +604,45 @@ def draw_overlay(frame, cal, monitor, monitoring, cal_step="", preview_circle=No
 # ---------------------------------------------------------------------------
 
 class AppState:
-    def __init__(self, cap, cal, monitor):
-        self.cap = cap
+    def __init__(self, capture, cal, monitor):
+        self.capture = capture
         self.cal = cal
         self.monitor = monitor
         self.monitoring = False
         self.baselines_captured = False
-        self.cal_step = ""
         self.latest_frame = None
         self.quit_flag = False
-        self.actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        self.click_queue = Queue()
-        self.command_queue = Queue()
-
-        # For zone circle preview during calibration
-        self.preview_circle = None     # (cx, cy, r) or None
-        self.zone_center_pending = None  # (cx, cy) waiting for radius click
-        self.mouse_pos = None          # current mouse position in frame coords
-
-        # For flashing zones during test mode
-        self.flash_zone = None         # zone name to flash, or None
-        self.flash_start = 0.0         # time when flash started
-
-        # For test recognition mode
-        self.test_result = None        # result from test recognition
-        self.test_done = Event()
+        self.flash_zone = None
+        self.flash_start = 0.0
 
 
 # ---------------------------------------------------------------------------
-# Input thread
+# Terminal UI commands
 # ---------------------------------------------------------------------------
 
-def input_thread(state):
-    def print_menu():
-        print("\n╔══════════════════════════════════════════╗")
-        print("║       Overhead Card Scanner              ║")
-        print("╠══════════════════════════════════════════╣")
-        print("║  c = calibrate felt circle + zones       ║")
-        print("║  t = test recognition (zone by zone)     ║")
-        print("║  m = start/stop monitoring               ║")
-        print("║  r = reset baselines (clear table first) ║")
-        print("║  s = save a snapshot                     ║")
-        print("║  q = quit                                ║")
-        print("╚══════════════════════════════════════════╝")
-
-    if state.cal.is_complete:
-        print(f"\n  Calibration loaded — {len(state.cal.zones)} zones defined")
-    else:
-        print("\n  No calibration found")
-
-    print_menu()
-
-    try:
-        while not state.quit_flag:
-            cmd = input("\n  Enter command: ").strip().lower()
-
-            if cmd == "q":
-                print("\n  Shutting down...")
-                state.quit_flag = True
-                break
-            elif cmd == "c":
-                do_calibrate_terminal(state)
-            elif cmd == "t":
-                do_test_recognition(state)
-            elif cmd == "m":
-                do_monitor_toggle_terminal(state)
-            elif cmd == "r":
-                do_reset_baselines_terminal(state)
-            elif cmd == "s":
-                state.command_queue.put("snapshot")
-            elif cmd == "":
-                continue
-            else:
-                print(f"  Unknown command: '{cmd}'")
-                print_menu()
-
-    except (KeyboardInterrupt, EOFError):
-        print("\n  Interrupted.")
-        state.quit_flag = True
+def print_menu():
+    print("\n╔══════════════════════════════════════════╗")
+    print("║       Overhead Card Scanner              ║")
+    print("╠══════════════════════════════════════════╣")
+    print("║  c = calibrate felt circle + zones       ║")
+    print("║  t = test recognition (zone by zone)     ║")
+    print("║  m = start/stop monitoring               ║")
+    print("║  r = reset baselines (clear table first) ║")
+    print("║  s = save a snapshot                     ║")
+    print("║  q = quit                                ║")
+    print("╚══════════════════════════════════════════╝")
 
 
-def do_calibrate_terminal(state):
+def capture_frame(state):
+    """Capture a frame and update state."""
+    frame = state.capture.capture()
+    if frame is not None:
+        state.latest_frame = frame.copy()
+    return frame
+
+
+def do_calibrate(state):
+    """Interactive calibration using OpenCV window for clicks."""
     print("\n  Calibration steps:")
     print("    1. Click the CENTER of the black felt circle")
     print(f"    2. Click a point on the EDGE of the felt circle (at Bill's position)")
@@ -655,108 +657,97 @@ def do_calibrate_terminal(state):
     state.cal.circle_center = None
     state.cal.circle_radius = None
     state.cal.zones = []
-    state.preview_circle = None
-    state.zone_center_pending = None
+
+    # Capture a frame and show it in OpenCV window for clicking
+    frame = capture_frame(state)
+    if frame is None:
+        print("  ERROR: Could not capture frame for calibration")
+        return
+
+    window_name = "Calibration"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, 1280, 720)
+
+    clicks = []
+    preview_center = [None]  # mutable for closure
+    mouse_pos = [None]
+
+    actual_h, actual_w = frame.shape[:2]
+
+    def get_frame_coords(x, y):
+        try:
+            _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
+            if win_w <= 0 or win_h <= 0:
+                win_w, win_h = 1280, 720
+        except Exception:
+            win_w, win_h = 1280, 720
+        return int(x * actual_w / win_w), int(y * actual_h / win_h)
+
+    def on_mouse(event, x, y, flags, param):
+        fx, fy = get_frame_coords(x, y)
+        if event == cv2.EVENT_LBUTTONDOWN:
+            clicks.append((fx, fy))
+        elif event == cv2.EVENT_MOUSEMOVE:
+            mouse_pos[0] = (fx, fy)
+
+    cv2.setMouseCallback(window_name, on_mouse)
 
     def wait_for_click(prompt):
         print(f"\n  >>> {prompt}")
-        state.cal_step = prompt
-        while not state.click_queue.empty():
-            try:
-                state.click_queue.get_nowait()
-            except Empty:
-                break
+        clicks.clear()
         while True:
-            try:
-                result = state.click_queue.get(timeout=0.1)
-                state.cal_step = ""
-                return result
-            except Empty:
-                if state.quit_flag:
-                    return None
+            display = frame.copy()
+            # Draw what we have so far
+            if state.cal.circle_center and state.cal.circle_radius:
+                cv2.circle(display, state.cal.circle_center, state.cal.circle_radius, COLOR_WHITE, 2)
+            for z in state.cal.zones:
+                cv2.circle(display, (z["cx"], z["cy"]), z["r"], COLOR_GREEN, 2)
+                cv2.putText(display, z["name"], (z["cx"] - 30, z["cy"] - z["r"] - 10),
+                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_GREEN, 2)
+            # Draw preview circle if sizing a zone
+            if preview_center[0] and mouse_pos[0]:
+                pcx, pcy = preview_center[0]
+                mx, my = mouse_pos[0]
+                pr = int(np.hypot(mx - pcx, my - pcy))
+                cv2.circle(display, (pcx, pcy), pr, COLOR_YELLOW, 2)
+            cv2.putText(display, prompt, (20, 50),
+                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_WHITE, 2)
+            cv2.imshow(window_name, display)
+            cv2.waitKey(30)
+            if clicks:
+                return clicks[0]
 
-    # Step 1: Felt circle center
+    # Step 1: Circle center
     pt = wait_for_click("Click the CENTER of the felt circle")
-    if pt is None:
-        return
     state.cal.circle_center = pt
     print(f"      Center set at ({pt[0]}, {pt[1]})")
 
-    # Step 2: Felt circle edge
+    # Step 2: Circle edge
     pt = wait_for_click("Click the EDGE of the felt circle (at Bill's position)")
-    if pt is None:
-        return
     cx, cy = state.cal.circle_center
     state.cal.circle_radius = int(np.hypot(pt[0] - cx, pt[1] - cy))
     print(f"      Radius: {state.cal.circle_radius}px")
 
-    # Steps 3-7: Player zones (circle: click center, move mouse to size, click to lock)
+    # Steps 3-7: Player zones
     for i, name in enumerate(PLAYER_NAMES):
-        # Click center
         pt = wait_for_click(f"Click CENTER of {name}'s zone")
-        if pt is None:
-            return
         zone_cx, zone_cy = pt
         print(f"      Center at ({zone_cx}, {zone_cy})")
 
-        # Now show preview circle tracking mouse for radius
-        state.zone_center_pending = (zone_cx, zone_cy)
-        state.cal_step = f"Move mouse to set {name}'s zone size, then click"
-
+        preview_center[0] = (zone_cx, zone_cy)
         pt2 = wait_for_click(f"Move mouse to set {name}'s zone size, then click")
-        if pt2 is None:
-            return
+        preview_center[0] = None
 
         zone_r = int(np.hypot(pt2[0] - zone_cx, pt2[1] - zone_cy))
-        state.zone_center_pending = None
-        state.preview_circle = None
-
-        state.cal.zones.append({
-            "name": name,
-            "cx": zone_cx,
-            "cy": zone_cy,
-            "r": zone_r,
-        })
+        state.cal.zones.append({"name": name, "cx": zone_cx, "cy": zone_cy, "r": zone_r})
         print(f"      Zone '{name}' defined — radius {zone_r}px")
 
+    cv2.destroyWindow(window_name)
     state.cal.save()
     print("\n  Calibration complete!")
 
 
-def do_monitor_toggle_terminal(state):
-    if not state.cal.is_complete:
-        print("\n  Cannot monitor — calibrate first (press 'c')")
-        return
-
-    if state.monitoring:
-        state.monitoring = False
-        print("\n  Monitoring STOPPED")
-    else:
-        print("\n  Starting monitoring mode.")
-        print("  Make sure all landing zones are EMPTY (no cards on the table).")
-        input("  Press Enter when table is clear...")
-        state.command_queue.put("capture_baselines")
-        time.sleep(0.3)
-        state.monitoring = True
-        print("  Baselines captured. Monitoring STARTED.")
-        print("  Place cards in landing zones — recognition is automatic.")
-        print("  Recognized cards will be announced by voice.")
-
-
-def do_reset_baselines_terminal(state):
-    if not state.cal.is_complete:
-        print("\n  Cannot reset — calibrate first (press 'c')")
-        return
-    print("\n  Resetting baselines.")
-    print("  Make sure all landing zones are EMPTY.")
-    input("  Press Enter when table is clear...")
-    state.command_queue.put("capture_baselines")
-    time.sleep(0.3)
-    print("  Baselines recaptured.")
-
-
 def do_test_recognition(state):
-    """Test recognition zone by zone with interactive feedback."""
     if not state.cal.is_complete:
         print("\n  Cannot test — calibrate first (press 'c')")
         return
@@ -766,100 +757,143 @@ def do_test_recognition(state):
     print("  Make sure the table is CLEAR of all cards.")
     input("  Press Enter when table is clear...")
 
-    # Capture fresh baselines
-    state.command_queue.put("capture_baselines")
-    time.sleep(0.5)
+    # Capture baseline
+    frame = capture_frame(state)
+    if frame is None:
+        print("  ERROR: Could not capture frame")
+        return
+    state.monitor.capture_baselines(frame, state.cal.zones)
 
     for zone in state.cal.zones:
         name = zone["name"]
         print(f"\n  --- Testing {name}'s zone ---")
         print(f"  Place a face-up card in {name}'s zone.")
-        print(f"  (circle will flash while waiting for card)")
 
         recognized = False
         attempts = 0
         max_attempts = 3
 
         while not recognized and attempts < max_attempts:
-            # Flash the zone circle while waiting
-            state.flash_zone = name
-            state.flash_start = time.time()
-
-            # Poll for card detection — keep trying for 30 seconds
+            # Poll for card every 2 seconds for up to 30 seconds
             card_found = False
             poll_start = time.time()
+
             while time.time() - poll_start < 30.0:
-                state.test_result = None
-                state.test_done.clear()
-                state.command_queue.put(("test_recognize", name))
+                frame = capture_frame(state)
+                if frame is None:
+                    time.sleep(2)
+                    continue
 
-                got_result = state.test_done.wait(timeout=2.0)
-
-                if got_result and state.test_result is not None:
-                    if state.test_result != "No card":
+                crop = state.monitor.check_single_zone(frame, zone)
+                if crop is not None:
+                    # Card detected — try recognition
+                    log_buffer.log(f"[{name}] Card detected, recognizing...")
+                    result = state.monitor.recognize_sync(name, crop)
+                    if result != "No card":
                         card_found = True
                         break
-                    # API said "No card" — keep trying, card might need repositioning
-                    log_buffer.log(f"[{name}] API returned 'No card' — retrying...")
+                    else:
+                        log_buffer.log(f"[{name}] API returned 'No card' — retrying...")
 
-                time.sleep(1.0)  # wait between polls
-
-            state.flash_zone = None
+                time.sleep(2)
 
             if not card_found:
                 attempts += 1
                 if attempts < max_attempts:
                     print(f"  No card recognized. Try repositioning... (attempt {attempts + 1}/{max_attempts})")
-                    # Flash circle to indicate failure — no voice
-                    state.flash_zone = name
-                    state.flash_start = time.time()
                     time.sleep(3)
-                    state.flash_zone = None
                 continue
 
-            result = state.test_result
+            result = state.monitor.last_card.get(name, "No card")
             print(f"  Recognized: {result}")
             speech.say(f"{name}, {result}")
 
-            # Wait for click (confirm) or 5 seconds (retry)
-            print(f"  Click in camera window to confirm, or wait 5s to retry...")
-
-            # Clear stale clicks
-            while not state.click_queue.empty():
-                try:
-                    state.click_queue.get_nowait()
-                except Empty:
-                    break
-
-            try:
-                state.click_queue.get(timeout=5.0)
-                print(f"  Confirmed!")
-                recognized = True
-            except Empty:
-                # No click — flash and retry
+            print(f"  Press Enter to confirm, or 'n' to retry...")
+            resp = input("  ").strip().lower()
+            if resp == "n":
                 attempts += 1
                 if attempts < max_attempts:
-                    print(f"  No confirmation. Retrying... (attempt {attempts + 1}/{max_attempts})")
-                    state.flash_zone = name
-                    state.flash_start = time.time()
-                    time.sleep(2)
-                    state.flash_zone = None
+                    print(f"  Retrying... (attempt {attempts + 1}/{max_attempts})")
+                continue
+            else:
+                print(f"  Confirmed!")
+                recognized = True
 
         if not recognized:
             print(f"  Skipping {name}'s zone after {max_attempts} attempts.")
 
-        # Wait for card to be removed before next player
         if recognized:
             print(f"  Remove the card from {name}'s zone.")
             input("  Press Enter when card is removed...")
 
     print("\n  Test complete!")
-    state.command_queue.put("capture_baselines")
-    time.sleep(0.3)
+
+
+def do_monitor(state):
+    if not state.cal.is_complete:
+        print("\n  Cannot monitor — calibrate first (press 'c')")
+        return
+
+    print("\n  Starting monitoring mode.")
+    print("  Make sure all landing zones are EMPTY (no cards on the table).")
+    input("  Press Enter when table is clear...")
+
+    frame = capture_frame(state)
+    if frame is None:
+        print("  ERROR: Could not capture frame")
+        return
+    state.monitor.capture_baselines(frame, state.cal.zones)
+    state.monitoring = True
+    log_buffer.log("Monitoring STARTED — capturing every 2 seconds")
+    print("  Place cards in landing zones — recognition is automatic.")
+    print("  Press Enter to stop monitoring.")
+
+    # Run monitoring in background
+    def monitor_loop():
+        while state.monitoring and not state.quit_flag:
+            frame = capture_frame(state)
+            if frame is not None:
+                state.monitor.check_zones(frame, state.cal.zones)
+            time.sleep(2)
+
+    t = Thread(target=monitor_loop, daemon=True)
+    t.start()
+
+    input()  # Wait for Enter to stop
+    state.monitoring = False
+    log_buffer.log("Monitoring STOPPED")
+
+
+def do_reset_baselines(state):
+    if not state.cal.is_complete:
+        print("\n  Cannot reset — calibrate first (press 'c')")
+        return
+    print("\n  Resetting baselines.")
+    print("  Make sure all landing zones are EMPTY.")
+    input("  Press Enter when table is clear...")
+    frame = capture_frame(state)
+    if frame is not None:
+        state.monitor.capture_baselines(frame, state.cal.zones)
+        print("  Baselines recaptured.")
+    else:
+        print("  ERROR: Could not capture frame")
+
+
+def do_snapshot(state):
+    frame = capture_frame(state)
+    if frame is not None:
+        # Crop to felt circle
+        cropped = crop_to_felt_circle(frame, state.cal)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        snap_path = Path(__file__).parent / f"snapshot_{ts}.jpg"
+        cv2.imwrite(str(snap_path), cropped)
+        print(f"\n  Snapshot saved to {snap_path} (cropped to felt circle)")
+    else:
+        print("\n  ERROR: Could not capture frame")
 
 
 # ---------------------------------------------------------------------------
-# Main — OpenCV on main thread (required by macOS)
+# Main
 # ---------------------------------------------------------------------------
 
 def main():
@@ -868,138 +902,64 @@ def main():
                         help=f"Camera index (default {DEFAULT_CAMERA_INDEX})")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD,
                         help=f"Change detection threshold (default {DEFAULT_THRESHOLD})")
+    parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION,
+                        help=f"Capture resolution WxH (default {DEFAULT_RESOLUTION})")
     args = parser.parse_args()
 
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"  Opening camera {args.camera}...")
-    cap = cv2.VideoCapture(args.camera)
-    if not cap.isOpened():
-        sys.exit(f"  ERROR: cannot open camera index {args.camera}")
+    capture = FrameCapture(args.camera, args.resolution)
+    log_buffer.log(f"Camera {args.camera}, resolution {args.resolution}")
 
-    # Try to set 4K resolution — Brio supports it but macOS may limit it
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    # Test capture
+    print(f"  Testing capture...")
+    frame = capture.capture()
+    if frame is None:
+        sys.exit("  ERROR: Could not capture a frame. Check camera index and ffmpeg.")
+    print(f"  Capture OK: {frame.shape[1]}x{frame.shape[0]}")
 
     cal = Calibration()
     cal.load()
 
     monitor = ZoneMonitor(threshold=args.threshold)
-    state = AppState(cap, cal, monitor)
+    state = AppState(capture, cal, monitor)
+    state.latest_frame = frame
 
-    print(f"  Camera resolution: {state.actual_w}x{state.actual_h}")
-
-    # Start debug web server
     start_debug_server(state)
 
-    window_name = "Overhead Card Scanner"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, 1280, 720)
+    if cal.is_complete:
+        print(f"  Calibration loaded — {len(cal.zones)} zones defined")
+    else:
+        print("  No calibration found")
 
-    def get_frame_coords(x, y):
-        """Convert window click coords to frame coords."""
-        try:
-            _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
-            if win_w <= 0 or win_h <= 0:
-                win_w, win_h = 1280, 720
-        except Exception:
-            win_w, win_h = 1280, 720
-        scale_x = state.actual_w / win_w
-        scale_y = state.actual_h / win_h
-        return int(x * scale_x), int(y * scale_y)
+    print_menu()
 
-    def on_mouse(event, x, y, flags, param):
-        fx, fy = get_frame_coords(x, y)
+    try:
+        while not state.quit_flag:
+            cmd = input("\n  Enter command: ").strip().lower()
 
-        if event == cv2.EVENT_LBUTTONDOWN:
-            state.click_queue.put((fx, fy))
+            if cmd == "q":
+                print("\n  Shutting down...")
+                break
+            elif cmd == "c":
+                do_calibrate(state)
+            elif cmd == "t":
+                do_test_recognition(state)
+            elif cmd == "m":
+                do_monitor(state)
+            elif cmd == "r":
+                do_reset_baselines(state)
+            elif cmd == "s":
+                do_snapshot(state)
+            elif cmd == "":
+                continue
+            else:
+                print(f"  Unknown command: '{cmd}'")
+                print_menu()
 
-        elif event == cv2.EVENT_MOUSEMOVE:
-            state.mouse_pos = (fx, fy)
-            # Update preview circle if sizing a zone
-            if state.zone_center_pending:
-                zcx, zcy = state.zone_center_pending
-                r = int(np.hypot(fx - zcx, fy - zcy))
-                state.preview_circle = (zcx, zcy, r)
+    except (KeyboardInterrupt, EOFError):
+        print("\n  Interrupted.")
 
-    cv2.setMouseCallback(window_name, on_mouse)
-
-    inp_thread = Thread(target=input_thread, args=(state,), daemon=True)
-    inp_thread.start()
-
-    while not state.quit_flag:
-        ret, frame = cap.read()
-        if not ret:
-            time.sleep(0.05)
-            continue
-
-        state.latest_frame = frame.copy()
-
-        # Process commands from input thread
-        try:
-            while True:
-                cmd = state.command_queue.get_nowait()
-                if cmd == "capture_baselines":
-                    monitor.capture_baselines(frame, cal.zones)
-                    state.baselines_captured = True
-                elif cmd == "snapshot":
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    snap_path = Path(__file__).parent / f"snapshot_{ts}.jpg"
-                    cv2.imwrite(str(snap_path), frame)
-                    print(f"\n  Snapshot saved to {snap_path}")
-                elif isinstance(cmd, tuple) and cmd[0] == "test_recognize":
-                    # Test recognition for a specific zone
-                    zone_name = cmd[1]
-                    zone = next((z for z in cal.zones if z["name"] == zone_name), None)
-                    if zone and state.baselines_captured:
-                        crop = monitor._crop_zone(frame, zone)
-                        if crop is not None and crop.size > 0:
-                            baseline = monitor.baselines.get(zone_name)
-                            if baseline is not None and crop.shape == baseline.shape:
-                                diff = cv2.absdiff(crop, baseline)
-                                mean_diff = float(np.mean(diff))
-                                if mean_diff > monitor.threshold:
-                                    # Card detected — run recognition
-                                    def _do_test_recognize(name, c):
-                                        monitor._recognize(name, c)
-                                        state.test_result = monitor.last_card.get(name, "No card")
-                                        state.test_done.set()
-                                    t = Thread(target=_do_test_recognize,
-                                               args=(zone_name, crop.copy()), daemon=True)
-                                    t.start()
-                                else:
-                                    # No card detected yet — signal done with None
-                                    state.test_result = None
-                                    state.test_done.set()
-                            else:
-                                state.test_result = None
-                                state.test_done.set()
-                        else:
-                            state.test_result = None
-                            state.test_done.set()
-        except Empty:
-            pass
-
-        # Zone monitoring
-        if state.monitoring and cal.is_complete and state.baselines_captured:
-            monitor.check_zones(frame, cal.zones)
-
-        # Compute flash state (blink at 2Hz)
-        flash_on = False
-        if state.flash_zone:
-            elapsed = time.time() - state.flash_start
-            flash_on = int(elapsed * 4) % 2 == 0  # 4 toggles/sec = 2Hz blink
-
-        # Draw overlay
-        display = frame.copy()
-        draw_overlay(display, cal, monitor, state.monitoring, state.cal_step,
-                     state.preview_circle, state.flash_zone, flash_on)
-        cv2.imshow(window_name, display)
-        cv2.waitKey(30)
-
-    cap.release()
-    cv2.destroyAllWindows()
     print("  Done.")
 
 
