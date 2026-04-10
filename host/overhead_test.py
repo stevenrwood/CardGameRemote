@@ -19,7 +19,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from threading import Thread, Event
+from threading import Thread, Event, Lock
 from queue import Queue, Empty
 
 import cv2
@@ -49,16 +49,50 @@ COLOR_YELLOW = (0, 255, 255)
 COLOR_RED    = (0, 0, 255)
 
 # ---------------------------------------------------------------------------
-# Calibration data
+# Speech queue — serialized voice output, no overlapping
+# ---------------------------------------------------------------------------
+
+class SpeechQueue:
+    """Speaks phrases one at a time, never overlapping. Drops stale messages."""
+
+    def __init__(self):
+        self._queue = Queue()
+        self._thread = Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def say(self, phrase):
+        """Queue a phrase. If queue is backing up, only keep the latest per player."""
+        self._queue.put(phrase)
+
+    def _run(self):
+        while True:
+            phrase = self._queue.get()
+            # Drain any queued phrases — keep only the latest one per player
+            latest = {phrase: phrase}
+            try:
+                while True:
+                    p = self._queue.get_nowait()
+                    latest[p] = p
+            except Empty:
+                pass
+            # Speak each unique phrase synchronously (blocks until done)
+            for p in latest.values():
+                subprocess.run(["say", p],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+speech = SpeechQueue()
+
+# ---------------------------------------------------------------------------
+# Calibration data — zones are now circles
 # ---------------------------------------------------------------------------
 
 class Calibration:
     def __init__(self):
-        self.circle_center: tuple[int, int] | None = None
-        self.circle_radius: int | None = None
-        self.zones: list[dict] = []
+        self.circle_center = None   # (x, y) felt circle center
+        self.circle_radius = None   # felt circle radius in pixels
+        self.zones = []             # [{"name", "cx", "cy", "r"}, ...]
 
-    def save(self, path: Path = CALIBRATION_FILE):
+    def save(self, path=CALIBRATION_FILE):
         data = {
             "circle_center": list(self.circle_center) if self.circle_center else None,
             "circle_radius": self.circle_radius,
@@ -68,7 +102,7 @@ class Calibration:
             json.dump(data, f, indent=2)
         print(f"  Calibration saved to {path}")
 
-    def load(self, path: Path = CALIBRATION_FILE) -> bool:
+    def load(self, path=CALIBRATION_FILE):
         if not path.exists():
             return False
         with open(path) as f:
@@ -80,7 +114,7 @@ class Calibration:
         return True
 
     @property
-    def is_complete(self) -> bool:
+    def is_complete(self):
         return (
             self.circle_center is not None
             and self.circle_radius is not None
@@ -93,12 +127,12 @@ class Calibration:
 # ---------------------------------------------------------------------------
 
 class ZoneMonitor:
-    def __init__(self, threshold: float):
+    def __init__(self, threshold):
         self.threshold = threshold
-        self.baselines: dict[str, np.ndarray] = {}
-        self.last_card: dict[str, str] = {}
-        self.zone_state: dict[str, str] = {}
-        self.pending: dict[str, bool] = {}
+        self.baselines = {}       # name -> baseline crop
+        self.last_card = {}       # name -> "Ace of Hearts"
+        self.zone_state = {}      # name -> "empty"|"processing"|"recognized"
+        self.pending = {}         # name -> True if API call in flight
         self._client = None
 
     @property
@@ -120,10 +154,10 @@ class ZoneMonitor:
                 print("  WARNING: anthropic package not installed.")
         return self._client
 
-    def capture_baselines(self, frame: np.ndarray, zones: list[dict]):
+    def capture_baselines(self, frame, zones):
         for zone in zones:
             crop = self._crop_zone(frame, zone)
-            if crop is None:
+            if crop is None or crop.size == 0:
                 print(f"  WARNING: zone '{zone['name']}' is out of frame bounds")
                 continue
             self.baselines[zone["name"]] = crop.copy()
@@ -131,7 +165,7 @@ class ZoneMonitor:
             self.last_card[zone["name"]] = ""
             self.pending[zone["name"]] = False
 
-    def check_zones(self, frame: np.ndarray, zones: list[dict]):
+    def check_zones(self, frame, zones):
         for zone in zones:
             name = zone["name"]
             if name not in self.baselines:
@@ -140,11 +174,15 @@ class ZoneMonitor:
                 continue
 
             crop = self._crop_zone(frame, zone)
-            if crop is None:
+            if crop is None or crop.size == 0:
                 continue
-            diff = cv2.absdiff(crop, self.baselines[name])
-            if diff is None or diff.size == 0:
+
+            baseline = self.baselines[name]
+            # Baselines and crops must be same size
+            if crop.shape != baseline.shape:
                 continue
+
+            diff = cv2.absdiff(crop, baseline)
             mean_diff = float(np.mean(diff))
 
             if mean_diff > self.threshold:
@@ -158,17 +196,19 @@ class ZoneMonitor:
                     self.zone_state[name] = "empty"
                     self.last_card[name] = ""
 
-    def _crop_zone(self, frame: np.ndarray, zone: dict):
+    def _crop_zone(self, frame, zone):
+        """Crop a circular zone as a bounding-box rectangle."""
         h, w = frame.shape[:2]
-        x1 = max(0, min(zone["x1"], w - 1))
-        y1 = max(0, min(zone["y1"], h - 1))
-        x2 = max(0, min(zone["x2"], w))
-        y2 = max(0, min(zone["y2"], h))
+        cx, cy, r = zone["cx"], zone["cy"], zone["r"]
+        x1 = max(0, cx - r)
+        y1 = max(0, cy - r)
+        x2 = min(w, cx + r)
+        y2 = min(h, cy + r)
         if x2 <= x1 or y2 <= y1:
             return None
         return frame[y1:y2, x1:x2]
 
-    def _recognize(self, name: str, crop: np.ndarray):
+    def _recognize(self, name, crop):
         t0 = time.time()
         try:
             if self.client is None:
@@ -216,7 +256,12 @@ class ZoneMonitor:
             print(f"  {name}: {result}  ({elapsed:.1f}s)")
 
             self._save_training(name, crop, result)
-            self._announce(name, result)
+
+            # Voice announcement (serialized, never overlaps)
+            if "no card" in result.lower():
+                speech.say(f"{name}, try repositioning upcard")
+            else:
+                speech.say(f"{name}, {result}")
 
         except Exception as exc:
             print(f"  [{name}] API error: {exc}")
@@ -224,33 +269,27 @@ class ZoneMonitor:
         finally:
             self.pending[name] = False
 
-    def _save_training(self, name: str, crop: np.ndarray, result: str):
+    def _save_training(self, name, crop, result):
         TRAINING_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe = result.replace(" ", "_").replace("/", "-")
         cv2.imwrite(str(TRAINING_DIR / f"{ts}_{name}_{safe}.jpg"), crop)
         (TRAINING_DIR / f"{ts}_{name}_{safe}.txt").write_text(result)
 
-    def _announce(self, name: str, result: str):
-        if "no card" in result.lower():
-            subprocess.Popen(["say", f"{name}, try repositioning upcard"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else:
-            subprocess.Popen(["say", f"{name}, {result}"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
 
 # ---------------------------------------------------------------------------
-# Drawing helpers
+# Drawing helpers — circular zones
 # ---------------------------------------------------------------------------
 
-def draw_overlay(frame, cal, monitor, monitoring, cal_step=""):
+def draw_overlay(frame, cal, monitor, monitoring, cal_step="", preview_circle=None):
+    # Felt circle
     if cal.circle_center and cal.circle_radius:
         cv2.circle(frame, cal.circle_center, cal.circle_radius, COLOR_WHITE, 2)
 
+    # Landing zones (circles)
     for zone in cal.zones:
         name = zone["name"]
-        x1, y1, x2, y2 = zone["x1"], zone["y1"], zone["x2"], zone["y2"]
+        cx, cy, r = zone["cx"], zone["cy"], zone["r"]
 
         state = monitor.zone_state.get(name, "empty")
         if state == "recognized":
@@ -260,15 +299,21 @@ def draw_overlay(frame, cal, monitor, monitoring, cal_step=""):
         else:
             color = COLOR_WHITE
 
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, name, (x1, y1 - 10),
+        cv2.circle(frame, (cx, cy), r, color, 2)
+        cv2.putText(frame, name, (cx - 30, cy - r - 10),
                      cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
         card = monitor.last_card.get(name, "")
         if card:
-            cv2.putText(frame, card, (x1, y2 + 25),
+            cv2.putText(frame, card, (cx - 60, cy + r + 25),
                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_GREEN, 2)
 
+    # Preview circle during calibration (follows mouse)
+    if preview_circle:
+        pcx, pcy, pr = preview_circle
+        cv2.circle(frame, (pcx, pcy), pr, COLOR_YELLOW, 2)
+
+    # Status text
     if cal_step:
         cv2.putText(frame, cal_step, (20, 50),
                      cv2.FONT_HERSHEY_SIMPLEX, 1.0, COLOR_WHITE, 3)
@@ -278,7 +323,7 @@ def draw_overlay(frame, cal, monitor, monitoring, cal_step=""):
 
 
 # ---------------------------------------------------------------------------
-# Application state shared between main thread (OpenCV) and input thread
+# Application state
 # ---------------------------------------------------------------------------
 
 class AppState:
@@ -294,20 +339,20 @@ class AppState:
         self.actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        # For calibration clicks: main thread sets callback, input thread waits
         self.click_queue = Queue()
-
-        # Commands from input thread to main thread
         self.command_queue = Queue()
 
+        # For zone circle preview during calibration
+        self.preview_circle = None     # (cx, cy, r) or None
+        self.zone_center_pending = None  # (cx, cy) waiting for radius click
+        self.mouse_pos = None          # current mouse position in frame coords
+
 
 # ---------------------------------------------------------------------------
-# Input thread — reads terminal commands
+# Input thread
 # ---------------------------------------------------------------------------
 
-def input_thread(state: AppState):
-    """Runs in background thread, sends commands to main thread via queue."""
-
+def input_thread(state):
     def print_menu():
         print("\n╔══════════════════════════════════════════╗")
         print("║       Overhead Card Scanner              ║")
@@ -334,22 +379,16 @@ def input_thread(state: AppState):
                 print("\n  Shutting down...")
                 state.quit_flag = True
                 break
-
             elif cmd == "c":
                 do_calibrate_terminal(state)
-
             elif cmd == "m":
                 do_monitor_toggle_terminal(state)
-
             elif cmd == "r":
                 do_reset_baselines_terminal(state)
-
             elif cmd == "s":
                 state.command_queue.put("snapshot")
-
             elif cmd == "":
                 continue
-
             else:
                 print(f"  Unknown command: '{cmd}'")
                 print_menu()
@@ -359,31 +398,32 @@ def input_thread(state: AppState):
         state.quit_flag = True
 
 
-def do_calibrate_terminal(state: AppState):
-    """Run calibration from terminal, clicks happen in camera window."""
-    print("\n  Calibration will walk you through 12 clicks in the camera window:")
+def do_calibrate_terminal(state):
+    print("\n  Calibration steps:")
     print("    1. Click the CENTER of the black felt circle")
     print(f"    2. Click a point on the EDGE of the felt circle (at Bill's position)")
+    print()
+    print("  For each player zone:")
     for i, name in enumerate(PLAYER_NAMES):
-        print(f"    {3 + i*2}. Click TOP-LEFT corner of {name}'s landing zone")
-        print(f"    {4 + i*2}. Click BOTTOM-RIGHT corner of {name}'s landing zone")
+        print(f"    {3 + i}. {name}: Click CENTER of zone, then move mouse to")
+        print(f"        set zone size and click to lock it in")
     print()
     input("  Press Enter to begin calibration...")
 
     state.cal.circle_center = None
     state.cal.circle_radius = None
     state.cal.zones = []
+    state.preview_circle = None
+    state.zone_center_pending = None
 
     def wait_for_click(prompt):
         print(f"\n  >>> {prompt}")
         state.cal_step = prompt
-        # Clear any stale clicks
         while not state.click_queue.empty():
             try:
                 state.click_queue.get_nowait()
             except Empty:
                 break
-        # Wait for click from main thread
         while True:
             try:
                 result = state.click_queue.get(timeout=0.1)
@@ -393,14 +433,14 @@ def do_calibrate_terminal(state: AppState):
                 if state.quit_flag:
                     return None
 
-    # Step 1: Circle center
+    # Step 1: Felt circle center
     pt = wait_for_click("Click the CENTER of the felt circle")
     if pt is None:
         return
     state.cal.circle_center = pt
     print(f"      Center set at ({pt[0]}, {pt[1]})")
 
-    # Step 2: Circle edge
+    # Step 2: Felt circle edge
     pt = wait_for_click("Click the EDGE of the felt circle (at Bill's position)")
     if pt is None:
         return
@@ -408,31 +448,40 @@ def do_calibrate_terminal(state: AppState):
     state.cal.circle_radius = int(np.hypot(pt[0] - cx, pt[1] - cy))
     print(f"      Radius: {state.cal.circle_radius}px")
 
-    # Steps 3-12: Player zones
+    # Steps 3-7: Player zones (circle: click center, move mouse to size, click to lock)
     for i, name in enumerate(PLAYER_NAMES):
-        pt1 = wait_for_click(f"Click TOP-LEFT of {name}'s zone")
-        if pt1 is None:
+        # Click center
+        pt = wait_for_click(f"Click CENTER of {name}'s zone")
+        if pt is None:
             return
-        print(f"      Top-left at ({pt1[0]}, {pt1[1]})")
+        zone_cx, zone_cy = pt
+        print(f"      Center at ({zone_cx}, {zone_cy})")
 
-        pt2 = wait_for_click(f"Click BOTTOM-RIGHT of {name}'s zone")
+        # Now show preview circle tracking mouse for radius
+        state.zone_center_pending = (zone_cx, zone_cy)
+        state.cal_step = f"Move mouse to set {name}'s zone size, then click"
+
+        pt2 = wait_for_click(f"Move mouse to set {name}'s zone size, then click")
         if pt2 is None:
             return
-        zone = {
+
+        zone_r = int(np.hypot(pt2[0] - zone_cx, pt2[1] - zone_cy))
+        state.zone_center_pending = None
+        state.preview_circle = None
+
+        state.cal.zones.append({
             "name": name,
-            "x1": min(pt1[0], pt2[0]), "y1": min(pt1[1], pt2[1]),
-            "x2": max(pt1[0], pt2[0]), "y2": max(pt1[1], pt2[1]),
-        }
-        state.cal.zones.append(zone)
-        w = zone["x2"] - zone["x1"]
-        h = zone["y2"] - zone["y1"]
-        print(f"      Zone '{name}' defined — {w}x{h}px")
+            "cx": zone_cx,
+            "cy": zone_cy,
+            "r": zone_r,
+        })
+        print(f"      Zone '{name}' defined — radius {zone_r}px")
 
     state.cal.save()
     print("\n  Calibration complete!")
 
 
-def do_monitor_toggle_terminal(state: AppState):
+def do_monitor_toggle_terminal(state):
     if not state.cal.is_complete:
         print("\n  Cannot monitor — calibrate first (press 'c')")
         return
@@ -445,14 +494,14 @@ def do_monitor_toggle_terminal(state: AppState):
         print("  Make sure all landing zones are EMPTY (no cards on the table).")
         input("  Press Enter when table is clear...")
         state.command_queue.put("capture_baselines")
-        time.sleep(0.3)  # let main thread process it
+        time.sleep(0.3)
         state.monitoring = True
         print("  Baselines captured. Monitoring STARTED.")
         print("  Place cards in landing zones — recognition is automatic.")
         print("  Recognized cards will be announced by voice.")
 
 
-def do_reset_baselines_terminal(state: AppState):
+def do_reset_baselines_terminal(state):
     if not state.cal.is_complete:
         print("\n  Cannot reset — calibrate first (press 'c')")
         return
@@ -465,7 +514,7 @@ def do_reset_baselines_terminal(state: AppState):
 
 
 # ---------------------------------------------------------------------------
-# Main — OpenCV runs here (main thread, required by macOS)
+# Main — OpenCV on main thread (required by macOS)
 # ---------------------------------------------------------------------------
 
 def main():
@@ -478,7 +527,6 @@ def main():
 
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Open camera
     print(f"  Opening camera {args.camera}...")
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
@@ -487,43 +535,49 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
 
-    # Load calibration
     cal = Calibration()
     cal.load()
 
-    # Create shared state
     monitor = ZoneMonitor(threshold=args.threshold)
     state = AppState(cap, cal, monitor)
 
     print(f"  Camera resolution: {state.actual_w}x{state.actual_h}")
 
-    # Set up OpenCV window (MUST be on main thread for macOS)
     window_name = "Overhead Card Scanner"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(window_name, 1280, 720)
 
-    def on_mouse(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            # Get actual window size (may differ from requested 1280x720)
-            try:
-                _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
-                if win_w <= 0 or win_h <= 0:
-                    win_w, win_h = 1280, 720
-            except Exception:
+    def get_frame_coords(x, y):
+        """Convert window click coords to frame coords."""
+        try:
+            _, _, win_w, win_h = cv2.getWindowImageRect(window_name)
+            if win_w <= 0 or win_h <= 0:
                 win_w, win_h = 1280, 720
-            scale_x = state.actual_w / win_w
-            scale_y = state.actual_h / win_h
-            fx = int(x * scale_x)
-            fy = int(y * scale_y)
+        except Exception:
+            win_w, win_h = 1280, 720
+        scale_x = state.actual_w / win_w
+        scale_y = state.actual_h / win_h
+        return int(x * scale_x), int(y * scale_y)
+
+    def on_mouse(event, x, y, flags, param):
+        fx, fy = get_frame_coords(x, y)
+
+        if event == cv2.EVENT_LBUTTONDOWN:
             state.click_queue.put((fx, fy))
+
+        elif event == cv2.EVENT_MOUSEMOVE:
+            state.mouse_pos = (fx, fy)
+            # Update preview circle if sizing a zone
+            if state.zone_center_pending:
+                zcx, zcy = state.zone_center_pending
+                r = int(np.hypot(fx - zcx, fy - zcy))
+                state.preview_circle = (zcx, zcy, r)
 
     cv2.setMouseCallback(window_name, on_mouse)
 
-    # Start input thread
     inp_thread = Thread(target=input_thread, args=(state,), daemon=True)
     inp_thread.start()
 
-    # Main loop — camera capture + display (must be main thread on macOS)
     while not state.quit_flag:
         ret, frame = cap.read()
         if not ret:
@@ -553,11 +607,11 @@ def main():
 
         # Draw overlay
         display = frame.copy()
-        draw_overlay(display, cal, monitor, state.monitoring, state.cal_step)
+        draw_overlay(display, cal, monitor, state.monitoring, state.cal_step,
+                     state.preview_circle)
         cv2.imshow(window_name, display)
         cv2.waitKey(30)
 
-    # Cleanup
     cap.release()
     cv2.destroyAllWindows()
     print("  Done.")
