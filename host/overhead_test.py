@@ -355,31 +355,106 @@ _state = None
 def _start_deal_mode(s):
     if s.deal_mode:
         return
-    s.deal_mode = {"game": None, "cards": [], "last_text": "", "last_parsed": ""}
+    s.deal_mode = {
+        "game": None, "cards": [], "last_text": "", "last_parsed": "",
+        "pending_player": None,
+    }
     log.log("Deal mode started — use Dictation (Fn Fn) in the text field")
 
 
 def _stop_deal_mode(s):
-    s.deal_mode = None
-    log.log("Deal mode stopped")
+    # Before stopping, send full text to Claude for parsing
+    if s.deal_mode and s.deal_mode.get("last_text", "").strip():
+        Thread(target=_claude_parse_deal, args=(s, s.deal_mode["last_text"]), daemon=True).start()
+    else:
+        s.deal_mode = None
+        log.log("Deal mode stopped")
+
+
+def _claude_parse_deal(s, text):
+    """Send full dictated text to Claude to extract cards per player."""
+    try:
+        import anthropic
+        key = os.environ.get("ANTHROPIC_API_KEY")
+        if not key and CONFIG_FILE.exists():
+            key = json.loads(CONFIG_FILE.read_text()).get("anthropic_api_key")
+        if not key or key == "YOUR_KEY_HERE":
+            log.log("[DEAL] No API key — skipping Claude parse")
+            s.deal_mode = None
+            return
+
+        client = anthropic.Anthropic(api_key=key)
+        log.log(f"[DEAL] Asking Claude to parse: \"{text[:100]}...\"")
+
+        players = ", ".join(PLAYER_NAMES)
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"This is dictated speech from a poker game dealer calling out up cards. "
+                    f"The players are: {players}. "
+                    f"Extract which cards were dealt to which player. "
+                    f"The dealer says the player name followed by their card. "
+                    f"Return ONLY a JSON object mapping player names to arrays of cards. "
+                    f"Each card should be 'Rank of Suit' format. "
+                    f"Also include a 'game' field if a game name was mentioned. "
+                    f"Example: {{\"game\": \"Follow the Queen\", \"Steve\": [\"Ace of Spades\"], \"Bill\": [\"King of Hearts\"]}}\n\n"
+                    f"Dictated text: \"{text}\""
+                ),
+            }],
+        )
+
+        result_text = response.content[0].text.strip()
+        log.log(f"[DEAL] Claude response: {result_text}")
+
+        # Try to parse the JSON
+        try:
+            # Extract JSON from response (may have markdown code block)
+            json_match = re.search(r'\{[^{}]*\}', result_text, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                # Update deal mode with Claude's parsing
+                if s.deal_mode:
+                    if "game" in data:
+                        s.deal_mode["game"] = data["game"]
+                    s.deal_mode["cards"] = []
+                    for player in PLAYER_NAMES:
+                        cards = data.get(player, [])
+                        for card in cards:
+                            s.deal_mode["cards"].append({"player": player, "card": card})
+                    log.log(f"[DEAL] Claude found {len(s.deal_mode['cards'])} cards")
+        except (json.JSONDecodeError, Exception) as e:
+            log.log(f"[DEAL] Could not parse Claude response: {e}")
+
+    except Exception as e:
+        log.log(f"[DEAL] Claude parse error: {e}")
+    finally:
+        if s.deal_mode:
+            log.log("Deal mode stopped (Claude parse complete)")
+        # Don't clear deal_mode so the cards stay visible
 
 
 def _process_deal_text(s, text):
     """Parse dictated text for game names and card calls."""
-    from speech_recognition_module import parse_speech, GameCommand, CardCallCommand, UnrecognizedCommand
+    from speech_recognition_module import (
+        parse_speech, GameCommand, CardCallCommand, UnrecognizedCommand,
+        _extract_card_only, _extract_player_only,
+    )
 
     if not s.deal_mode:
         return
 
-    # Only process new text (what was added since last parse)
-    old = s.deal_mode["last_text"]
+    # Only process new text since last call
+    old_len = len(s.deal_mode["last_text"])
     s.deal_mode["last_text"] = text
 
-    # Find new portion
-    if text.lower().startswith(old.lower()) and len(text) > len(old):
-        new_text = text[len(old):].strip()
+    # Take only the new characters added
+    if len(text) > old_len:
+        new_text = text[old_len:].strip()
     else:
-        new_text = text.strip()
+        return
 
     if not new_text:
         return
@@ -391,13 +466,34 @@ def _process_deal_text(s, text):
     for cmd in commands:
         if isinstance(cmd, GameCommand):
             s.deal_mode["game"] = cmd.game_name
+            s.deal_mode["pending_player"] = None
             log.log(f"[DEAL] Game: {cmd.game_name}")
         elif isinstance(cmd, CardCallCommand):
             card_str = f"{cmd.rank} of {cmd.suit}"
             s.deal_mode["cards"].append({"player": cmd.player, "card": card_str})
+            s.deal_mode["pending_player"] = None
             log.log(f"[DEAL] {cmd.player}: {card_str}")
         elif isinstance(cmd, UnrecognizedCommand):
-            log.log(f"[DEAL] Unrecognized: \"{cmd.raw_text}\"")
+            raw = cmd.raw_text
+            # Check if it's just a player name — remember it
+            player = _extract_player_only(raw)
+            if player:
+                s.deal_mode["pending_player"] = player
+                log.log(f"[DEAL] Pending player: {player}")
+                continue
+
+            # Check if it's a card without player — match with pending
+            card = _extract_card_only(raw)
+            if card and s.deal_mode["pending_player"]:
+                player = s.deal_mode["pending_player"]
+                card_str = f"{card[0]} of {card[1]}"
+                s.deal_mode["cards"].append({"player": player, "card": card_str})
+                s.deal_mode["pending_player"] = None
+                log.log(f"[DEAL] {player}: {card_str} (matched)")
+            elif card:
+                log.log(f"[DEAL] Card without player: {card[0]} of {card[1]}")
+            else:
+                log.log(f"[DEAL] Unrecognized: \"{raw}\"")
 
 
 # ---------------------------------------------------------------------------

@@ -64,7 +64,7 @@ PLAYER_ALIASES = {
     "steve": "Steve", "eve": "Steve", "steep": "Steve",
     "bill": "Bill", "phil": "Bill", "built": "Bill", "pill": "Bill",
     "david": "David", "dave": "David", "give it": "David",
-    "joe": "Joe", "jo": "Joe", "show": "Joe",
+    "joe": "Joe", "jo": "Joe", "show": "Joe", "jo ": "Joe",
     "rodney": "Rodney", "rod": "Rodney", "ronnie": "Rodney", "honey": "Rodney",
 }
 
@@ -77,7 +77,7 @@ RANKS = {
     "six": "6", "6": "6",
     "seven": "7", "7": "7",
     "eight": "8", "8": "8", "80": "8", "ate": "8",
-    "nine": "9", "9": "9",
+    "nine": "9", "9": "9", "nana": "9",
     "ten": "10", "10": "10", "tennis": "10",
     "jack": "J", "jacks": "J", "jacket": "J", "jackets": "J",
     "queen": "Q", "queens": "Q",
@@ -86,8 +86,8 @@ RANKS = {
 
 SUITS = {
     "clubs": "clubs", "club": "clubs",
-    "diamonds": "diamonds", "diamond": "diamonds",
-    "hearts": "hearts", "heart": "hearts",
+    "diamonds": "diamonds", "diamond": "diamonds", "dime": "diamonds",
+    "hearts": "hearts", "heart": "hearts", "hart": "hearts", "harts": "hearts", "hurts": "hearts",
     "spades": "spades", "spade": "spades",
     "space": "spades", "spaces": "spades", "face": "spades", "fades": "spades",
     "faze": "spades", "phase": "spades", "spain": "spades",
@@ -164,8 +164,8 @@ def _fuzzy_match_game(text):
 
 def _parse_card_call(text):
     text_lower = text.lower().strip()
-    # Fix common Whisper substitutions before parsing
-    text_lower = re.sub(r'^oh,?\s+', '', text_lower)  # strip leading "Oh,"
+    # Fix common dictation/Whisper substitutions before parsing
+    text_lower = re.sub(r'^oh,?\s+', '', text_lower)
     text_lower = re.sub(r'\bto a\b', 'two of', text_lower)
     text_lower = re.sub(r'\bto your\b', 'two of', text_lower)
     text_lower = re.sub(r'\b80\b', 'eight of', text_lower)
@@ -175,6 +175,19 @@ def _parse_card_call(text):
     text_lower = re.sub(r'\bfly with\b', 'five of', text_lower)
     text_lower = re.sub(r"\bit's a\b", 'ace of', text_lower)
     text_lower = re.sub(r"\bin his\b", 'ace of', text_lower)
+    text_lower = re.sub(r'\band diamond\b', 'ace of diamonds', text_lower)
+    text_lower = re.sub(r'\band spade\b', 'ace of spades', text_lower)
+    text_lower = re.sub(r'\band heart\b', 'ace of hearts', text_lower)
+    text_lower = re.sub(r'\band club\b', 'ace of clubs', text_lower)
+    text_lower = re.sub(r'\bi spade\b', 'ace of spades', text_lower)
+    text_lower = re.sub(r'\bi heart\b', 'ace of hearts', text_lower)
+    text_lower = re.sub(r'\bi diamond\b', 'ace of diamonds', text_lower)
+    text_lower = re.sub(r'\bi club\b', 'ace of clubs', text_lower)
+    text_lower = re.sub(r'\bin space\b', 'nine of spades', text_lower)
+    text_lower = re.sub(r'\bfor diamond\b', 'four of diamonds', text_lower)
+    text_lower = re.sub(r'\bfor heart\b', 'four of hearts', text_lower)
+    text_lower = re.sub(r'\bfor spade\b', 'four of spades', text_lower)
+    text_lower = re.sub(r'\bfor club\b', 'four of clubs', text_lower)
     matched_player = None
     remaining = text_lower
     # Try exact player names first, then aliases
