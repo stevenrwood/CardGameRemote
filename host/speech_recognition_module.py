@@ -59,17 +59,26 @@ GAME_NAMES = [
 
 PLAYER_NAMES = ["Steve", "Bill", "David", "Joe", "Rodney"]
 
+# Whisper often mishears player names
+PLAYER_ALIASES = {
+    "steve": "Steve", "eve": "Steve", "steep": "Steve",
+    "bill": "Bill", "phil": "Bill", "built": "Bill", "pill": "Bill",
+    "david": "David", "dave": "David", "give it": "David",
+    "joe": "Joe", "jo": "Joe", "show": "Joe",
+    "rodney": "Rodney", "rod": "Rodney", "ronnie": "Rodney",
+}
+
 RANKS = {
-    "ace": "A", "one": "A", "1": "A",
-    "two": "2", "deuce": "2", "2": "2",
+    "ace": "A", "one": "A", "1": "A", "aces": "A",
+    "two": "2", "deuce": "2", "2": "2", "to": "2", "too": "2",
     "three": "3", "3": "3",
     "four": "4", "4": "4", "for": "4",
     "five": "5", "5": "5",
     "six": "6", "6": "6",
     "seven": "7", "7": "7",
-    "eight": "8", "8": "8",
+    "eight": "8", "8": "8", "80": "8", "ate": "8",
     "nine": "9", "9": "9",
-    "ten": "10", "10": "10",
+    "ten": "10", "10": "10", "tennis": "10",
     "jack": "J", "jacks": "J", "jacket": "J", "jackets": "J",
     "queen": "Q", "queens": "Q",
     "king": "K", "kings": "K",
@@ -81,6 +90,7 @@ SUITS = {
     "hearts": "hearts", "heart": "hearts",
     "spades": "spades", "spade": "spades",
     "space": "spades", "spaces": "spades", "face": "spades", "fades": "spades",
+    "faze": "spades", "phase": "spades", "spain": "spades",
     "private": "spades",  # common misrecognitions
 }
 
@@ -154,8 +164,14 @@ def _fuzzy_match_game(text):
 
 def _parse_card_call(text):
     text_lower = text.lower().strip()
+    # Fix common Whisper substitutions before parsing
+    text_lower = re.sub(r'\bto a\b', 'two of', text_lower)
+    text_lower = re.sub(r'\b80\b', 'eight of', text_lower)
+    text_lower = re.sub(r'\bat a\b', 'eight of', text_lower)
+    text_lower = re.sub(r'\bfive at\b', 'five of', text_lower)
     matched_player = None
     remaining = text_lower
+    # Try exact player names first, then aliases
     for name in PLAYER_NAMES:
         pattern = re.compile(r'\b' + re.escape(name.lower()) + r'\b')
         match = pattern.search(text_lower)
@@ -163,6 +179,14 @@ def _parse_card_call(text):
             matched_player = name
             remaining = text_lower[match.end():].strip().lstrip(",").strip()
             break
+    if matched_player is None:
+        for alias, name in PLAYER_ALIASES.items():
+            pattern = re.compile(r'\b' + re.escape(alias) + r'\b')
+            match = pattern.search(text_lower)
+            if match:
+                matched_player = name
+                remaining = text_lower[match.end():].strip().lstrip(",").strip()
+                break
     if matched_player is None:
         return None
 
@@ -230,11 +254,16 @@ def _parse_multiple_card_calls(text):
     """Try to split text into multiple player card calls."""
     text_lower = text.lower()
 
-    # Find all player name positions
+    # Find all player name positions (exact names + aliases)
     positions = []
     for name in PLAYER_NAMES:
         for m in re.finditer(r'\b' + re.escape(name.lower()) + r'\b', text_lower):
             positions.append((m.start(), name))
+    for alias, name in PLAYER_ALIASES.items():
+        for m in re.finditer(r'\b' + re.escape(alias) + r'\b', text_lower):
+            # Don't add if we already have a match at this position
+            if not any(abs(p[0] - m.start()) < 3 for p in positions):
+                positions.append((m.start(), name))
 
     if len(positions) < 2:
         return None  # single or no player names, use regular parse
@@ -309,7 +338,8 @@ class SpeechListener:
         recognizer = sr.Recognizer()
         recognizer.energy_threshold = 300
         recognizer.dynamic_energy_threshold = True
-        recognizer.pause_threshold = 0.5
+        recognizer.pause_threshold = 0.8  # enough pause to split between players
+        recognizer.phrase_threshold = 0.3
 
         try:
             mic = sr.Microphone()
@@ -350,7 +380,7 @@ class SpeechListener:
         while self._running:
             try:
                 with mic as source:
-                    audio = recognizer.listen(source, timeout=10, phrase_time_limit=5)
+                    audio = recognizer.listen(source, timeout=10, phrase_time_limit=8)
 
                 _log("Speech detected, transcribing with Whisper...")
 
