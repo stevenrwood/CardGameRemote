@@ -343,8 +343,59 @@ class AppState:
         self.latest_jpg = None  # cropped + overlay
         self.quit_flag = False
         self.test_mode = None   # None or {"zone_idx":0, "waiting":"card"|"confirm", "result":""}
+        # Deal test mode — speech recognition
+        self.deal_mode = None   # None or {"game":None, "cards":[{"player":..,"card":..}], "listening":True, "last_heard":""}
+        self._speech_listener = None
 
 _state = None
+
+# ---------------------------------------------------------------------------
+# Deal mode — speech recognition
+# ---------------------------------------------------------------------------
+
+def _start_deal_mode(s):
+    if s.deal_mode:
+        return  # already running
+    try:
+        from speech_recognition_module import SpeechListener, GameCommand, CardCallCommand, UnrecognizedCommand
+
+        s.deal_mode = {"game": None, "cards": [], "listening": True, "last_heard": ""}
+
+        def on_speech(cmd):
+            if not s.deal_mode:
+                return
+            if isinstance(cmd, GameCommand):
+                s.deal_mode["game"] = cmd.game_name
+                s.deal_mode["last_heard"] = cmd.raw_text
+                log.log(f"[DEAL] Game: {cmd.game_name}")
+                speech.say(f"The game is {cmd.game_name}")
+            elif isinstance(cmd, CardCallCommand):
+                card_str = f"{cmd.rank} of {cmd.suit}"
+                s.deal_mode["cards"].append({"player": cmd.player, "card": card_str})
+                s.deal_mode["last_heard"] = cmd.raw_text
+                log.log(f"[DEAL] {cmd.player}: {card_str}")
+                speech.say(f"{cmd.player}, {card_str}")
+            elif isinstance(cmd, UnrecognizedCommand):
+                s.deal_mode["last_heard"] = cmd.raw_text
+
+        s._speech_listener = SpeechListener(callback=on_speech)
+        s._speech_listener.start()
+        log.log("Deal mode started — listening for speech")
+    except ImportError as e:
+        log.log(f"Speech recognition not available: {e}")
+        s.deal_mode = None
+    except Exception as e:
+        log.log(f"Failed to start speech: {e}")
+        s.deal_mode = None
+
+
+def _stop_deal_mode(s):
+    if s._speech_listener:
+        s._speech_listener.stop()
+        s._speech_listener = None
+    s.deal_mode = None
+    log.log("Deal mode stopped")
+
 
 # ---------------------------------------------------------------------------
 # Background capture
@@ -479,6 +530,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s.test_mode = None
             self._r(200,"application/json",'{"ok":true}')
 
+        elif p == "/api/deal/start":
+            _start_deal_mode(s)
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/deal/stop":
+            _stop_deal_mode(s)
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/deal/clear":
+            if s.deal_mode:
+                s.deal_mode["cards"] = []
+                s.deal_mode["game"] = None
+                s.deal_mode["last_heard"] = ""
+            self._r(200,"application/json",'{"ok":true}')
+
         elif p == "/api/snapshot/save":
             if s.latest_frame is not None:
                 cropped = crop_circle(s.latest_frame, s.cal)
@@ -521,6 +587,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "calibrated": s.cal.ok,
             "resolution": s.capture.resolution,
             "test_mode": test_info,
+            "deal_mode": s.deal_mode,
             "zones": {z["name"]: {"state": s.monitor.zone_state.get(z["name"],"empty"),
                                    "card": s.monitor.last_card.get(z["name"],"")}
                       for z in s.cal.zones},
@@ -557,6 +624,7 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
   <button class="btn-blue" onclick="location.href='/calibrate'">Calibrate</button>
   <button class="btn-green" id="btn-monitor" onclick="toggleMonitor()">Start Monitor</button>
   <button class="btn-blue" onclick="startTest()">Test Recognition</button>
+  <button class="btn-blue" id="btn-deal" onclick="toggleDeal()">Test Dealing</button>
   <button class="btn-blue" onclick="resetBaselines()">Reset Baselines</button>
   <button class="btn-blue" onclick="saveSnapshot()">Snapshot</button>
   <span id="status-bar">Loading...</span>
@@ -570,6 +638,14 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
     <button class="btn-orange" onclick="testSkip()">Skip</button>
     <button class="btn-off" onclick="testStop()">Stop Test</button>
   </div>
+</div>
+<div id="deal-panel" style="display:none;background:#0f3460;padding:12px;border-radius:8px;margin:8px 0">
+  <h3>Test Dealing — Voice Recognition</h3>
+  <p style="margin:4px 0">Game: <span id="deal-game" style="color:#4fc3f7;font-size:1.1em">Waiting... say "The game is..."</span></p>
+  <p style="margin:4px 0;color:#888;font-size:.85em">Last heard: <span id="deal-heard"></span></p>
+  <div id="deal-cards" style="margin:8px 0"></div>
+  <button class="btn-orange" onclick="clearDeal()">Clear</button>
+  <button class="btn-red" onclick="toggleDeal()">Stop Dealing</button>
 </div>
 <div id="main">
   <div id="left">
@@ -607,6 +683,14 @@ function startTest(){{
 function testConfirm(correct){{ api('/api/test/confirm',{{correct:correct}}).then(update); }}
 function testSkip(){{ api('/api/test/skip').then(update); }}
 function testStop(){{ api('/api/test/stop').then(update); }}
+function toggleDeal(){{
+  fetch('/api/state').then(function(r){{return r.json()}}).then(function(d){{
+    if(d.deal_mode) api('/api/deal/stop').then(update);
+    else api('/api/deal/start').then(update);
+  }});
+}}
+function clearDeal(){{ api('/api/deal/clear').then(update); }}
+
 function resetBaselines(){{
   if(!confirm('Clear all cards, then click OK')) return;
   api('/api/baselines').then(function(){{ log.log && update(); }});
@@ -645,6 +729,25 @@ function update(){{
         +'<div class="zone-card" style="color:'+bc+'">'+card+'</div></div></div>';
     }});
     document.getElementById('zones').innerHTML=zh;
+
+    // Deal mode panel
+    var dp=document.getElementById('deal-panel');
+    var dbtn=document.getElementById('btn-deal');
+    if(d.deal_mode){{
+      dp.style.display='block';
+      dbtn.textContent='Stop Dealing';dbtn.className='btn-red';
+      document.getElementById('deal-game').textContent=d.deal_mode.game||'Waiting... say "The game is..."';
+      document.getElementById('deal-heard').textContent=d.deal_mode.last_heard||'';
+      var ch='';
+      (d.deal_mode.cards||[]).forEach(function(c){{
+        ch+='<span style="display:inline-block;margin:3px;padding:4px 8px;background:#1b5e20;border-radius:4px">'
+          +c.player+': '+c.card+'</span>';
+      }});
+      document.getElementById('deal-cards').innerHTML=ch;
+    }} else {{
+      dp.style.display='none';
+      dbtn.textContent='Test Dealing';dbtn.className='btn-blue';
+    }}
 
     // Test mode panel
     var tp=document.getElementById('test-panel');
