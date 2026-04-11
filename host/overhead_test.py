@@ -702,17 +702,7 @@ function resetBaselines(){{
 }}
 function saveSnapshot(){{ api('/api/snapshot/save'); }}
 function copyLog(){{
-  fetch('/log').then(function(r){{return r.text()}}).then(function(t){{
-    // Fallback: create textarea, select, copy
-    var ta=document.createElement('textarea');
-    ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';
-    document.body.appendChild(ta);ta.select();
-    try{{document.execCommand('copy');
-      var btn=document.querySelector('[onclick="copyLog()"]');
-      if(btn){{btn.textContent='Copied!';setTimeout(function(){{btn.textContent='Copy Log'}},2000)}}
-    }}catch(e){{}}
-    document.body.removeChild(ta);
-  }});
+  window.open('/log','_blank');
 }}
 
 function update(){{
