@@ -65,7 +65,7 @@ PLAYER_ALIASES = {
     "bill": "Bill", "phil": "Bill", "built": "Bill", "pill": "Bill",
     "david": "David", "dave": "David", "give it": "David",
     "joe": "Joe", "jo": "Joe", "show": "Joe",
-    "rodney": "Rodney", "rod": "Rodney", "ronnie": "Rodney",
+    "rodney": "Rodney", "rod": "Rodney", "ronnie": "Rodney", "honey": "Rodney",
 }
 
 RANKS = {
@@ -165,10 +165,13 @@ def _fuzzy_match_game(text):
 def _parse_card_call(text):
     text_lower = text.lower().strip()
     # Fix common Whisper substitutions before parsing
+    text_lower = re.sub(r'^oh,?\s+', '', text_lower)  # strip leading "Oh,"
     text_lower = re.sub(r'\bto a\b', 'two of', text_lower)
     text_lower = re.sub(r'\b80\b', 'eight of', text_lower)
     text_lower = re.sub(r'\bat a\b', 'eight of', text_lower)
     text_lower = re.sub(r'\bfive at\b', 'five of', text_lower)
+    text_lower = re.sub(r'\bin\b', 'nine', text_lower)  # "Bill in spades" → "Bill nine spades"
+    text_lower = re.sub(r'\bfly with\b', 'five of', text_lower)
     matched_player = None
     remaining = text_lower
     # Try exact player names first, then aliases
@@ -356,6 +359,15 @@ class SpeechListener:
 
         # Load whisper model
         model_name = "mlx-community/whisper-small.en-mlx"
+        # Prompt biases Whisper toward our vocabulary
+        whisper_prompt = (
+            "Steve, Bill, David, Joe, Rodney. "
+            "Ace of spades. King of hearts. Queen of diamonds. Jack of clubs. "
+            "Two of hearts. Three of spades. Four of clubs. Five of diamonds. "
+            "Six of hearts. Seven of spades. Eight of clubs. Nine of diamonds. Ten of hearts. "
+            "The game is Follow the Queen. The game is 5 Card Draw. "
+            "The game is 7 Card Stud. The game is 3 Toed Pete."
+        )
         _log("Loading Whisper model (first run downloads ~500MB)...")
         try:
             import numpy as np
@@ -397,6 +409,7 @@ class SpeechListener:
                         wav_path,
                         path_or_hf_repo=model_name,
                         language="en",
+                        initial_prompt=whisper_prompt,
                     )
                     text = result.get("text", "").strip()
                     elapsed = time.time() - t0
