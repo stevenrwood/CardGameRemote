@@ -442,43 +442,48 @@ class SpeechListener:
         self._last_partial_text = ""
 
         self._result_count = 0
-        def result_handler(result, error):
-            if error:
-                error_desc = str(error)
-                if any(code in error_desc for code in ["216", "209", "1110"]):
-                    _log(f"Recognition ended (will restart): {error_desc}")
-                else:
-                    _log(f"Recognition error: {error_desc}")
-                self._task = None
-                return
 
-            if result is None:
-                return
+        # Store reference to prevent garbage collection by ObjC runtime
+        def _result_handler(result, error):
+            try:
+                if error:
+                    error_desc = str(error)
+                    if any(code in error_desc for code in ["216", "209", "1110"]):
+                        _log(f"Recognition ended (will restart): {error_desc}")
+                    else:
+                        _log(f"Recognition error: {error_desc}")
+                    self._task = None
+                    return
 
-            self._result_count += 1
-            text = result.bestTranscription().formattedString()
-            is_final = result.isFinal()
-            if self._result_count <= 3 or is_final:
+                if result is None:
+                    return
+
+                self._result_count += 1
+                text = result.bestTranscription().formattedString()
+                is_final = result.isFinal()
+
+                # Log all results for debugging
                 _log(f"Result #{self._result_count} (final={is_final}): \"{text}\"")
 
-            if result.isFinal():
-                # Only process the new portion of text
-                new_text = text[len(self._last_final_text):].strip()
-                if new_text and new_text != self._last_partial_text:
-                    self._process_text(new_text)
-                self._last_final_text = text
-                self._last_partial_text = ""
-            else:
-                # Partial result — check if we have a complete-looking command
-                new_text = text[len(self._last_final_text):].strip()
-                if new_text != self._last_partial_text:
-                    self._last_partial_text = new_text
-                    # Only fire on partials that look like complete commands
-                    # (helps reduce latency for card calls)
-                    self._try_partial(new_text)
+                if is_final:
+                    new_text = text[len(self._last_final_text):].strip()
+                    if new_text and new_text != self._last_partial_text:
+                        self._process_text(new_text)
+                    self._last_final_text = text
+                    self._last_partial_text = ""
+                else:
+                    new_text = text[len(self._last_final_text):].strip()
+                    if new_text != self._last_partial_text:
+                        self._last_partial_text = new_text
+                        self._try_partial(new_text)
+            except Exception as e:
+                _log(f"result_handler exception: {e}")
+
+        # Keep reference alive
+        self._result_handler_ref = _result_handler
 
         self._task = self._recognizer.recognitionTaskWithRequest_resultHandler_(
-            self._request, result_handler
+            self._request, self._result_handler_ref
         )
 
         self._restart_count += 1
