@@ -296,7 +296,7 @@ class SpeechListener:
     The recognition task auto-restarts when Apple's ~60s limit is reached.
     """
 
-    def __init__(self, callback: CommandCallback | None = None, locale: str = "en-US"):
+    def __init__(self, callback=None, locale="en-US"):
         _ensure_apple_frameworks()
         self._callback = callback or self._default_callback
         self._locale = locale
