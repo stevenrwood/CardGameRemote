@@ -41,7 +41,7 @@ NUM_ZONES = len(PLAYER_NAMES)
 
 DEFAULT_CAMERA_INDEX = 0
 DEFAULT_THRESHOLD = 30.0
-DEFAULT_RESOLUTION = "1920x1080"
+DEFAULT_RESOLUTION = "auto"
 
 CALIBRATION_FILE = Path(__file__).parent / "calibration.json"
 TRAINING_DIR = Path(__file__).parent / "training_data"
@@ -114,13 +114,18 @@ log_buffer = LogBuffer()
 # ---------------------------------------------------------------------------
 
 class FrameCapture:
-    def __init__(self, camera_index, resolution):
+    def __init__(self, camera_index, resolution="auto"):
         self.camera_index = camera_index
-        self.resolution = resolution
-        w, h = resolution.split("x")
+        self._check_ffmpeg()
+
+        if resolution == "auto":
+            self.resolution = self._find_best_resolution()
+        else:
+            self.resolution = resolution
+
+        w, h = self.resolution.split("x")
         self.width = int(w)
         self.height = int(h)
-        self._check_ffmpeg()
 
     def _check_ffmpeg(self):
         try:
@@ -128,6 +133,50 @@ class FrameCapture:
         except FileNotFoundError:
             log_buffer.log("ERROR: ffmpeg not found. Install with: brew install ffmpeg")
             sys.exit(1)
+
+    def _find_best_resolution(self):
+        """Try resolutions from highest to lowest, return the first that works."""
+        candidates = [
+            "3840x2160",  # 4K
+            "2560x1440",  # QHD
+            "1920x1080",  # 1080p
+            "1280x720",   # 720p
+        ]
+        log_buffer.log("Auto-detecting best resolution...")
+        for res in candidates:
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "error", "-nostdin",
+                "-f", "avfoundation",
+                "-video_size", res,
+                "-framerate", "5",
+                "-i", f"{self.camera_index}:none",
+                "-frames:v", "1",
+                "-q:v", "2",
+                str(CAPTURE_FILE)
+            ]
+            try:
+                result = subprocess.run(cmd, capture_output=True, timeout=10,
+                                        stdin=subprocess.DEVNULL)
+                if result.returncode == 0:
+                    frame = cv2.imread(str(CAPTURE_FILE))
+                    if frame is not None:
+                        actual = f"{frame.shape[1]}x{frame.shape[0]}"
+                        if actual == res:
+                            log_buffer.log(f"  {res} — OK")
+                            return res
+                        else:
+                            log_buffer.log(f"  {res} — got {actual} instead, skipping")
+                    else:
+                        log_buffer.log(f"  {res} — capture failed")
+                else:
+                    log_buffer.log(f"  {res} — ffmpeg error")
+            except subprocess.TimeoutExpired:
+                log_buffer.log(f"  {res} — timeout")
+            except Exception as e:
+                log_buffer.log(f"  {res} — {e}")
+
+        log_buffer.log("  Falling back to 1920x1080")
+        return "1920x1080"
 
     def capture(self):
         path = str(CAPTURE_FILE)
@@ -993,7 +1042,8 @@ def main():
     parser = argparse.ArgumentParser(description="Overhead camera card recognition test")
     parser.add_argument("--camera", type=int, default=DEFAULT_CAMERA_INDEX)
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
-    parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION)
+    parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION,
+                        help="Resolution WxH or 'auto' for highest available")
     args = parser.parse_args()
 
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
