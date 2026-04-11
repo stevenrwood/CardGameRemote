@@ -2,17 +2,11 @@
 """
 Overhead Camera Card Recognition Test Harness
 
-Captures still images from a Logitech Brio 4K camera using ffmpeg,
-monitors landing zones on a poker table for card placement,
-and uses Claude's vision API to identify cards.
-
-All UI is browser-based — no OpenCV windows.
-Debug dashboard at http://localhost:8888
-Live view at http://localhost:8888/live
-Calibration at http://localhost:8888/calibrate
+Single-page browser UI at http://localhost:8888
+Terminal is only used for startup — all interaction in the browser.
 
 Usage:
-    python overhead_test.py [--camera 0] [--threshold 30.0] [--resolution 1920x1080]
+    python overhead_test.py [--camera 0] [--threshold 30.0] [--resolution auto]
 """
 
 import argparse
@@ -25,7 +19,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from threading import Thread, Event, Lock
+from threading import Thread, Lock
 from queue import Queue, Empty
 
 import cv2
@@ -50,11 +44,6 @@ CAPTURE_FILE = Path("/tmp/card_scanner_frame.jpg")
 
 MODEL = "claude-sonnet-4-20250514"
 
-COLOR_WHITE  = (255, 255, 255)
-COLOR_GREEN  = (0, 255, 0)
-COLOR_YELLOW = (0, 255, 255)
-COLOR_RED    = (0, 0, 255)
-
 # ---------------------------------------------------------------------------
 # Speech queue
 # ---------------------------------------------------------------------------
@@ -62,8 +51,7 @@ COLOR_RED    = (0, 0, 255)
 class SpeechQueue:
     def __init__(self):
         self._queue = Queue()
-        self._thread = Thread(target=self._run, daemon=True)
-        self._thread.start()
+        Thread(target=self._run, daemon=True).start()
 
     def say(self, phrase):
         self._queue.put(phrase)
@@ -74,13 +62,12 @@ class SpeechQueue:
             latest = {phrase: phrase}
             try:
                 while True:
-                    p = self._queue.get_nowait()
-                    latest[p] = p
+                    latest[self._queue.get_nowait()] = True
             except Empty:
                 pass
-            for p in latest.values():
-                subprocess.run(["say", p],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for p in latest:
+                subprocess.run(["say", p], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
 
 speech = SpeechQueue()
 
@@ -89,9 +76,8 @@ speech = SpeechQueue()
 # ---------------------------------------------------------------------------
 
 class LogBuffer:
-    def __init__(self, max_lines=200):
+    def __init__(self, maxlines=200):
         self._lines = []
-        self._max = max_lines
         self._lock = Lock()
 
     def log(self, msg):
@@ -100,14 +86,13 @@ class LogBuffer:
         print(f"  {msg}")
         with self._lock:
             self._lines.append(line)
-            if len(self._lines) > self._max:
-                self._lines = self._lines[-self._max:]
+            self._lines = self._lines[-200:]
 
-    def get_lines(self):
+    def get(self, n=50):
         with self._lock:
-            return list(self._lines)
+            return list(self._lines[-n:])
 
-log_buffer = LogBuffer()
+log = LogBuffer()
 
 # ---------------------------------------------------------------------------
 # Frame capture via ffmpeg
@@ -117,89 +102,48 @@ class FrameCapture:
     def __init__(self, camera_index, resolution="auto"):
         self.camera_index = camera_index
         self._check_ffmpeg()
-
-        if resolution == "auto":
-            self.resolution = self._find_best_resolution()
-        else:
-            self.resolution = resolution
-
+        self.resolution = self._find_best_resolution() if resolution == "auto" else resolution
         w, h = self.resolution.split("x")
-        self.width = int(w)
-        self.height = int(h)
+        self.width, self.height = int(w), int(h)
 
     def _check_ffmpeg(self):
         try:
             subprocess.run(["ffmpeg", "-version"], capture_output=True, timeout=5)
         except FileNotFoundError:
-            log_buffer.log("ERROR: ffmpeg not found. Install with: brew install ffmpeg")
+            print("  ERROR: ffmpeg not found. Install with: brew install ffmpeg")
             sys.exit(1)
 
     def _find_best_resolution(self):
-        """Try resolutions from highest to lowest, return the first that works."""
-        candidates = [
-            "3840x2160",  # 4K
-            "2560x1440",  # QHD
-            "1920x1080",  # 1080p
-            "1280x720",   # 720p
-        ]
-        log_buffer.log("Auto-detecting best resolution...")
-        for res in candidates:
-            cmd = [
-                "ffmpeg", "-y", "-loglevel", "error", "-nostdin",
-                "-f", "avfoundation",
-                "-video_size", res,
-                "-framerate", "5",
-                "-i", f"{self.camera_index}:none",
-                "-frames:v", "1",
-                "-q:v", "2",
-                str(CAPTURE_FILE)
-            ]
+        log.log("Auto-detecting resolution...")
+        for res in ["3840x2160", "2560x1440", "1920x1080", "1280x720"]:
             try:
-                result = subprocess.run(cmd, capture_output=True, timeout=10,
-                                        stdin=subprocess.DEVNULL)
-                if result.returncode == 0:
-                    frame = cv2.imread(str(CAPTURE_FILE))
-                    if frame is not None:
-                        actual = f"{frame.shape[1]}x{frame.shape[0]}"
-                        if actual == res:
-                            log_buffer.log(f"  {res} — OK")
-                            return res
-                        else:
-                            log_buffer.log(f"  {res} — got {actual} instead, skipping")
-                    else:
-                        log_buffer.log(f"  {res} — capture failed")
-                else:
-                    log_buffer.log(f"  {res} — ffmpeg error")
-            except subprocess.TimeoutExpired:
-                log_buffer.log(f"  {res} — timeout")
-            except Exception as e:
-                log_buffer.log(f"  {res} — {e}")
-
-        log_buffer.log("  Falling back to 1920x1080")
+                subprocess.run([
+                    "ffmpeg", "-y", "-loglevel", "error", "-nostdin",
+                    "-f", "avfoundation", "-video_size", res, "-framerate", "5",
+                    "-i", f"{self.camera_index}:none", "-frames:v", "1",
+                    "-q:v", "2", str(CAPTURE_FILE)
+                ], capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
+                frame = cv2.imread(str(CAPTURE_FILE))
+                if frame is not None and f"{frame.shape[1]}x{frame.shape[0]}" == res:
+                    log.log(f"  {res} — OK")
+                    return res
+                log.log(f"  {res} — skipped")
+            except Exception:
+                log.log(f"  {res} — failed")
         return "1920x1080"
 
     def capture(self):
-        path = str(CAPTURE_FILE)
-        cmd = [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-nostdin",
-            "-f", "avfoundation",
-            "-video_size", self.resolution,
-            "-framerate", "5",
-            "-i", f"{self.camera_index}:none",
-            "-frames:v", "1",
-            "-q:v", "2",
-            path
-        ]
         try:
-            subprocess.run(cmd, capture_output=True, timeout=10,
-                           stdin=subprocess.DEVNULL)
-            frame = cv2.imread(path)
-            return frame
+            subprocess.run([
+                "ffmpeg", "-y", "-loglevel", "error", "-nostdin",
+                "-f", "avfoundation", "-video_size", self.resolution,
+                "-framerate", "5", "-i", f"{self.camera_index}:none",
+                "-frames:v", "1", "-q:v", "2", str(CAPTURE_FILE)
+            ], capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
+            return cv2.imread(str(CAPTURE_FILE))
         except Exception as e:
-            log_buffer.log(f"Capture error: {e}")
+            log.log(f"Capture error: {e}")
             return None
-
 
 # ---------------------------------------------------------------------------
 # Calibration
@@ -211,82 +155,58 @@ class Calibration:
         self.circle_radius = None
         self.zones = []
 
-    def save(self, path=CALIBRATION_FILE):
-        data = {
-            "circle_center": list(self.circle_center) if self.circle_center else None,
-            "circle_radius": self.circle_radius,
-            "zones": self.zones,
-        }
-        with open(path, "w") as f:
+    def save(self):
+        data = {"circle_center": list(self.circle_center) if self.circle_center else None,
+                "circle_radius": self.circle_radius, "zones": self.zones}
+        with open(CALIBRATION_FILE, "w") as f:
             json.dump(data, f, indent=2)
-        log_buffer.log(f"Calibration saved to {path}")
+        log.log("Calibration saved")
 
-    def load(self, path=CALIBRATION_FILE):
-        if not path.exists():
+    def load(self):
+        if not CALIBRATION_FILE.exists():
             return False
-        with open(path) as f:
+        with open(CALIBRATION_FILE) as f:
             data = json.load(f)
         cc = data.get("circle_center")
         self.circle_center = tuple(cc) if cc else None
         self.circle_radius = data.get("circle_radius")
         self.zones = data.get("zones", [])
         if self.zones and "cx" not in self.zones[0]:
-            print("  Old calibration format — recalibrate (press 'c')")
             self.zones = []
             return False
         return True
 
     @property
-    def is_complete(self):
-        return (
-            self.circle_center is not None
-            and self.circle_radius is not None
-            and len(self.zones) == NUM_ZONES
-        )
-
+    def ok(self):
+        return self.circle_center and self.circle_radius and len(self.zones) == NUM_ZONES
 
 # ---------------------------------------------------------------------------
 # Image helpers
 # ---------------------------------------------------------------------------
 
-def crop_to_felt_circle(frame, cal):
-    if cal.circle_center is None or cal.circle_radius is None:
+def crop_circle(frame, cal):
+    if not cal.circle_center or not cal.circle_radius:
         return frame
     mask = np.zeros(frame.shape[:2], dtype=np.uint8)
     cv2.circle(mask, cal.circle_center, cal.circle_radius, 255, -1)
     return cv2.bitwise_and(frame, frame, mask=mask)
 
-def draw_overlay(frame, cal, monitor, flash_zone=None, flash_on=False):
+def draw_overlay(frame, cal, monitor):
     if cal.circle_center and cal.circle_radius:
-        cv2.circle(frame, cal.circle_center, cal.circle_radius, COLOR_WHITE, 2)
-
-    for zone in cal.zones:
-        name = zone["name"]
-        cx, cy, r = zone["cx"], zone["cy"], zone["r"]
-
-        if flash_zone == name:
-            if flash_on:
-                cv2.circle(frame, (cx, cy), r, COLOR_RED, 4)
-                cv2.putText(frame, name, (cx - 30, cy - r - 10),
-                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_RED, 2)
-            continue
-
-        zstate = monitor.zone_state.get(name, "empty")
-        color = {"recognized": COLOR_GREEN, "processing": COLOR_YELLOW}.get(zstate, COLOR_WHITE)
-
-        cv2.circle(frame, (cx, cy), r, color, 2)
-        cv2.putText(frame, name, (cx - 30, cy - r - 10),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-
+        cv2.circle(frame, cal.circle_center, cal.circle_radius, (255,255,255), 2)
+    for z in cal.zones:
+        name, cx, cy, r = z["name"], z["cx"], z["cy"], z["r"]
+        zs = monitor.zone_state.get(name, "empty")
+        color = {"recognized":(0,255,0), "processing":(0,255,255)}.get(zs, (255,255,255))
+        cv2.circle(frame, (cx,cy), r, color, 2)
+        cv2.putText(frame, name, (cx-30, cy-r-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
         card = monitor.last_card.get(name, "")
         if card:
-            cv2.putText(frame, card, (cx - 60, cy + r + 25),
-                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_GREEN, 2)
+            cv2.putText(frame, card, (cx-60, cy+r+25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
 
-def frame_to_jpeg(frame, quality=85):
-    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+def to_jpeg(frame, q=85):
+    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, q])
     return buf.tobytes() if ok else None
-
 
 # ---------------------------------------------------------------------------
 # Zone monitor
@@ -306,150 +226,111 @@ class ZoneMonitor:
         if self._client is None:
             try:
                 import anthropic
-                api_key = os.environ.get("ANTHROPIC_API_KEY")
-                if not api_key and CONFIG_FILE.exists():
-                    with open(CONFIG_FILE) as f:
-                        cfg = json.load(f)
-                        api_key = cfg.get("anthropic_api_key")
-                if api_key and api_key != "YOUR_KEY_HERE":
-                    self._client = anthropic.Anthropic(api_key=api_key)
+                key = os.environ.get("ANTHROPIC_API_KEY")
+                if not key and CONFIG_FILE.exists():
+                    key = json.loads(CONFIG_FILE.read_text()).get("anthropic_api_key")
+                if key and key != "YOUR_KEY_HERE":
+                    self._client = anthropic.Anthropic(api_key=key)
                 else:
-                    log_buffer.log("WARNING: No valid API key.")
+                    log.log("WARNING: No API key")
             except ImportError:
-                log_buffer.log("WARNING: anthropic package not installed.")
+                log.log("WARNING: anthropic not installed")
         return self._client
 
-    def capture_baselines(self, frame, zones):
-        for zone in zones:
-            crop = self._crop_zone(frame, zone)
-            if crop is None or crop.size == 0:
-                log_buffer.log(f"WARNING: zone '{zone['name']}' out of bounds")
-                continue
-            self.baselines[zone["name"]] = crop.copy()
-            self.zone_state[zone["name"]] = "empty"
-            self.last_card[zone["name"]] = ""
-            self.pending[zone["name"]] = False
+    def capture_baselines(self, frame):
+        for z in _state.cal.zones:
+            crop = self._crop(frame, z)
+            if crop is not None and crop.size > 0:
+                self.baselines[z["name"]] = crop.copy()
+                self.zone_state[z["name"]] = "empty"
+                self.last_card[z["name"]] = ""
+                self.pending[z["name"]] = False
+        log.log("Baselines captured")
 
-    def check_zones(self, frame, zones):
-        for zone in zones:
-            name = zone["name"]
-            if name not in self.baselines:
+    def check_zones(self, frame):
+        for z in _state.cal.zones:
+            name = z["name"]
+            if name not in self.baselines or self.pending.get(name):
                 continue
-            if self.pending.get(name, False):
+            crop = self._crop(frame, z)
+            if crop is None or crop.size == 0:
                 continue
+            bl = self.baselines[name]
+            if crop.shape != bl.shape:
+                continue
+            diff = float(np.mean(cv2.absdiff(crop, bl)))
+
             if self.zone_state.get(name) == "recognized":
-                crop = self._crop_zone(frame, zone)
-                if crop is None or crop.size == 0:
-                    continue
-                baseline = self.baselines[name]
-                if crop.shape != baseline.shape:
-                    continue
-                diff = cv2.absdiff(crop, baseline)
-                if float(np.mean(diff)) < self.threshold:
+                if diff < self.threshold:
                     self.zone_state[name] = "empty"
                     self.last_card[name] = ""
                 continue
 
-            crop = self._crop_zone(frame, zone)
-            if crop is None or crop.size == 0:
-                continue
-            baseline = self.baselines[name]
-            if crop.shape != baseline.shape:
-                continue
-            diff = cv2.absdiff(crop, baseline)
-            if float(np.mean(diff)) > self.threshold:
+            if diff > self.threshold:
                 self.zone_state[name] = "processing"
                 self.pending[name] = True
                 Thread(target=self._recognize, args=(name, crop.copy()), daemon=True).start()
 
-    def check_single_zone(self, frame, zone):
+    def check_single(self, frame, zone):
         name = zone["name"]
         if name not in self.baselines:
             return None
-        crop = self._crop_zone(frame, zone)
+        crop = self._crop(frame, zone)
         if crop is None or crop.size == 0:
             return None
-        baseline = self.baselines[name]
-        if crop.shape != baseline.shape:
+        bl = self.baselines[name]
+        if crop.shape != bl.shape:
             return None
-        diff = cv2.absdiff(crop, baseline)
-        if float(np.mean(diff)) > self.threshold:
+        if float(np.mean(cv2.absdiff(crop, bl))) > self.threshold:
             return crop.copy()
         return None
 
-    def recognize_sync(self, name, crop):
-        self._recognize(name, crop)
-        return self.last_card.get(name, "No card")
-
-    def _crop_zone(self, frame, zone):
+    def _crop(self, frame, z):
         h, w = frame.shape[:2]
-        cx, cy, r = zone["cx"], zone["cy"], zone["r"]
-        x1, y1 = max(0, cx - r), max(0, cy - r)
-        x2, y2 = min(w, cx + r), min(h, cy + r)
-        if x2 <= x1 or y2 <= y1:
-            return None
-        return frame[y1:y2, x1:x2]
+        cx, cy, r = z["cx"], z["cy"], z["r"]
+        x1, y1 = max(0, cx-r), max(0, cy-r)
+        x2, y2 = min(w, cx+r), min(h, cy+r)
+        return frame[y1:y2, x1:x2] if x2 > x1 and y2 > y1 else None
 
     def _recognize(self, name, crop):
         t0 = time.time()
         try:
-            if self.client is None:
-                log_buffer.log(f"[{name}] API not available")
+            if not self.client:
                 self.zone_state[name] = "empty"
                 return
-
             b64 = base64.b64encode(
                 cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes()
-            ).decode("utf-8")
-
-            response = self.client.messages.create(
+            ).decode()
+            resp = self.client.messages.create(
                 model=MODEL, max_tokens=20,
-                messages=[{"role": "user", "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                    {"type": "text", "text":
-                        "What playing card is this? Reply with ONLY the rank and suit "
-                        "in exactly this format: 'Rank of Suit' (e.g. '4 of Clubs', "
-                        "'King of Hearts'). If you cannot identify the card, reply "
-                        "with exactly: 'No card'"},
-                ]}],
-            )
-
-            raw = response.content[0].text.strip()
-            result = self._parse_card_result(raw)
-            elapsed = time.time() - t0
-
+                messages=[{"role":"user","content":[
+                    {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":b64}},
+                    {"type":"text","text":"What playing card is this? Reply ONLY: 'Rank of Suit' (e.g. '4 of Clubs'). If unclear: 'No card'"},
+                ]}])
+            raw = resp.content[0].text.strip()
+            m = re.search(r'(Ace|King|Queen|Jack|10|[2-9])\s+of\s+(Hearts|Diamonds|Clubs|Spades)', raw, re.I)
+            result = f"{m.group(1).capitalize()} of {m.group(2).capitalize()}" if m else "No card"
             self.last_card[name] = result
             self.zone_state[name] = "recognized"
-            log_buffer.log(f"{name}: {result}  ({elapsed:.1f}s)")
-            self._save_training(name, crop, result)
-
+            log.log(f"{name}: {result}  ({time.time()-t0:.1f}s)")
+            self._save(name, crop, result)
             if "no card" not in result.lower():
                 speech.say(f"{name}, {result}")
-
-        except Exception as exc:
-            log_buffer.log(f"[{name}] API error: {exc}")
+        except Exception as e:
+            log.log(f"[{name}] error: {e}")
             self.zone_state[name] = "empty"
         finally:
             self.pending[name] = False
 
-    def _parse_card_result(self, raw):
-        match = re.search(
-            r'(Ace|King|Queen|Jack|10|[2-9])\s+of\s+(Hearts|Diamonds|Clubs|Spades)',
-            raw, re.IGNORECASE)
-        if match:
-            return f"{match.group(1).capitalize()} of {match.group(2).capitalize()}"
-        return "No card"
-
-    def _save_training(self, name, crop, result):
+    def _save(self, name, crop, result):
         TRAINING_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe = result.replace(" ", "_").replace("/", "-")[:30]
+        safe = result.replace(" ","_").replace("/","-")[:30]
         cv2.imwrite(str(TRAINING_DIR / f"{ts}_{name}_{safe}.jpg"), crop)
         (TRAINING_DIR / f"{ts}_{name}_{safe}.txt").write_text(result)
 
-
 # ---------------------------------------------------------------------------
-# Application state
+# App state
 # ---------------------------------------------------------------------------
 
 class AppState:
@@ -459,184 +340,356 @@ class AppState:
         self.monitor = monitor
         self.monitoring = False
         self.latest_frame = None
-        self.latest_cropped_jpg = None
+        self.latest_jpg = None  # cropped + overlay
         self.quit_flag = False
-        # Calibration click queue — browser POSTs click coords here
-        self.cal_click_queue = Queue()
-
-
-# ---------------------------------------------------------------------------
-# Web server — all UI in browser
-# ---------------------------------------------------------------------------
+        self.test_mode = None   # None or {"zone_idx":0, "waiting":"card"|"confirm", "result":""}
 
 _state = None
 
+# ---------------------------------------------------------------------------
+# Background capture
+# ---------------------------------------------------------------------------
+
+def bg_loop():
+    while not _state.quit_flag:
+        frame = _state.capture.capture()
+        if frame is not None:
+            _state.latest_frame = frame
+            disp = crop_circle(frame, _state.cal).copy()
+            draw_overlay(disp, _state.cal, _state.monitor)
+            _state.latest_jpg = to_jpeg(disp)
+            if _state.monitoring and _state.cal.ok:
+                _state.monitor.check_zones(frame)
+            # Test mode: check if card appeared in the active zone
+            tm = _state.test_mode
+            if tm and tm["waiting"] == "card" and _state.cal.ok:
+                zone = _state.cal.zones[tm["zone_idx"]]
+                crop = _state.monitor.check_single(frame, zone)
+                if crop is not None:
+                    log.log(f"[{zone['name']}] Card detected, recognizing...")
+                    result = _state.monitor.last_card.get(zone["name"], "")
+                    if not result or result == "No card":
+                        _state.monitor._recognize(zone["name"], crop)
+                        result = _state.monitor.last_card.get(zone["name"], "No card")
+                    if result and result != "No card":
+                        tm["result"] = result
+                        tm["waiting"] = "confirm"
+                        speech.say(f"{zone['name']}, {result}")
+        time.sleep(2)
+
+# ---------------------------------------------------------------------------
+# Web server — single page app
+# ---------------------------------------------------------------------------
+
 class Handler(http.server.BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        pass
+    def log_message(self, *a): pass
 
     def do_GET(self):
         s = _state
-        if s is None:
-            return self._r(500, "text/plain", "Not ready")
-
-        p = self.path.split("?")[0]  # strip query params
-
-        if p == "/" or p == "/debug":
-            self._serve_dashboard(s)
-        elif p == "/live":
-            self._serve_live(s)
-        elif p == "/calibrate":
-            self._serve_calibrate_page(s)
-        elif p == "/log":
-            self._r(200, "text/plain", "\n".join(log_buffer.get_lines()))
-        elif p == "/api/log":
-            self._r(200, "application/json", json.dumps({"lines": log_buffer.get_lines()[-50:]}))
-        elif p == "/snapshot":
-            self._serve_frame(s)
-        elif p == "/snapshot/cropped":
-            self._serve_cropped(s)
-        elif p == "/snapshot/raw":
-            self._serve_frame(s)
+        if not s: return self._r(500,"text/plain","Not ready")
+        p = self.path.split("?")[0]
+        routes = {
+            "/": self._page, "/app": self._page,
+            "/calibrate": self._calibrate_page,
+            "/snapshot": lambda s: self._jpeg(s.latest_frame),
+            "/snapshot/cropped": lambda s: self._r(200,"image/jpeg",s.latest_jpg) if s.latest_jpg else self._r(503,"text/plain","wait"),
+            "/api/state": self._api_state,
+            "/api/log": lambda s: self._r(200,"application/json",json.dumps({"lines":log.get(100)})),
+            "/log": lambda s: self._r(200,"text/plain","\n".join(log.get(200))),
+            "/calibration": lambda s: self._r(200,"application/json",CALIBRATION_FILE.read_text()) if CALIBRATION_FILE.exists() else self._r(404,"text/plain","none"),
+            "/training": self._training_list,
+        }
+        if p in routes:
+            routes[p](s)
         elif p.startswith("/zone/"):
-            self._serve_zone(s, p[6:])
-        elif p == "/calibration":
-            if CALIBRATION_FILE.exists():
-                self._r(200, "application/json", CALIBRATION_FILE.read_text())
-            else:
-                self._r(404, "text/plain", "No calibration")
-        elif p == "/training":
-            self._serve_training_list()
+            self._zone_img(s, p[6:])
         elif p.startswith("/training/"):
-            self._serve_training_file(p[10:])
-        elif p == "/api/state":
-            self._serve_api_state(s)
+            self._training_file(p[10:])
         else:
-            self._r(404, "text/plain", "Not found")
+            self._r(404,"text/plain","Not found")
 
     def do_POST(self):
         s = _state
-        if s is None:
-            return self._r(500, "text/plain", "Not ready")
-
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode("utf-8") if length else ""
-
+        if not s: return self._r(500,"text/plain","Not ready")
+        body = self.rfile.read(int(self.headers.get("Content-Length",0))).decode()
+        data = json.loads(body) if body else {}
         p = self.path
-        if p == "/api/calibrate/click":
-            data = json.loads(body)
-            s.cal_click_queue.put((int(data["x"]), int(data["y"])))
-            self._r(200, "application/json", '{"ok":true}')
+
+        if p == "/api/calibrate/save":
+            cc = data.get("circle_center")
+            s.cal.circle_center = tuple(cc) if cc else None
+            s.cal.circle_radius = data.get("circle_radius")
+            s.cal.zones = data.get("zones", [])
+            s.cal.save()
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/monitor/start":
+            if s.cal.ok and s.latest_frame is not None:
+                s.monitor.capture_baselines(s.latest_frame)
+                s.monitoring = True
+            self._r(200,"application/json",json.dumps({"monitoring":s.monitoring}))
+
+        elif p == "/api/monitor/stop":
+            s.monitoring = False
+            self._r(200,"application/json",'{"monitoring":false}')
+
+        elif p == "/api/baselines":
+            if s.cal.ok and s.latest_frame is not None:
+                s.monitor.capture_baselines(s.latest_frame)
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/test/start":
+            if s.cal.ok and s.latest_frame is not None:
+                s.monitor.capture_baselines(s.latest_frame)
+                s.test_mode = {"zone_idx": 0, "waiting": "card", "result": ""}
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/test/confirm":
+            tm = s.test_mode
+            if tm:
+                correct = data.get("correct", True)
+                if correct:
+                    tm["zone_idx"] += 1
+                    if tm["zone_idx"] >= len(s.cal.zones):
+                        s.test_mode = None
+                    else:
+                        tm["waiting"] = "card"
+                        tm["result"] = ""
+                else:
+                    # Retry same zone
+                    tm["waiting"] = "card"
+                    tm["result"] = ""
+                    name = s.cal.zones[tm["zone_idx"]]["name"]
+                    s.monitor.zone_state[name] = "empty"
+                    s.monitor.last_card[name] = ""
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/test/skip":
+            tm = s.test_mode
+            if tm:
+                tm["zone_idx"] += 1
+                if tm["zone_idx"] >= len(s.cal.zones):
+                    s.test_mode = None
+                else:
+                    tm["waiting"] = "card"
+                    tm["result"] = ""
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/test/stop":
+            s.test_mode = None
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/snapshot/save":
+            if s.latest_frame is not None:
+                cropped = crop_circle(s.latest_frame, s.cal)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                path = Path(__file__).parent / f"snapshot_{ts}.jpg"
+                cv2.imwrite(str(path), cropped)
+                log.log(f"Snapshot saved: {path.name}")
+            self._r(200,"application/json",'{"ok":true}')
+
         else:
-            self._r(404, "text/plain", "Not found")
+            self._r(404,"text/plain","Not found")
 
     def _r(self, code, ct, body):
         self.send_response(code)
         self.send_header("Content-Type", ct)
         if ct == "image/jpeg":
-            self.send_header("Cache-Control", "no-store, no-cache, max-age=0")
+            self.send_header("Cache-Control","no-store,no-cache,max-age=0")
         self.end_headers()
-        self.wfile.write(body.encode("utf-8") if isinstance(body, str) else body)
+        self.wfile.write(body.encode() if isinstance(body,str) else body)
 
-    def _serve_dashboard(self, s):
-        zone_names_js = json.dumps([z["name"] for z in s.cal.zones])
-        res = f"{s.capture.width}x{s.capture.height}"
-        self._r(200, "text/html", f"""<!DOCTYPE html>
-<html><head><title>Card Scanner Debug</title>
+    def _jpeg(self, frame):
+        if frame is None: return self._r(503,"text/plain","No frame")
+        j = to_jpeg(frame, 80)
+        if j: self._r(200,"image/jpeg",j)
+
+    def _api_state(self, s):
+        tm = s.test_mode
+        test_info = None
+        if tm:
+            idx = tm["zone_idx"]
+            test_info = {
+                "zone": s.cal.zones[idx]["name"] if idx < len(s.cal.zones) else None,
+                "zone_idx": idx,
+                "total": len(s.cal.zones),
+                "waiting": tm["waiting"],
+                "result": tm["result"],
+            }
+        self._r(200,"application/json",json.dumps({
+            "monitoring": s.monitoring,
+            "calibrated": s.cal.ok,
+            "resolution": s.capture.resolution,
+            "test_mode": test_info,
+            "zones": {z["name"]: {"state": s.monitor.zone_state.get(z["name"],"empty"),
+                                   "card": s.monitor.last_card.get(z["name"],"")}
+                      for z in s.cal.zones},
+        }))
+
+    def _page(self, s):
+        players_js = json.dumps(PLAYER_NAMES)
+        self._r(200,"text/html",f"""<!DOCTYPE html>
+<html><head><title>Card Scanner</title><meta name="viewport" content="width=device-width">
 <style>
-body{{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px}}
-a{{color:#4fc3f7}}img{{border:1px solid #444;margin:4px}}
-pre{{background:#0d1117;padding:12px;border-radius:6px;max-height:400px;overflow:auto;font-size:0.85em}}
-.zone{{display:inline-block;margin:8px;padding:12px;border:2px solid #888;border-radius:8px;min-width:120px;text-align:center}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,sans-serif;background:#1a1a2e;color:#e0e0e0;padding:12px}}
+button{{padding:8px 14px;border:none;border-radius:6px;cursor:pointer;font-size:.9em;margin:3px}}
+.btn-blue{{background:#0f3460;color:#fff}} .btn-blue:hover{{background:#1a4a7a}}
+.btn-green{{background:#1b5e20;color:#fff}} .btn-green:hover{{background:#2e7d32}}
+.btn-red{{background:#b71c1c;color:#fff}} .btn-red:hover{{background:#c62828}}
+.btn-orange{{background:#e65100;color:#fff}}
+.btn-off{{background:#333;color:#888}}
+img{{border:1px solid #333;border-radius:4px}}
+#toolbar{{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;padding:8px;background:#16213e;border-radius:8px}}
+#main{{display:flex;gap:12px;flex-wrap:wrap}}
+#left{{flex:1;min-width:300px}} #right{{width:320px;flex-shrink:0}}
+.zone{{padding:8px;margin:4px 0;border:2px solid #444;border-radius:8px;display:flex;align-items:center;gap:8px}}
+.zone img{{width:100px;height:100px;object-fit:cover;border-radius:4px}}
+.zone-info{{flex:1}}
+.zone-name{{font-weight:bold;font-size:1.1em}}
+.zone-card{{font-size:1.2em;margin-top:2px}}
+pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:200px;overflow:auto;margin-top:8px}}
+#test-panel{{background:#0f3460;padding:12px;border-radius:8px;margin:8px 0;display:none}}
+#test-panel h3{{margin-bottom:8px}}
+#status-bar{{font-size:.85em;color:#888;margin-top:8px}}
 </style></head><body>
-<h1>Overhead Card Scanner</h1>
-<p>Resolution: {res} |
-Monitoring: <span id="mon">...</span> |
-Calibrated: {'Yes' if s.cal.is_complete else 'No'}</p>
-<p><a href="/live">Live View</a> | <a href="/calibrate">Calibrate</a></p>
-<h2>Snapshot</h2>
-<img id="snap" src="/snapshot" width="640" style="cursor:pointer" onclick="this.src='/snapshot?'+Date.now()">
-<h2>Zones</h2>
-<div id="zones"></div>
-<h2>Log (last 50 lines)</h2>
-<pre id="logpre"></pre>
-<p><a href="/log">Full log</a> | <a href="/calibration">Calibration JSON</a> |
-<a href="/training">Training data</a></p>
+<div id="toolbar">
+  <button class="btn-blue" onclick="location.href='/calibrate'">Calibrate</button>
+  <button class="btn-green" id="btn-monitor" onclick="toggleMonitor()">Start Monitor</button>
+  <button class="btn-blue" onclick="startTest()">Test Recognition</button>
+  <button class="btn-blue" onclick="resetBaselines()">Reset Baselines</button>
+  <button class="btn-blue" onclick="saveSnapshot()">Snapshot</button>
+  <span id="status-bar">Loading...</span>
+</div>
+<div id="test-panel">
+  <h3 id="test-title">Test Mode</h3>
+  <p id="test-prompt"></p>
+  <div id="test-buttons" style="margin-top:8px">
+    <button class="btn-green" onclick="testConfirm(true)">Correct</button>
+    <button class="btn-red" onclick="testConfirm(false)">Incorrect</button>
+    <button class="btn-orange" onclick="testSkip()">Skip</button>
+    <button class="btn-off" onclick="testStop()">Stop Test</button>
+  </div>
+</div>
+<div id="main">
+  <div id="left">
+    <img id="tableimg" src="/snapshot/cropped" style="width:100%;cursor:pointer"
+         onclick="this.src='/snapshot/cropped?'+Date.now()">
+  </div>
+  <div id="right">
+    <h3>Zones</h3>
+    <div id="zones"></div>
+    <h3 style="margin-top:12px">Log</h3>
+    <pre id="logpre"></pre>
+    <p style="margin-top:8px;font-size:.8em">
+      <a href="/log" style="color:#4fc3f7">Full log</a> |
+      <a href="/training" style="color:#4fc3f7">Training data</a>
+    </p>
+  </div>
+</div>
 <script>
-var zoneNames={zone_names_js};
+var players={players_js};
+var monitoring=false, testMode=null;
+
+function api(path, data){{
+  return fetch(path,{{method:'POST',headers:{{'Content-Type':'application/json'}},
+    body:JSON.stringify(data||{{}})}}).then(function(r){{return r.json()}});
+}}
+
+function toggleMonitor(){{
+  if(monitoring) api('/api/monitor/stop').then(update);
+  else api('/api/monitor/start').then(update);
+}}
+function startTest(){{
+  if(!confirm('Clear all cards from table, then click OK')) return;
+  api('/api/test/start').then(update);
+}}
+function testConfirm(correct){{ api('/api/test/confirm',{{correct:correct}}).then(update); }}
+function testSkip(){{ api('/api/test/skip').then(update); }}
+function testStop(){{ api('/api/test/stop').then(update); }}
+function resetBaselines(){{
+  if(!confirm('Clear all cards, then click OK')) return;
+  api('/api/baselines').then(function(){{ log.log && update(); }});
+}}
+function saveSnapshot(){{ api('/api/snapshot/save'); }}
+
 function update(){{
-  // Update snapshot
-  var img=new Image();
-  img.onload=function(){{document.getElementById('snap').src=img.src}};
-  img.src='/snapshot?'+Date.now()+Math.random();
-  // Update zone images
-  zoneNames.forEach(function(n){{
-    var zi=document.getElementById('zimg_'+n);
-    if(zi){{var ni=new Image();ni.onload=function(){{zi.src=ni.src}};ni.src='/zone/'+n+'?'+Date.now()}}
-  }});
-  // Update state
+  // Table image
+  var ti=new Image();
+  ti.onload=function(){{document.getElementById('tableimg').src=ti.src}};
+  ti.src='/snapshot/cropped?'+Date.now()+Math.random();
+
+  // State
   fetch('/api/state').then(function(r){{return r.json()}}).then(function(d){{
-    document.getElementById('mon').textContent=d.monitoring?'ON':'OFF';
-    zoneNames.forEach(function(n){{
-      var z=d.zones[n]||{{}};
-      var el=document.getElementById('zstate_'+n);
-      var cl=document.getElementById('zcard_'+n);
-      var div=document.getElementById('zdiv_'+n);
-      if(el) el.textContent=z.state||'empty';
-      if(cl) cl.textContent=z.card||'';
-      if(div){{
-        var c={{'recognized':'#4caf50','processing':'#ff9800'}}[z.state]||'#888';
-        div.style.borderColor=c;
-        if(cl) cl.style.color=c;
-      }}
+    monitoring=d.monitoring;
+    var btn=document.getElementById('btn-monitor');
+    btn.textContent=monitoring?'Stop Monitor':'Start Monitor';
+    btn.className=monitoring?'btn-red':'btn-green';
+
+    // Status bar
+    var sb='Resolution: '+d.resolution+' | '+(d.calibrated?'Calibrated':'NOT calibrated');
+    sb+=' | Monitor: '+(d.monitoring?'ON':'OFF');
+    document.getElementById('status-bar').textContent=sb;
+
+    // Zones
+    var zh='';
+    players.forEach(function(name){{
+      var z=d.zones[name]||{{}};
+      var st=z.state||'empty';
+      var card=z.card||'';
+      var bc={{'recognized':'#4caf50','processing':'#ff9800'}}[st]||'#444';
+      zh+='<div class="zone" style="border-color:'+bc+'">'
+        +'<img src="/zone/'+name+'?'+Date.now()+'" onerror="this.style.display=\\'none\\'">'
+        +'<div class="zone-info"><div class="zone-name">'+name+'</div>'
+        +'<div style="color:#888;font-size:.8em">'+st+'</div>'
+        +'<div class="zone-card" style="color:'+bc+'">'+card+'</div></div></div>';
     }});
+    document.getElementById('zones').innerHTML=zh;
+
+    // Test mode panel
+    var tp=document.getElementById('test-panel');
+    var tb=document.getElementById('test-buttons');
+    if(d.test_mode){{
+      tp.style.display='block';
+      var tm=d.test_mode;
+      if(!tm.zone){{
+        document.getElementById('test-title').textContent='Test Complete!';
+        document.getElementById('test-prompt').textContent='';
+        tb.innerHTML='<button class="btn-blue" onclick="testStop()">Done</button>';
+      }} else if(tm.waiting=='card'){{
+        document.getElementById('test-title').textContent='Testing: '+tm.zone+' ('+
+          (tm.zone_idx+1)+'/'+tm.total+')';
+        document.getElementById('test-prompt').textContent='Place a face-up card in '+tm.zone+'\\'s zone...';
+        tb.innerHTML='<button class="btn-orange" onclick="testSkip()">Skip</button> '+
+          '<button class="btn-off" onclick="testStop()">Stop Test</button>';
+      }} else if(tm.waiting=='confirm'){{
+        document.getElementById('test-title').textContent='Testing: '+tm.zone;
+        document.getElementById('test-prompt').textContent='Recognized: '+tm.result;
+        tb.innerHTML='<button class="btn-green" onclick="testConfirm(true)">Correct</button> '+
+          '<button class="btn-red" onclick="testConfirm(false)">Incorrect</button> '+
+          '<button class="btn-orange" onclick="testSkip()">Skip</button> '+
+          '<button class="btn-off" onclick="testStop()">Stop Test</button>';
+      }}
+    }} else {{
+      tp.style.display='none';
+    }}
   }}).catch(function(){{}});
-  // Update log
+
+  // Log
   fetch('/api/log').then(function(r){{return r.json()}}).then(function(d){{
-    document.getElementById('logpre').innerHTML=d.lines.join('<br>');
+    var pre=document.getElementById('logpre');
+    pre.innerHTML=d.lines.slice(-30).join('<br>');
+    pre.scrollTop=pre.scrollHeight;
   }}).catch(function(){{}});
 }}
-// Build zone divs
-var zh='';
-zoneNames.forEach(function(n){{
-  zh+='<div class="zone" id="zdiv_'+n+'"><b>'+n+'</b><br>'
-    +'<span id="zstate_'+n+'">empty</span><br>'
-    +'<span id="zcard_'+n+'" style="font-size:1.2em"></span><br>'
-    +'<img id="zimg_'+n+'" src="/zone/'+n+'" width="150"></div>';
-}});
-document.getElementById('zones').innerHTML=zh;
-setInterval(update,3000);
+
+setInterval(update, 2000);
 update();
 </script></body></html>""")
 
-    def _serve_live(self, s):
-        self._r(200, "text/html", """<!DOCTYPE html>
-<html><head><title>Table View</title>
-<style>
-body{margin:0;background:#000;display:flex;justify-content:center;align-items:center;height:100vh}
-img{max-width:100%;max-height:100vh}
-</style>
-<script>
-function refresh(){
-  // Check if server is still running
-  fetch('/api/state').then(function(r){
-    if(!r.ok) return setTimeout(refresh,2000);
-    var img=new Image();
-    img.onload=function(){document.getElementById('f').src=img.src;setTimeout(refresh,2000)};
-    img.onerror=function(){setTimeout(refresh,2000)};
-    img.src='/snapshot/cropped?'+Date.now()+Math.random();
-  }).catch(function(){
-    // Server gone — close this tab
-    document.title='[Closed] Table View';
-    document.body.innerHTML='<p style="color:#666;font-size:2em">Scanner stopped</p>';
-  });
-}
-setTimeout(refresh,2000);
-</script></head><body><img id="f" src="/snapshot/cropped"></body></html>""")
-
-    def _serve_calibrate_page(self, s):
+    def _calibrate_page(self, s):
         players_js = json.dumps(PLAYER_NAMES)
-        self._r(200, "text/html", f"""<!DOCTYPE html>
+        self._r(200,"text/html",f"""<!DOCTYPE html>
 <html><head><title>Calibrate</title>
 <style>
 body{{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px;margin:0}}
@@ -647,391 +700,76 @@ button{{padding:8px 16px;background:#e94560;color:#fff;border:none;border-radius
 <h1>Calibration</h1>
 <div id="status">Loading image...</div>
 <canvas id="canvas"></canvas>
-<button onclick="location.href='/'">Back to Dashboard</button>
+<button onclick="location.href='/'">Back</button>
 <script>
-var canvas=document.getElementById('canvas'),ctx=canvas.getContext('2d');
+var c=document.getElementById('canvas'),ctx=c.getContext('2d');
 var players={players_js};
-var steps=[];
-var step=0, circleCenter=null, circleRadius=null, zones=[];
-var previewCenter=null;
-var imgW=0, imgH=0;
-
-steps.push({{prompt:'Click the CENTER of the felt circle',type:'circle_center'}});
-steps.push({{prompt:'Click the EDGE of the felt circle (at Bill\\'s position)',type:'circle_edge'}});
-for(var i=0;i<players.length;i++){{
-  steps.push({{prompt:'Click CENTER of '+players[i]+'\\'s zone',type:'zone_center',name:players[i]}});
-  steps.push({{prompt:'Move mouse to set '+players[i]+'\\'s zone size, then click',type:'zone_edge',name:players[i]}});
-}}
-
+var steps=[],step=0,cc=null,cr=null,zones=[],pc=null,imgW=0,imgH=0;
+steps.push({{p:'Click CENTER of felt circle',t:'cc'}});
+steps.push({{p:"Click EDGE of felt circle (at Bill's position)",t:'ce'}});
+players.forEach(function(n){{
+  steps.push({{p:'Click CENTER of '+n+"'s zone",t:'zc',n:n}});
+  steps.push({{p:'Set '+n+"'s zone size, then click",t:'ze',n:n}});
+}});
 var img=new Image();
 img.onload=function(){{
-  imgW=img.naturalWidth; imgH=img.naturalHeight;
-  // Scale canvas to fit browser width (max 1200px)
-  var maxW=Math.min(window.innerWidth-40, 1200);
-  var scale=maxW/imgW;
-  canvas.width=Math.round(imgW*scale);
-  canvas.height=Math.round(imgH*scale);
-  canvas.dataset.scale=scale;
-  redraw();
-  document.getElementById('status').textContent=steps[0].prompt;
+  imgW=img.naturalWidth;imgH=img.naturalHeight;
+  var sc=Math.min((window.innerWidth-40)/imgW,1);
+  c.width=Math.round(imgW*sc);c.height=Math.round(imgH*sc);c.dataset.s=sc;
+  draw();document.getElementById('status').textContent=steps[0].p;
 }};
-img.src='/snapshot/raw?'+Date.now();
-
-function sc(){{ return parseFloat(canvas.dataset.scale)||1; }}
-
-function redraw(){{
-  var s=sc();
-  ctx.drawImage(img,0,0,canvas.width,canvas.height);
-  // Draw circle
-  if(circleCenter && circleRadius){{
-    ctx.strokeStyle='#fff';ctx.lineWidth=2;
-    ctx.beginPath();ctx.arc(circleCenter[0]*s,circleCenter[1]*s,circleRadius*s,0,Math.PI*2);ctx.stroke();
-  }}
-  // Draw zones
-  for(var i=0;i<zones.length;i++){{
-    ctx.strokeStyle='#0f0';ctx.lineWidth=2;
-    ctx.beginPath();ctx.arc(zones[i].cx*s,zones[i].cy*s,zones[i].r*s,0,Math.PI*2);ctx.stroke();
-    ctx.fillStyle='#0f0';ctx.font='16px sans-serif';
-    ctx.fillText(zones[i].name,zones[i].cx*s-20,zones[i].cy*s-zones[i].r*s-8);
-  }}
-  // Draw preview circle
-  if(previewCenter){{
-    ctx.strokeStyle='#ff0';ctx.lineWidth=2;ctx.setLineDash([5,5]);
-    ctx.beginPath();ctx.arc(previewCenter[0]*s,previewCenter[1]*s,(previewCenter[2]||0)*s,0,Math.PI*2);ctx.stroke();
-    ctx.setLineDash([]);
-  }}
+img.src='/snapshot?'+Date.now();
+function S(){{return parseFloat(c.dataset.s)||1}}
+function draw(){{
+  var s=S();ctx.drawImage(img,0,0,c.width,c.height);
+  if(cc&&cr){{ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.beginPath();ctx.arc(cc[0]*s,cc[1]*s,cr*s,0,Math.PI*2);ctx.stroke()}}
+  zones.forEach(function(z){{ctx.strokeStyle='#0f0';ctx.lineWidth=2;ctx.beginPath();ctx.arc(z.cx*s,z.cy*s,z.r*s,0,Math.PI*2);ctx.stroke();
+    ctx.fillStyle='#0f0';ctx.font='16px sans-serif';ctx.fillText(z.name,z.cx*s-20,z.cy*s-z.r*s-8)}});
+  if(pc){{ctx.strokeStyle='#ff0';ctx.lineWidth=2;ctx.setLineDash([5,5]);ctx.beginPath();ctx.arc(pc[0]*S(),pc[1]*S(),(pc[2]||0)*S(),0,Math.PI*2);ctx.stroke();ctx.setLineDash([])}}
 }}
-
-canvas.addEventListener('click',function(e){{
-  var rect=canvas.getBoundingClientRect();
-  var s=sc();
-  // Convert click to image coordinates (not canvas coordinates)
-  var x=Math.round((e.clientX-rect.left)*(imgW/rect.width));
-  var y=Math.round((e.clientY-rect.top)*(imgH/rect.height));
-
-  if(step>=steps.length) return;
-  var s=steps[step];
-
-  if(s.type=='circle_center'){{
-    circleCenter=[x,y];
-    step++;
-  }} else if(s.type=='circle_edge'){{
-    var dx=x-circleCenter[0],dy=y-circleCenter[1];
-    circleRadius=Math.round(Math.sqrt(dx*dx+dy*dy));
-    step++;
-  }} else if(s.type=='zone_center'){{
-    previewCenter=[x,y,0];
-    step++;
-  }} else if(s.type=='zone_edge'){{
-    var dx=x-previewCenter[0],dy=y-previewCenter[1];
-    var r=Math.round(Math.sqrt(dx*dx+dy*dy));
-    zones.push({{name:s.name,cx:previewCenter[0],cy:previewCenter[1],r:r}});
-    previewCenter=null;
-    step++;
-  }}
-
-  redraw();
-
-  if(step<steps.length){{
-    document.getElementById('status').textContent=steps[step].prompt;
-  }} else {{
-    document.getElementById('status').textContent='Saving calibration...';
-    // POST calibration data
-    fetch('/api/calibrate/click',{{
-      method:'POST',
-      headers:{{'Content-Type':'application/json'}},
-      body:JSON.stringify({{
-        type:'save',
-        circle_center:circleCenter,
-        circle_radius:circleRadius,
-        zones:zones
-      }})
-    }}).then(function(){{
-      document.getElementById('status').textContent='Calibration complete!';
-    }});
-  }}
-}});
-
-canvas.addEventListener('mousemove',function(e){{
-  if(!previewCenter) return;
-  var rect=canvas.getBoundingClientRect();
-  var x=Math.round((e.clientX-rect.left)*(imgW/rect.width));
-  var y=Math.round((e.clientY-rect.top)*(imgH/rect.height));
-  var dx=x-previewCenter[0],dy=y-previewCenter[1];
-  previewCenter[2]=Math.round(Math.sqrt(dx*dx+dy*dy));
-  redraw();
-}});
+function xy(e){{var r=c.getBoundingClientRect();return[Math.round((e.clientX-r.left)*imgW/r.width),Math.round((e.clientY-r.top)*imgH/r.height)]}}
+c.onclick=function(e){{
+  var p=xy(e),x=p[0],y=p[1];if(step>=steps.length)return;var st=steps[step];
+  if(st.t=='cc'){{cc=[x,y];step++}}
+  else if(st.t=='ce'){{cr=Math.round(Math.sqrt(Math.pow(x-cc[0],2)+Math.pow(y-cc[1],2)));step++}}
+  else if(st.t=='zc'){{pc=[x,y,0];step++}}
+  else if(st.t=='ze'){{var r=Math.round(Math.sqrt(Math.pow(x-pc[0],2)+Math.pow(y-pc[1],2)));zones.push({{name:st.n,cx:pc[0],cy:pc[1],r:r}});pc=null;step++}}
+  draw();
+  if(step<steps.length)document.getElementById('status').textContent=steps[step].p;
+  else{{document.getElementById('status').textContent='Saving...';
+    fetch('/api/calibrate/save',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{circle_center:cc,circle_radius:cr,zones:zones}})}})
+    .then(function(){{document.getElementById('status').textContent='Done! Return to main page.'}})}}
+}};
+c.onmousemove=function(e){{if(!pc)return;var p=xy(e);pc[2]=Math.round(Math.sqrt(Math.pow(p[0]-pc[0],2)+Math.pow(p[1]-pc[1],2)));draw()}};
 </script></body></html>""")
 
-    def _serve_frame(self, s):
-        if s.latest_frame is None:
-            return self._r(503, "text/plain", "No frame")
-        jpg = frame_to_jpeg(s.latest_frame, 80)
-        if jpg:
-            self._r(200, "image/jpeg", jpg)
+    def _zone_img(self, s, name):
+        if not s.latest_frame is not None:
+            return self._r(503,"text/plain","No frame")
+        z = next((z for z in s.cal.zones if z["name"]==name), None)
+        if not z: return self._r(404,"text/plain","Not found")
+        crop = s.monitor._crop(s.latest_frame, z)
+        if crop is None: return self._r(500,"text/plain","Crop failed")
+        j = to_jpeg(crop, 90)
+        if j: self._r(200,"image/jpeg",j)
 
-    def _serve_cropped(self, s):
-        if s.latest_cropped_jpg:
-            self._r(200, "image/jpeg", s.latest_cropped_jpg)
-        else:
-            self._r(503, "text/plain", "No frame")
-
-    def _serve_zone(self, s, name):
-        if s.latest_frame is None:
-            return self._r(503, "text/plain", "No frame")
-        zone = next((z for z in s.cal.zones if z["name"] == name), None)
-        if not zone:
-            return self._r(404, "text/plain", "Zone not found")
-        crop = s.monitor._crop_zone(s.latest_frame, zone)
-        if crop is None:
-            return self._r(500, "text/plain", "Crop failed")
-        jpg = frame_to_jpeg(crop, 90)
-        if jpg:
-            self._r(200, "image/jpeg", jpg)
-
-    def _serve_training_list(self):
+    def _training_list(self, s):
         if not TRAINING_DIR.exists():
-            return self._r(200, "text/html", "<p>No training data</p>")
+            return self._r(200,"text/html","<p>No data</p>")
         files = sorted(TRAINING_DIR.iterdir(), reverse=True)
-        html = "<html><body style='font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px'>"
-        html += "<h1>Training Data</h1>"
+        h = "<html><body style='font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px'><h1>Training Data</h1>"
         for f in files[:100]:
             if f.suffix == ".jpg":
-                txt = f.with_suffix(".txt")
-                label = txt.read_text() if txt.exists() else ""
-                html += (f'<div style="display:inline-block;margin:8px;text-align:center">'
-                         f'<a href="/training/{f.name}"><img src="/training/{f.name}" width="200"></a>'
-                         f'<br><small>{f.name}</small><br>{label}</div>')
-        html += "</body></html>"
-        self._r(200, "text/html", html)
+                lbl = f.with_suffix(".txt").read_text() if f.with_suffix(".txt").exists() else ""
+                h += f'<div style="display:inline-block;margin:8px;text-align:center"><img src="/training/{f.name}" width="150"><br><small>{f.stem[:30]}</small><br>{lbl}</div>'
+        self._r(200,"text/html",h+"</body></html>")
 
-    def _serve_training_file(self, filename):
-        path = TRAINING_DIR / filename
-        if not path.exists():
-            return self._r(404, "text/plain", "Not found")
-        if path.suffix == ".jpg":
-            self._r(200, "image/jpeg", path.read_bytes())
-        elif path.suffix == ".txt":
-            self._r(200, "text/plain", path.read_text())
-
-    def _serve_api_state(self, s):
-        data = {
-            "monitoring": s.monitoring,
-            "calibrated": s.cal.is_complete,
-            "zones": {z["name"]: {"state": s.monitor.zone_state.get(z["name"], "empty"),
-                                   "card": s.monitor.last_card.get(z["name"], "")}
-                      for z in s.cal.zones},
-        }
-        self._r(200, "application/json", json.dumps(data))
-
-
-PORT = 8888
-
-def start_server(state):
-    global _state
-    _state = state
-    server = http.server.HTTPServer(("0.0.0.0", PORT), Handler)
-    Thread(target=server.serve_forever, daemon=True).start()
-    log_buffer.log(f"Server running at http://localhost:{PORT}")
-
-
-# ---------------------------------------------------------------------------
-# Background capture loop
-# ---------------------------------------------------------------------------
-
-def update_frame(state):
-    """Called only by background capture thread."""
-    frame = state.capture.capture()
-    if frame is not None:
-        state.latest_frame = frame.copy()
-        cropped = crop_to_felt_circle(frame, state.cal)
-        display = cropped.copy()
-        draw_overlay(display, state.cal, state.monitor)
-        jpg = frame_to_jpeg(display, 85)
-        if jpg:
-            state.latest_cropped_jpg = jpg
-    return frame
-
-
-# ---------------------------------------------------------------------------
-# Terminal commands
-# ---------------------------------------------------------------------------
-
-def print_menu():
-    print("\n╔══════════════════════════════════════════╗")
-    print("║       Overhead Card Scanner              ║")
-    print("╠══════════════════════════════════════════╣")
-    print("║  c = calibrate (opens browser)           ║")
-    print("║  t = test recognition (zone by zone)     ║")
-    print("║  m = start/stop monitoring               ║")
-    print("║  r = reset baselines (clear table first) ║")
-    print("║  s = save a snapshot                     ║")
-    print("║  q = quit                                ║")
-    print("╚══════════════════════════════════════════╝")
-
-
-def do_calibrate(state):
-    print("\n  Opening calibration page in browser...")
-    print("  Click on the image to define the felt circle and player zones.")
-    subprocess.Popen(["open", f"http://localhost:{PORT}/calibrate"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("  Waiting for calibration to complete...")
-
-    # Wait for the save POST from the browser
-    while True:
-        try:
-            data = state.cal_click_queue.get(timeout=1.0)
-            if isinstance(data, tuple):
-                # Old click format — ignore
-                continue
-        except Empty:
-            continue
-
-        # We got the save data from the POST handler
-        if isinstance(data, dict) and data.get("type") == "save":
-            cc = data.get("circle_center")
-            state.cal.circle_center = tuple(cc) if cc else None
-            state.cal.circle_radius = data.get("circle_radius")
-            state.cal.zones = data.get("zones", [])
-            state.cal.save()
-            print("  Calibration complete!")
-            return
-
-
-def do_test_recognition(state):
-    if not state.cal.is_complete:
-        print("\n  Cannot test — calibrate first (press 'c')")
-        return
-
-    print("\n  Test Recognition Mode")
-    print("  Make sure the table is CLEAR of all cards.")
-    input("  Press Enter when table is clear...")
-
-    frame = state.latest_frame
-    if frame is None:
-        print("  ERROR: Could not capture frame")
-        return
-    state.monitor.capture_baselines(frame, state.cal.zones)
-
-    for zone in state.cal.zones:
-        name = zone["name"]
-        print(f"\n  --- Testing {name}'s zone ---")
-        print(f"  Place a face-up card in {name}'s zone.")
-
-        recognized = False
-        attempts = 0
-
-        while not recognized and attempts < 3:
-            card_found = False
-            poll_start = time.time()
-
-            while time.time() - poll_start < 30.0:
-                frame = state.latest_frame
-                if frame is None:
-                    time.sleep(2)
-                    continue
-
-                crop = state.monitor.check_single_zone(frame, zone)
-                if crop is not None:
-                    log_buffer.log(f"[{name}] Card detected, recognizing...")
-                    result = state.monitor.recognize_sync(name, crop)
-                    if result != "No card":
-                        card_found = True
-                        break
-                    log_buffer.log(f"[{name}] 'No card' — retrying...")
-                time.sleep(2)
-
-            if not card_found:
-                attempts += 1
-                if attempts < 3:
-                    print(f"  Not recognized. Try repositioning... (attempt {attempts + 1}/3)")
-                    time.sleep(3)
-                continue
-
-            result = state.monitor.last_card.get(name, "No card")
-            print(f"  Recognized: {result}")
-            speech.say(f"{name}, {result}")
-
-            resp = input("  Press Enter to confirm, or 'n' to retry: ").strip().lower()
-            if resp == "n":
-                attempts += 1
-                continue
-            recognized = True
-
-        if not recognized:
-            print(f"  Skipping {name}'s zone.")
-
-        if recognized:
-            print(f"  Remove the card from {name}'s zone.")
-            input("  Press Enter when removed...")
-
-    print("\n  Test complete!")
-
-
-def do_monitor(state):
-    if not state.cal.is_complete:
-        print("\n  Cannot monitor — calibrate first (press 'c')")
-        return
-
-    print("\n  Make sure all landing zones are EMPTY.")
-    input("  Press Enter when table is clear...")
-
-    frame = state.latest_frame
-    if frame is None:
-        print("  ERROR: Could not capture frame")
-        return
-    state.monitor.capture_baselines(frame, state.cal.zones)
-    state.monitoring = True
-    log_buffer.log("Monitoring STARTED")
-    print("  Monitoring active. Press Enter to stop.")
-
-    def loop():
-        while state.monitoring and not state.quit_flag:
-            frame = state.latest_frame
-            if frame is not None:
-                state.monitor.check_zones(frame, state.cal.zones)
-            time.sleep(2)
-
-    Thread(target=loop, daemon=True).start()
-    input()
-    state.monitoring = False
-    log_buffer.log("Monitoring STOPPED")
-
-
-def do_snapshot(state):
-    frame = state.latest_frame
-    if frame is not None:
-        cropped = crop_to_felt_circle(frame, state.cal)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = Path(__file__).parent / f"snapshot_{ts}.jpg"
-        cv2.imwrite(str(path), cropped)
-        print(f"\n  Saved: {path}")
-
-
-# ---------------------------------------------------------------------------
-# Handle calibration save POST
-# ---------------------------------------------------------------------------
-
-# Override the POST handler to also queue full save data
-_orig_do_post = Handler.do_POST
-def _patched_do_post(self):
-    s = _state
-    if s is None:
-        return self._r(500, "text/plain", "Not ready")
-
-    length = int(self.headers.get("Content-Length", 0))
-    body = self.rfile.read(length).decode("utf-8") if length else ""
-    p = self.path
-
-    if p == "/api/calibrate/click":
-        data = json.loads(body)
-        if data.get("type") == "save":
-            s.cal_click_queue.put(data)
-        self._r(200, "application/json", '{"ok":true}')
-    else:
-        self._r(404, "text/plain", "Not found")
-
-Handler.do_POST = _patched_do_post
+    def _training_file(self, name):
+        p = TRAINING_DIR / name
+        if not p.exists(): return self._r(404,"text/plain","Not found")
+        self._r(200, "image/jpeg" if p.suffix==".jpg" else "text/plain",
+                p.read_bytes() if p.suffix==".jpg" else p.read_text())
 
 
 # ---------------------------------------------------------------------------
@@ -1039,85 +777,57 @@ Handler.do_POST = _patched_do_post
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Overhead camera card recognition test")
+    global _state
+    parser = argparse.ArgumentParser()
     parser.add_argument("--camera", type=int, default=DEFAULT_CAMERA_INDEX)
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
-    parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION,
-                        help="Resolution WxH or 'auto' for highest available")
+    parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION)
     args = parser.parse_args()
 
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
 
     capture = FrameCapture(args.camera, args.resolution)
-    log_buffer.log(f"Camera {args.camera}, resolution {args.resolution}")
+    log.log(f"Camera {args.camera}, resolution {capture.resolution}")
 
-    print(f"  Testing capture...")
+    print("  Testing capture...")
     frame = capture.capture()
     if frame is None:
         sys.exit("  ERROR: Could not capture. Check camera and ffmpeg.")
-    print(f"  Capture OK: {frame.shape[1]}x{frame.shape[0]}")
+    print(f"  OK: {frame.shape[1]}x{frame.shape[0]}")
 
     cal = Calibration()
     cal.load()
 
     monitor = ZoneMonitor(threshold=args.threshold)
-    state = AppState(capture, cal, monitor)
-    state.latest_frame = frame
+    _state = AppState(capture, cal, monitor)
+    _state.latest_frame = frame
 
-    start_server(state)
+    # Start server
+    server = http.server.HTTPServer(("0.0.0.0", 8888), Handler)
+    Thread(target=server.serve_forever, daemon=True).start()
+    log.log("Server at http://localhost:8888")
 
-    # Background capture loop
-    def bg_capture():
-        while not state.quit_flag:
-            update_frame(state)
-            time.sleep(2)
-    Thread(target=bg_capture, daemon=True).start()
+    # Start background capture
+    Thread(target=bg_loop, daemon=True).start()
 
+    # Open browser
     time.sleep(1)
-    subprocess.Popen(["open", f"http://localhost:{PORT}/live"],
+    subprocess.Popen(["open", "http://localhost:8888"],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    if cal.is_complete:
-        print(f"  Calibration loaded — {len(cal.zones)} zones")
+    if cal.ok:
+        print(f"  Calibration: {len(cal.zones)} zones")
     else:
-        print("  No calibration found")
+        print("  No calibration — use browser to calibrate")
 
-    print_menu()
+    print("  All UI is in the browser. Press Ctrl+C to quit.\n")
 
     try:
         while True:
-            cmd = input("\n  Enter command: ").strip().lower()
-            if cmd == "q":
-                print("\n  Shutting down...")
-                state.quit_flag = True
-                break
-            elif cmd == "c":
-                do_calibrate(state)
-            elif cmd == "t":
-                do_test_recognition(state)
-            elif cmd == "m":
-                do_monitor(state)
-            elif cmd == "r":
-                frame = state.latest_frame
-                if frame is not None:
-                    print("  Clear table, then press Enter...")
-                    input()
-                    frame = state.latest_frame
-                    if frame:
-                        state.monitor.capture_baselines(frame, state.cal.zones)
-                        print("  Baselines recaptured.")
-            elif cmd == "s":
-                do_snapshot(state)
-            elif cmd == "":
-                continue
-            else:
-                print(f"  Unknown: '{cmd}'")
-                print_menu()
-    except (KeyboardInterrupt, EOFError):
-        print("\n  Interrupted.")
-
-    print("  Done.")
-
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n  Shutting down...")
+        _state.quit_flag = True
 
 if __name__ == "__main__":
     main()
