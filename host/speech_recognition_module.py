@@ -300,14 +300,16 @@ class SpeechListener:
     def _listen_loop(self):
         try:
             import speech_recognition as sr
-        except ImportError:
-            _log("ERROR: pip install SpeechRecognition pyaudio")
+            import mlx_whisper
+        except ImportError as e:
+            _log(f"ERROR: missing package: {e}")
+            _log("Install: pip install mlx-whisper SpeechRecognition pyaudio")
             return
 
         recognizer = sr.Recognizer()
         recognizer.energy_threshold = 300
         recognizer.dynamic_energy_threshold = True
-        recognizer.pause_threshold = 0.5  # shorter pause = split phrases faster
+        recognizer.pause_threshold = 0.5
 
         try:
             mic = sr.Microphone()
@@ -317,42 +319,76 @@ class SpeechListener:
 
         _log("Microphone opened")
 
-        # Calibrate for ambient noise
         with mic as source:
             _log("Calibrating for ambient noise (2 seconds)...")
             recognizer.adjust_for_ambient_noise(source, duration=2)
-            _log(f"Ambient noise calibration done (threshold: {recognizer.energy_threshold:.0f})")
+            _log(f"Calibration done (threshold: {recognizer.energy_threshold:.0f})")
+
+        # Load whisper model
+        model_name = "mlx-community/whisper-small.en-mlx"
+        _log("Loading Whisper model (first run downloads ~500MB)...")
+        try:
+            import numpy as np
+            import tempfile
+            import wave
+            import os
+            # Warm up with a short silent WAV
+            warmup_path = tempfile.mktemp(suffix=".wav")
+            with wave.open(warmup_path, 'w') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(np.zeros(16000, dtype=np.int16).tobytes())
+            mlx_whisper.transcribe(warmup_path, path_or_hf_repo=model_name)
+            os.unlink(warmup_path)
+            _log("Whisper model loaded and ready")
+        except Exception as e:
+            _log(f"Whisper warmup error: {e}")
 
         _log("Listening for speech...")
 
         while self._running:
             try:
                 with mic as source:
-                    _log("Waiting for speech...")
                     audio = recognizer.listen(source, timeout=10, phrase_time_limit=5)
 
-                _log("Speech detected, recognizing...")
+                _log("Speech detected, transcribing with Whisper...")
 
+                import tempfile
+                import os
+                wav_path = tempfile.mktemp(suffix=".wav")
                 try:
-                    # Use Apple's built-in recognizer (no internet needed)
-                    text = recognizer.recognize_google(audio)
-                    _log(f"Heard: \"{text}\"")
+                    wav_data = audio.get_wav_data()
+                    with open(wav_path, 'wb') as f:
+                        f.write(wav_data)
 
-                    commands = parse_speech(text)
-                    for command in commands:
-                        self._callback(command)
+                    t0 = time.time()
+                    result = mlx_whisper.transcribe(
+                        wav_path,
+                        path_or_hf_repo=model_name,
+                        language="en",
+                    )
+                    text = result.get("text", "").strip()
+                    elapsed = time.time() - t0
 
-                except sr.UnknownValueError:
-                    _log("Could not understand audio")
-                except sr.RequestError as e:
-                    _log(f"Recognition service error: {e}")
+                    if text:
+                        _log(f"Heard ({elapsed:.1f}s): \"{text}\"")
+                        commands = parse_speech(text)
+                        for command in commands:
+                            self._callback(command)
+                    else:
+                        _log(f"No speech in audio ({elapsed:.1f}s)")
 
-            except sr.WaitTimeoutError:
-                # No speech detected in timeout period — just loop
-                pass
+                finally:
+                    if os.path.exists(wav_path):
+                        os.unlink(wav_path)
+
             except Exception as e:
-                _log(f"Listen error: {e}")
-                time.sleep(1)
+                if "WaitTimeoutError" in type(e).__name__:
+                    pass
+                else:
+                    _log(f"Listen error: {e}")
+                    time.sleep(1)
 
 
 # ---------------------------------------------------------------------------
