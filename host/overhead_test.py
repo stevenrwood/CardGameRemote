@@ -392,12 +392,10 @@ def _process_deal_text(s, text):
         if isinstance(cmd, GameCommand):
             s.deal_mode["game"] = cmd.game_name
             log.log(f"[DEAL] Game: {cmd.game_name}")
-            speech.say(f"The game is {cmd.game_name}")
         elif isinstance(cmd, CardCallCommand):
             card_str = f"{cmd.rank} of {cmd.suit}"
             s.deal_mode["cards"].append({"player": cmd.player, "card": card_str})
             log.log(f"[DEAL] {cmd.player}: {card_str}")
-            speech.say(f"{cmd.player}, {card_str}")
         elif isinstance(cmd, UnrecognizedCommand):
             log.log(f"[DEAL] Unrecognized: \"{cmd.raw_text}\"")
 
