@@ -70,9 +70,9 @@ RANKS = {
     "eight": "8", "8": "8",
     "nine": "9", "9": "9",
     "ten": "10", "10": "10",
-    "jack": "J",
-    "queen": "Q",
-    "king": "K",
+    "jack": "J", "jacks": "J", "jacket": "J", "jackets": "J",
+    "queen": "Q", "queens": "Q",
+    "king": "K", "kings": "K",
 }
 
 SUITS = {
@@ -80,7 +80,8 @@ SUITS = {
     "diamonds": "diamonds", "diamond": "diamonds",
     "hearts": "hearts", "heart": "hearts",
     "spades": "spades", "spade": "spades",
-    "space": "spades", "spaces": "spades",  # common misrecognitions
+    "space": "spades", "spaces": "spades", "face": "spades", "fades": "spades",
+    "private": "spades",  # common misrecognitions
 }
 
 GAME_ALIASES = {
@@ -195,21 +196,65 @@ def _parse_card_call(text):
 
 
 def parse_speech(text):
+    """Parse speech text. Returns a list of commands (may find multiple card calls in one chunk)."""
+    results = []
+
+    # Check for game selection
     game_match = re.search(r'(?:the\s+)?game\s+is\s+(.+)', text, re.IGNORECASE)
     if game_match:
         result = _fuzzy_match_game(game_match.group(1))
         if result:
-            return GameCommand(game_name=result[0], raw_text=text, confidence=result[1])
+            results.append(GameCommand(game_name=result[0], raw_text=text, confidence=result[1]))
+            return results
 
     result = _fuzzy_match_game(text)
     if result and result[1] >= 0.75:
-        return GameCommand(game_name=result[0], raw_text=text, confidence=result[1])
+        results.append(GameCommand(game_name=result[0], raw_text=text, confidence=result[1]))
+        return results
 
+    # Try to extract multiple card calls from one chunk
+    # Split on player names to find individual calls
+    cards = _parse_multiple_card_calls(text)
+    if cards:
+        return cards
+
+    # Single card call
     card = _parse_card_call(text)
     if card:
-        return card
+        return [card]
 
-    return UnrecognizedCommand(raw_text=text)
+    return [UnrecognizedCommand(raw_text=text)]
+
+
+def _parse_multiple_card_calls(text):
+    """Try to split text into multiple player card calls."""
+    text_lower = text.lower()
+
+    # Find all player name positions
+    positions = []
+    for name in PLAYER_NAMES:
+        for m in re.finditer(r'\b' + re.escape(name.lower()) + r'\b', text_lower):
+            positions.append((m.start(), name))
+
+    if len(positions) < 2:
+        return None  # single or no player names, use regular parse
+
+    # Sort by position
+    positions.sort()
+
+    # Split text at each player name and try to parse each segment
+    cards = []
+    for i, (pos, name) in enumerate(positions):
+        if i + 1 < len(positions):
+            segment = text[pos:positions[i+1][0]]
+        else:
+            segment = text[pos:]
+
+        card = _parse_card_call(segment.strip())
+        if card:
+            cards.append(card)
+
+    return cards if cards else None
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +307,7 @@ class SpeechListener:
         recognizer = sr.Recognizer()
         recognizer.energy_threshold = 300
         recognizer.dynamic_energy_threshold = True
-        recognizer.pause_threshold = 1.0
+        recognizer.pause_threshold = 0.5  # shorter pause = split phrases faster
 
         try:
             mic = sr.Microphone()
@@ -284,7 +329,7 @@ class SpeechListener:
             try:
                 with mic as source:
                     _log("Waiting for speech...")
-                    audio = recognizer.listen(source, timeout=10, phrase_time_limit=10)
+                    audio = recognizer.listen(source, timeout=10, phrase_time_limit=5)
 
                 _log("Speech detected, recognizing...")
 
@@ -293,21 +338,14 @@ class SpeechListener:
                     text = recognizer.recognize_google(audio)
                     _log(f"Heard: \"{text}\"")
 
-                    command = parse_speech(text)
-                    self._callback(command)
+                    commands = parse_speech(text)
+                    for command in commands:
+                        self._callback(command)
 
                 except sr.UnknownValueError:
                     _log("Could not understand audio")
                 except sr.RequestError as e:
                     _log(f"Recognition service error: {e}")
-                    # Try Apple's recognizer as fallback
-                    try:
-                        text = recognizer.recognize_sphinx(audio)
-                        _log(f"Sphinx heard: \"{text}\"")
-                        command = parse_speech(text)
-                        self._callback(command)
-                    except Exception:
-                        _log("Sphinx fallback also failed")
 
             except sr.WaitTimeoutError:
                 # No speech detected in timeout period — just loop
