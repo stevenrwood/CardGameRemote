@@ -253,6 +253,54 @@ def parse_speech(text):
     return [UnrecognizedCommand(raw_text=text)]
 
 
+def _extract_card_only(text):
+    """Try to extract rank+suit from text that has no player name. Returns (rank, suit) or None."""
+    text_lower = text.lower().strip()
+    text_lower = re.sub(r'^oh,?\s+', '', text_lower)
+    text_lower = re.sub(r'\bto a\b', 'two of', text_lower)
+    text_lower = re.sub(r'\b80\b', 'eight of', text_lower)
+    text_lower = re.sub(r'\bat a\b', 'eight of', text_lower)
+
+    matched_rank = None
+    rank_end = 0
+    for word, abbrev in RANKS.items():
+        pattern = re.compile(r'\b' + re.escape(word) + r'\b')
+        match = pattern.search(text_lower)
+        if match:
+            matched_rank = abbrev
+            rank_end = match.end()
+            break
+    if not matched_rank:
+        return None
+
+    after_rank = text_lower[rank_end:].strip()
+    after_rank = re.sub(r'^of\s+', '', after_rank).strip()
+
+    matched_suit = None
+    for word, canonical in SUITS.items():
+        if word in after_rank:
+            matched_suit = canonical
+            break
+    if not matched_suit:
+        return None
+
+    return (matched_rank, matched_suit)
+
+
+def _extract_player_only(text):
+    """Check if text is just a player name (with no card). Returns player name or None."""
+    text_lower = text.lower().strip().rstrip(".,!?")
+    # Check exact names
+    for name in PLAYER_NAMES:
+        if text_lower == name.lower():
+            return name
+    # Check aliases
+    for alias, name in PLAYER_ALIASES.items():
+        if text_lower == alias:
+            return name
+    return None
+
+
 def _parse_multiple_card_calls(text):
     """Try to split text into multiple player card calls."""
     text_lower = text.lower()
@@ -303,6 +351,8 @@ class SpeechListener:
         self._callback = callback or self._default_callback
         self._running = False
         self._thread = None
+        self._pending_player = None   # player name heard without a card
+        self._pending_time = 0
 
     @staticmethod
     def _default_callback(command):
@@ -341,8 +391,9 @@ class SpeechListener:
         recognizer = sr.Recognizer()
         recognizer.energy_threshold = 300
         recognizer.dynamic_energy_threshold = True
-        recognizer.pause_threshold = 0.8  # enough pause to split between players
+        recognizer.pause_threshold = 1.2  # keep name + card together
         recognizer.phrase_threshold = 0.3
+        recognizer.non_speaking_duration = 0.8
 
         try:
             mic = sr.Microphone()
@@ -418,7 +469,31 @@ class SpeechListener:
                         _log(f"Heard ({elapsed:.1f}s): \"{text}\"")
                         commands = parse_speech(text)
                         for command in commands:
-                            self._callback(command)
+                            if isinstance(command, UnrecognizedCommand):
+                                # Check if it's a card without player
+                                card_only = _extract_card_only(command.raw_text)
+                                player_only = _extract_player_only(command.raw_text)
+
+                                if card_only and self._pending_player and (time.time() - self._pending_time) < 5:
+                                    # Match orphaned player with this card
+                                    matched = CardCallCommand(
+                                        player=self._pending_player,
+                                        rank=card_only[0], suit=card_only[1],
+                                        raw_text=f"(matched) {self._pending_player} + {command.raw_text}",
+                                        confidence=0.8)
+                                    _log(f"Matched pending player '{self._pending_player}' with card")
+                                    self._pending_player = None
+                                    self._callback(matched)
+                                elif player_only:
+                                    # Just a player name, remember it
+                                    self._pending_player = player_only
+                                    self._pending_time = time.time()
+                                    _log(f"Pending player: {player_only}")
+                                else:
+                                    self._callback(command)
+                            else:
+                                self._pending_player = None
+                                self._callback(command)
                     else:
                         _log(f"No speech in audio ({elapsed:.1f}s)")
 
