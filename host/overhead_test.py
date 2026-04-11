@@ -357,8 +357,9 @@ def _start_deal_mode(s):
     if s.deal_mode:
         return  # already running
     try:
-        from speech_recognition_module import SpeechListener, GameCommand, CardCallCommand, UnrecognizedCommand
+        from speech_recognition_module import SpeechListener, GameCommand, CardCallCommand, UnrecognizedCommand, set_log_function
 
+        set_log_function(log.log)
         s.deal_mode = {"game": None, "cards": [], "listening": True, "last_heard": ""}
 
         def on_speech(cmd):
@@ -377,6 +378,7 @@ def _start_deal_mode(s):
                 speech.say(f"{cmd.player}, {card_str}")
             elif isinstance(cmd, UnrecognizedCommand):
                 s.deal_mode["last_heard"] = cmd.raw_text
+                log.log(f"[DEAL] Unrecognized: \"{cmd.raw_text}\"")
 
         s._speech_listener = SpeechListener(callback=on_speech)
         s._speech_listener.start()
@@ -651,16 +653,19 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
   <div id="left">
     <img id="tableimg" src="/snapshot/cropped" style="width:100%;cursor:pointer"
          onclick="this.src='/snapshot/cropped?'+Date.now()">
+    <div style="margin-top:8px">
+      <h3 style="display:inline">Log</h3>
+      <button class="btn-off" style="float:right;padding:3px 8px;font-size:.75em" onclick="copyLog()">Copy Log</button>
+    </div>
+    <pre id="logpre" style="max-height:300px"></pre>
+    <p style="margin-top:4px;font-size:.8em">
+      <a href="/log" style="color:#4fc3f7">Full log</a> |
+      <a href="/training" style="color:#4fc3f7">Training data</a>
+    </p>
   </div>
   <div id="right">
     <h3>Zones</h3>
     <div id="zones"></div>
-    <h3 style="margin-top:12px">Log</h3>
-    <pre id="logpre"></pre>
-    <p style="margin-top:8px;font-size:.8em">
-      <a href="/log" style="color:#4fc3f7">Full log</a> |
-      <a href="/training" style="color:#4fc3f7">Training data</a>
-    </p>
   </div>
 </div>
 <script>
@@ -696,6 +701,14 @@ function resetBaselines(){{
   api('/api/baselines').then(function(){{ log.log && update(); }});
 }}
 function saveSnapshot(){{ api('/api/snapshot/save'); }}
+function copyLog(){{
+  fetch('/log').then(function(r){{return r.text()}}).then(function(t){{
+    navigator.clipboard.writeText(t).then(function(){{
+      var btn=event.target;btn.textContent='Copied!';
+      setTimeout(function(){{btn.textContent='Copy Log'}},2000);
+    }});
+  }});
+}}
 
 function update(){{
   // Table image

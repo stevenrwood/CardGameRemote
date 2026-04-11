@@ -41,6 +41,20 @@ NSDate = None
 
 log = logging.getLogger(__name__)
 
+# External log function — set by the app to route messages to the web UI
+_external_log = None
+
+def set_log_function(fn):
+    """Set an external log function (e.g., LogBuffer.log) for web UI output."""
+    global _external_log
+    _external_log = fn
+
+def _log(msg):
+    """Log to both Python logging and external log buffer."""
+    log.info(msg)
+    if _external_log:
+        _external_log(f"[SPEECH] {msg}")
+
 
 def _ensure_apple_frameworks():
     """Import Apple Speech/AV frameworks. Raises ImportError with install hint."""
@@ -323,13 +337,13 @@ class SpeechListener:
     def start(self):
         """Start listening in a background thread."""
         if self._running:
-            log.warning("SpeechListener already running")
+            _log("SpeechListener already running")
             return
 
         self._running = True
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="SpeechListener")
         self._thread.start()
-        log.info("SpeechListener started")
+        _log("SpeechListener started")
 
     def stop(self):
         """Stop listening and clean up."""
@@ -338,7 +352,7 @@ class SpeechListener:
         if self._thread:
             self._thread.join(timeout=3.0)
             self._thread = None
-        log.info("SpeechListener stopped")
+        _log("SpeechListener stopped")
 
     def _run_loop(self):
         """Background thread: start recognition and auto-restart on timeout."""
@@ -351,7 +365,7 @@ class SpeechListener:
                         NSDate.dateWithTimeIntervalSinceNow_(0.1)
                     )
             except Exception as e:
-                log.error(f"Speech recognition error: {e}")
+                _log(f"Speech recognition error: {e}")
                 self._stop_recognition()
                 if self._running:
                     time.sleep(1.0)  # brief pause before restart
@@ -362,13 +376,15 @@ class SpeechListener:
         locale = Speech.NSLocale.alloc().initWithLocaleIdentifier_(self._locale)
         self._recognizer = Speech.SFSpeechRecognizer.alloc().initWithLocale_(locale)
 
+        _log(f"Recognizer available: {self._recognizer.isAvailable()}")
         if not self._recognizer.isAvailable():
             raise RuntimeError("Speech recognizer not available")
 
         # Request authorization (will prompt user on first run)
         auth_status = Speech.SFSpeechRecognizer.authorizationStatus()
+        _log(f"Speech auth status: {auth_status} (3=authorized)")
         if auth_status != Speech.SFSpeechRecognizerAuthorizationStatusAuthorized:
-            log.info("Requesting speech recognition authorization...")
+            _log("Requesting speech recognition authorization...")
             event = threading.Event()
             result_status = [None]
 
@@ -408,9 +424,11 @@ class SpeechListener:
 
         # Start audio engine
         self._audio_engine.prepare()
+        _log("Starting audio engine...")
         success, error = self._audio_engine.startAndReturnError_(None)
         if not success:
             raise RuntimeError(f"Failed to start audio engine: {error}")
+        _log("Audio engine started — listening for speech")
 
         # Start recognition task
         self._last_final_text = ""
@@ -423,9 +441,9 @@ class SpeechListener:
                 # Code 209 = recognition task finished
                 # Code 1110 = no speech detected
                 if any(code in error_desc for code in ["216", "209", "1110"]):
-                    log.debug(f"Recognition ended (expected): {error_desc}")
+                    _log(f"Recognition ended (will restart): {error_desc}")
                 else:
-                    log.warning(f"Recognition error: {error_desc}")
+                    _log(f"Recognition error: {error_desc}")
                 self._task = None  # triggers restart in _run_loop
                 return
 
@@ -455,7 +473,7 @@ class SpeechListener:
         )
 
         self._restart_count += 1
-        log.info(f"Recognition task started (#{self._restart_count})")
+        _log(f"Recognition task started (#{self._restart_count})")
 
     def _stop_recognition(self):
         """Stop the current recognition task and audio engine."""
@@ -480,15 +498,15 @@ class SpeechListener:
         card = _parse_card_call(text)
         if card:
             # We have player + rank + suit — that's a complete card call
-            log.info(f"Partial match (card call): {text}")
+            _log(f"Partial match: {text}")
             self._callback(card)
             # Reset partial tracking so we don't double-fire
             self._last_final_text += text
             self._last_partial_text = ""
 
-    def _process_text(self, text: str):
+    def _process_text(self, text):
         """Process a final transcription result."""
-        log.info(f"Final transcription: \"{text}\"")
+        _log(f"Heard: \"{text}\"")
         command = parse_speech(text)
         self._callback(command)
 
