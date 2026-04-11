@@ -367,19 +367,34 @@ GAME_PATTERNS = {
 }
 
 
+def _get_deal_order(dealer_name):
+    """Return player names in deal order (clockwise from left of dealer)."""
+    try:
+        idx = [n.lower() for n in PLAYER_NAMES].index(dealer_name.lower())
+    except ValueError:
+        idx = 0
+    # Start with player to dealer's left (next clockwise)
+    order = []
+    for i in range(1, len(PLAYER_NAMES) + 1):
+        order.append(PLAYER_NAMES[(idx + i) % len(PLAYER_NAMES)])
+    return order
+
+
 def _start_deal_mode(s):
     if s.deal_mode:
         return
     s.deal_mode = {
-        "phase": "game_select",  # "game_select" or "dealing"
+        "phase": "game_select",  # "game_select", "dealing", "complete"
         "game": None,
-        "pattern": [],        # full deal pattern for the game
-        "cards": [],          # recognized cards: [{"player":..., "card":..., "round":...}]
-        "round_idx": 0,       # which card in the pattern (0-based)
-        "player_idx": 0,      # which player in current round (0-based)
-        "announced": set(),   # track what's been announced to avoid repeats
+        "dealer": None,
+        "deal_order": list(PLAYER_NAMES),  # updated when dealer is set
+        "pattern": [],
+        "cards": [],
+        "round_idx": 0,
+        "player_idx": 0,
+        "announced": set(),
     }
-    log.log("Deal mode started — dictate the game name")
+    log.log("Deal mode started — select dealer and game")
 
 
 def _stop_deal_mode(s):
@@ -403,10 +418,18 @@ def _set_deal_game(s, game_name):
     s.deal_mode["cards"] = []
     s.deal_mode["announced"] = set()
 
+    # Capture baselines before dealing starts
+    if s.latest_frame is not None:
+        s.monitor.capture_baselines(s.latest_frame)
+        log.log("[DEAL] Baselines captured")
+
     # Skip initial down card rounds
     _advance_to_next_up(s)
 
-    log.log(f"[DEAL] Game: {game_name}, pattern: {pattern}")
+    order = s.deal_mode["deal_order"]
+    log.log(f"[DEAL] Game: {game_name}, dealer: {s.deal_mode['dealer']}")
+    log.log(f"[DEAL] Deal order: {' -> '.join(order)}")
+    log.log(f"[DEAL] Pattern: {pattern}")
     active = _get_active_deal_info(s)
     if active:
         log.log(f"[DEAL] Watching {active['player']}'s zone for card {active['round_idx']+1} (up)")
@@ -439,7 +462,8 @@ def _get_active_deal_info(s):
         return None
     if dm["round_idx"] >= len(dm["pattern"]):
         return None
-    player = PLAYER_NAMES[dm["player_idx"]]
+    order = dm["deal_order"]
+    player = order[dm["player_idx"]]
     zone = next((z for z in s.cal.zones if z["name"] == player), None)
     return {
         "player": player,
@@ -471,7 +495,7 @@ def _deal_card_recognized(s, player, card_str):
 
     # Advance to next player
     dm["player_idx"] += 1
-    if dm["player_idx"] >= len(PLAYER_NAMES):
+    if dm["player_idx"] >= len(dm["deal_order"]):
         # All players dealt this round — next round
         dm["player_idx"] = 0
         dm["round_idx"] += 1
@@ -491,6 +515,8 @@ def _deal_mode_json(s):
     return {
         "phase": dm["phase"],
         "game": dm["game"],
+        "dealer": dm.get("dealer"),
+        "deal_order": dm.get("deal_order", []),
         "cards": dm["cards"],
         "active_player": active["player"] if active else None,
         "round_idx": dm.get("round_idx", 0),
@@ -677,6 +703,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _stop_deal_mode(s)
             self._r(200,"application/json",'{"ok":true}')
 
+        elif p == "/api/deal/dealer":
+            dealer = data.get("dealer", "")
+            if s.deal_mode:
+                s.deal_mode["dealer"] = dealer
+                s.deal_mode["deal_order"] = _get_deal_order(dealer)
+                log.log(f"[DEAL] Dealer: {dealer}, order: {' -> '.join(s.deal_mode['deal_order'])}")
+            self._r(200,"application/json",'{"ok":true}')
+
         elif p == "/api/deal/text":
             text = data.get("text", "")
             _process_deal_text(s, text)
@@ -785,11 +819,19 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
   <h3>Test Dealing</h3>
   <p style="margin:4px 0">Game: <span id="deal-game" style="color:#4fc3f7;font-size:1.1em">—</span></p>
   <div id="deal-game-input" style="margin:6px 0">
-    <p style="font-size:.85em;color:#888">Click text field, press Fn twice to dictate game name:</p>
-    <input id="deal-input" type="text" placeholder="e.g. 'Follow the Queen' or '7 Card Stud'"
-      style="width:70%;padding:8px;border-radius:6px;border:1px solid #444;background:#1a1a2e;color:#e0e0e0;font-size:1em"
-      oninput="dealTextChanged()">
-    <button class="btn-green" onclick="submitGameName()" style="margin-left:4px">Set Game</button>
+    <div style="margin:4px 0">
+      <label style="font-size:.85em;color:#888">Dealer: </label>
+      <select id="deal-dealer" style="padding:6px;border-radius:4px;border:1px solid #444;background:#1a1a2e;color:#e0e0e0"
+        onchange="setDealer()">
+      </select>
+      <span id="deal-order-display" style="font-size:.8em;color:#888;margin-left:8px"></span>
+    </div>
+    <div style="margin:4px 0">
+      <label style="font-size:.85em;color:#888">Game (dictate or type): </label>
+      <input id="deal-input" type="text" placeholder="e.g. 'Follow the Queen'"
+        style="width:60%;padding:8px;border-radius:6px;border:1px solid #444;background:#1a1a2e;color:#e0e0e0;font-size:1em">
+      <button class="btn-green" onclick="submitGameName()" style="margin-left:4px">Start</button>
+    </div>
   </div>
   <div id="deal-status" style="margin:6px 0;display:none">
     <p style="color:#4fc3f7;font-size:.95em">Watching: <span id="deal-active-player" style="font-weight:bold">—</span>'s zone
@@ -863,8 +905,18 @@ function submitGameName(){{
     api('/api/deal/text',{{text:inp.value.trim()}}).then(update);
   }}
 }}
-function dealTextChanged(){{
-  // No auto-submit — wait for Set Game button or Enter key
+function setDealer(){{
+  var sel=document.getElementById('deal-dealer');
+  if(sel) {{
+    api('/api/deal/dealer',{{dealer:sel.value}}).then(function(){{
+      // Show deal order
+      var idx=players.indexOf(sel.value);
+      var order=[];
+      for(var i=1;i<=players.length;i++) order.push(players[(idx+i)%players.length]);
+      var el=document.getElementById('deal-order-display');
+      if(el) el.textContent='Deal: '+order.join(' → ');
+    }});
+  }}
 }}
 // Allow Enter key to submit game name
 document.addEventListener('keydown',function(e){{
@@ -928,6 +980,15 @@ function update(){{
       var ds=document.getElementById('deal-status');
       if(dm.phase=='game_select'){{
         gi.style.display='';ds.style.display='none';
+        // Populate dealer dropdown if empty
+        var sel=document.getElementById('deal-dealer');
+        if(sel && sel.options.length==0){{
+          players.forEach(function(n){{
+            var opt=document.createElement('option');opt.value=n;opt.textContent=n;
+            sel.appendChild(opt);
+          }});
+          setDealer();  // set initial deal order
+        }}
       }} else {{
         gi.style.display='none';ds.style.display='';
         document.getElementById('deal-active-player').textContent=dm.active_player||'—';
