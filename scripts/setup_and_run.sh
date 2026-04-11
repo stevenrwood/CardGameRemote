@@ -102,7 +102,7 @@ fi
 # --- Install Python dependencies ---
 info "Installing/updating dependencies..."
 pip install --quiet --upgrade pip
-pip install --quiet opencv-python numpy anthropic pyobjc-framework-Speech pyobjc-framework-AVFoundation
+pip install --quiet opencv-python numpy anthropic SpeechRecognition pyaudio
 
 # --- Create training data directory ---
 mkdir -p "$REPO_DIR/host/training_data"
