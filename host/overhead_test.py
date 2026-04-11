@@ -349,151 +349,168 @@ class AppState:
 _state = None
 
 # ---------------------------------------------------------------------------
-# Deal mode — dictation via text input
+# Deal mode — dictation for game name, then visual recognition for cards
 # ---------------------------------------------------------------------------
+
+# Game templates: map game name to list of deal patterns
+# Each pattern is a list of "up" or "down" per card, dealt to all players in order
+GAME_PATTERNS = {
+    "5 Card Draw": ["down"] * 5,
+    "3 Toed Pete": ["down"] * 3,
+    "7 Card Stud": ["down", "down", "up", "up", "up", "up", "down"],
+    "7 Stud Deuces Wild": ["down", "down", "up", "up", "up", "up", "down"],
+    "Follow the Queen": ["down", "down", "up", "up", "up", "up", "down"],
+    "High Chicago": ["down", "down", "up", "up", "up", "up", "down"],
+    "High Low High Challenge": ["down"] * 3,
+    "7 27": ["down"] * 2,
+    "Texas Hold'em": ["down"] * 2,
+}
+
 
 def _start_deal_mode(s):
     if s.deal_mode:
         return
     s.deal_mode = {
-        "game": None, "cards": [], "last_text": "", "last_parsed": "",
-        "pending_player": None,
+        "phase": "game_select",  # "game_select" or "dealing"
+        "game": None,
+        "pattern": [],        # full deal pattern for the game
+        "cards": [],          # recognized cards: [{"player":..., "card":..., "round":...}]
+        "round_idx": 0,       # which card in the pattern (0-based)
+        "player_idx": 0,      # which player in current round (0-based)
+        "announced": set(),   # track what's been announced to avoid repeats
     }
-    log.log("Deal mode started — use Dictation (Fn Fn) in the text field")
+    log.log("Deal mode started — dictate the game name")
 
 
 def _stop_deal_mode(s):
-    # Before stopping, send full text to Claude for parsing
-    if s.deal_mode and s.deal_mode.get("last_text", "").strip():
-        Thread(target=_claude_parse_deal, args=(s, s.deal_mode["last_text"]), daemon=True).start()
-    else:
-        s.deal_mode = None
-        log.log("Deal mode stopped")
+    s.deal_mode = None
+    log.log("Deal mode stopped")
 
 
-def _claude_parse_deal(s, text):
-    """Send full dictated text to Claude to extract cards per player."""
-    try:
-        import anthropic
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key and CONFIG_FILE.exists():
-            key = json.loads(CONFIG_FILE.read_text()).get("anthropic_api_key")
-        if not key or key == "YOUR_KEY_HERE":
-            log.log("[DEAL] No API key — skipping Claude parse")
-            s.deal_mode = None
-            return
+def _set_deal_game(s, game_name):
+    """Set the game and compute the deal pattern."""
+    if not s.deal_mode:
+        return
+    pattern = GAME_PATTERNS.get(game_name)
+    if not pattern:
+        log.log(f"[DEAL] Unknown game pattern: {game_name}")
+        return
+    s.deal_mode["game"] = game_name
+    s.deal_mode["pattern"] = pattern
+    s.deal_mode["phase"] = "dealing"
+    s.deal_mode["round_idx"] = 0
+    s.deal_mode["player_idx"] = 0
+    s.deal_mode["cards"] = []
+    s.deal_mode["announced"] = set()
 
-        client = anthropic.Anthropic(api_key=key)
-        log.log(f"[DEAL] Asking Claude to parse: \"{text[:100]}...\"")
+    # Skip initial down card rounds
+    _advance_to_next_up(s)
 
-        players = ", ".join(PLAYER_NAMES)
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=300,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"This is dictated speech from a poker game dealer calling out up cards. "
-                    f"The players are: {players}. "
-                    f"Extract which cards were dealt to which player. "
-                    f"The dealer says the player name followed by their card. "
-                    f"Return ONLY a JSON object mapping player names to arrays of cards. "
-                    f"Each card should be 'Rank of Suit' format. "
-                    f"Also include a 'game' field if a game name was mentioned. "
-                    f"Example: {{\"game\": \"Follow the Queen\", \"Steve\": [\"Ace of Spades\"], \"Bill\": [\"King of Hearts\"]}}\n\n"
-                    f"Dictated text: \"{text}\""
-                ),
-            }],
-        )
+    log.log(f"[DEAL] Game: {game_name}, pattern: {pattern}")
+    active = _get_active_deal_info(s)
+    if active:
+        log.log(f"[DEAL] Watching {active['player']}'s zone for card {active['round_idx']+1} (up)")
 
-        result_text = response.content[0].text.strip()
-        log.log(f"[DEAL] Claude response: {result_text}")
 
-        # Try to parse the JSON
-        try:
-            # Extract JSON from response (may have markdown code block)
-            json_match = re.search(r'\{[^{}]*\}', result_text, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                # Update deal mode with Claude's parsing
-                if s.deal_mode:
-                    if "game" in data:
-                        s.deal_mode["game"] = data["game"]
-                    s.deal_mode["cards"] = []
-                    for player in PLAYER_NAMES:
-                        cards = data.get(player, [])
-                        for card in cards:
-                            s.deal_mode["cards"].append({"player": player, "card": card})
-                    log.log(f"[DEAL] Claude found {len(s.deal_mode['cards'])} cards")
-        except (json.JSONDecodeError, Exception) as e:
-            log.log(f"[DEAL] Could not parse Claude response: {e}")
+def _advance_to_next_up(s):
+    """Advance round/player indices to the next up card, skipping down cards."""
+    dm = s.deal_mode
+    if not dm or dm["phase"] != "dealing":
+        return
+    pattern = dm["pattern"]
 
-    except Exception as e:
-        log.log(f"[DEAL] Claude parse error: {e}")
-    finally:
-        if s.deal_mode:
-            log.log("Deal mode stopped (Claude parse complete)")
-        # Don't clear deal_mode so the cards stay visible
+    while dm["round_idx"] < len(pattern):
+        if pattern[dm["round_idx"]] == "up":
+            return  # found an up card round
+        # Skip entire down round (all players)
+        log.log(f"[DEAL] Skipping round {dm['round_idx']+1} (down cards — use scanner)")
+        dm["round_idx"] += 1
+        dm["player_idx"] = 0
+
+    # Past the end of the pattern
+    dm["phase"] = "complete"
+    log.log("[DEAL] All rounds dealt")
+
+
+def _get_active_deal_info(s):
+    """Get info about the currently expected card."""
+    dm = s.deal_mode
+    if not dm or dm["phase"] != "dealing":
+        return None
+    if dm["round_idx"] >= len(dm["pattern"]):
+        return None
+    player = PLAYER_NAMES[dm["player_idx"]]
+    zone = next((z for z in s.cal.zones if z["name"] == player), None)
+    return {
+        "player": player,
+        "zone": zone,
+        "round_idx": dm["round_idx"],
+        "card_type": dm["pattern"][dm["round_idx"]],
+    }
+
+
+def _deal_card_recognized(s, player, card_str):
+    """Called when a card is visually recognized in a player's zone during dealing."""
+    dm = s.deal_mode
+    if not dm or dm["phase"] != "dealing":
+        return
+
+    # Avoid duplicate announcements
+    key = f"{player}_{dm['round_idx']}_{dm['player_idx']}"
+    if key in dm["announced"]:
+        return
+    dm["announced"].add(key)
+
+    dm["cards"].append({
+        "player": player,
+        "card": card_str,
+        "round": dm["round_idx"] + 1,
+    })
+    log.log(f"[DEAL] {player}: {card_str} (round {dm['round_idx']+1})")
+    speech.say(f"{player}, {card_str}")
+
+    # Advance to next player
+    dm["player_idx"] += 1
+    if dm["player_idx"] >= len(PLAYER_NAMES):
+        # All players dealt this round — next round
+        dm["player_idx"] = 0
+        dm["round_idx"] += 1
+        _advance_to_next_up(s)
+
+    active = _get_active_deal_info(s)
+    if active:
+        log.log(f"[DEAL] Next: {active['player']}'s zone")
+
+
+def _deal_mode_json(s):
+    """Return deal mode state as JSON-serializable dict."""
+    dm = s.deal_mode
+    if not dm:
+        return None
+    active = _get_active_deal_info(s)
+    return {
+        "phase": dm["phase"],
+        "game": dm["game"],
+        "cards": dm["cards"],
+        "active_player": active["player"] if active else None,
+        "round_idx": dm.get("round_idx", 0),
+        "total_rounds": len(dm.get("pattern", [])),
+    }
 
 
 def _process_deal_text(s, text):
-    """Parse dictated text for game names and card calls."""
-    from speech_recognition_module import (
-        parse_speech, GameCommand, CardCallCommand, UnrecognizedCommand,
-        _extract_card_only, _extract_player_only,
-    )
+    """Parse dictated text for game name only."""
+    from speech_recognition_module import parse_speech, GameCommand
 
-    if not s.deal_mode:
+    if not s.deal_mode or s.deal_mode["phase"] != "game_select":
         return
 
-    # Only process new text since last call
-    old_len = len(s.deal_mode["last_text"])
-    s.deal_mode["last_text"] = text
-
-    # Take only the new characters added
-    if len(text) > old_len:
-        new_text = text[old_len:].strip()
-    else:
-        return
-
-    if not new_text:
-        return
-
-    s.deal_mode["last_parsed"] = new_text
-    log.log(f"[DEAL] Parsing: \"{new_text}\"")
-
-    commands = parse_speech(new_text)
+    log.log(f"[DEAL] Parsing game name: \"{text}\"")
+    commands = parse_speech(text)
     for cmd in commands:
         if isinstance(cmd, GameCommand):
-            s.deal_mode["game"] = cmd.game_name
-            s.deal_mode["pending_player"] = None
-            log.log(f"[DEAL] Game: {cmd.game_name}")
-        elif isinstance(cmd, CardCallCommand):
-            card_str = f"{cmd.rank} of {cmd.suit}"
-            s.deal_mode["cards"].append({"player": cmd.player, "card": card_str})
-            s.deal_mode["pending_player"] = None
-            log.log(f"[DEAL] {cmd.player}: {card_str}")
-        elif isinstance(cmd, UnrecognizedCommand):
-            raw = cmd.raw_text
-            # Check if it's just a player name — remember it
-            player = _extract_player_only(raw)
-            if player:
-                s.deal_mode["pending_player"] = player
-                log.log(f"[DEAL] Pending player: {player}")
-                continue
-
-            # Check if it's a card without player — match with pending
-            card = _extract_card_only(raw)
-            if card and s.deal_mode["pending_player"]:
-                player = s.deal_mode["pending_player"]
-                card_str = f"{card[0]} of {card[1]}"
-                s.deal_mode["cards"].append({"player": player, "card": card_str})
-                s.deal_mode["pending_player"] = None
-                log.log(f"[DEAL] {player}: {card_str} (matched)")
-            elif card:
-                log.log(f"[DEAL] Card without player: {card[0]} of {card[1]}")
-            else:
-                log.log(f"[DEAL] Unrecognized: \"{raw}\"")
+            _set_deal_game(s, cmd.game_name)
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -508,8 +525,10 @@ def bg_loop():
             disp = crop_circle(frame, _state.cal).copy()
             draw_overlay(disp, _state.cal, _state.monitor)
             _state.latest_jpg = to_jpeg(disp)
+
             if _state.monitoring and _state.cal.ok:
                 _state.monitor.check_zones(frame)
+
             # Test mode: check if card appeared in the active zone
             tm = _state.test_mode
             if tm and tm["waiting"] == "card" and _state.cal.ok:
@@ -525,7 +544,28 @@ def bg_loop():
                         tm["result"] = result
                         tm["waiting"] = "confirm"
                         speech.say(f"{zone['name']}, {result}")
-        time.sleep(2)
+
+            # Deal mode: watch active player's zone for cards
+            dm = _state.deal_mode
+            if dm and dm["phase"] == "dealing" and _state.cal.ok:
+                active = _get_active_deal_info(_state)
+                if active and active["zone"]:
+                    zone = active["zone"]
+                    player = active["player"]
+                    crop = _state.monitor.check_single(frame, zone)
+                    if crop is not None:
+                        # Card detected — recognize it
+                        result = _state.monitor.last_card.get(player, "")
+                        if not result or result == "No card":
+                            _state.monitor._recognize(player, crop)
+                            result = _state.monitor.last_card.get(player, "No card")
+                        if result and result != "No card":
+                            _deal_card_recognized(_state, player, result)
+                            # Reset zone state so it can detect removal
+                            _state.monitor.zone_state[player] = "empty"
+                            _state.monitor.last_card[player] = ""
+
+        time.sleep(1)  # 1 second capture rate
 
 # ---------------------------------------------------------------------------
 # Web server — single page app
@@ -643,11 +683,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._r(200,"application/json",'{"ok":true}')
 
         elif p == "/api/deal/clear":
-            if s.deal_mode:
-                s.deal_mode["cards"] = []
-                s.deal_mode["game"] = None
-                s.deal_mode["last_text"] = ""
-                s.deal_mode["last_parsed"] = ""
+            _stop_deal_mode(s)
+            _start_deal_mode(s)
             self._r(200,"application/json",'{"ok":true}')
 
         elif p == "/api/snapshot/save":
@@ -692,7 +729,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "calibrated": s.cal.ok,
             "resolution": s.capture.resolution,
             "test_mode": test_info,
-            "deal_mode": s.deal_mode,
+            "deal_mode": _deal_mode_json(s),
             "zones": {z["name"]: {"state": s.monitor.zone_state.get(z["name"],"empty"),
                                    "card": s.monitor.last_card.get(z["name"],"")}
                       for z in s.cal.zones},
@@ -745,12 +782,19 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
   </div>
 </div>
 <div id="deal-panel" style="display:none;background:#0f3460;padding:12px;border-radius:8px;margin:8px 0">
-  <h3>Test Dealing — Dictation</h3>
+  <h3>Test Dealing</h3>
   <p style="margin:4px 0">Game: <span id="deal-game" style="color:#4fc3f7;font-size:1.1em">—</span></p>
-  <p style="margin:4px 0;font-size:.85em;color:#888">Click the text field, press Fn twice to start Dictation, then call cards.</p>
-  <input id="deal-input" type="text" placeholder="Dictate here: 'The game is 5 Card Draw. Bill, ace of spades...'"
-    style="width:100%;padding:8px;border-radius:6px;border:1px solid #444;background:#1a1a2e;color:#e0e0e0;font-size:1em;margin:6px 0"
-    oninput="dealTextChanged()">
+  <div id="deal-game-input" style="margin:6px 0">
+    <p style="font-size:.85em;color:#888">Click text field, press Fn twice to dictate game name:</p>
+    <input id="deal-input" type="text" placeholder="e.g. 'Follow the Queen' or '7 Card Stud'"
+      style="width:70%;padding:8px;border-radius:6px;border:1px solid #444;background:#1a1a2e;color:#e0e0e0;font-size:1em"
+      oninput="dealTextChanged()">
+    <button class="btn-green" onclick="submitGameName()" style="margin-left:4px">Set Game</button>
+  </div>
+  <div id="deal-status" style="margin:6px 0;display:none">
+    <p style="color:#4fc3f7;font-size:.95em">Watching: <span id="deal-active-player" style="font-weight:bold">—</span>'s zone
+      (round <span id="deal-round">—</span>/<span id="deal-total">—</span>)</p>
+  </div>
   <div id="deal-cards" style="margin:8px 0"></div>
   <button class="btn-orange" onclick="clearDeal()">Clear</button>
   <button class="btn-red" onclick="toggleDeal()">Stop Dealing</button>
@@ -813,14 +857,21 @@ function clearDeal(){{
     update();
   }});
 }}
-var _dealDebounce=null;
-function dealTextChanged(){{
-  clearTimeout(_dealDebounce);
-  _dealDebounce=setTimeout(function(){{
-    var inp=document.getElementById('deal-input');
-    if(inp) api('/api/deal/text',{{text:inp.value}}).then(update);
-  }}, 500);
+function submitGameName(){{
+  var inp=document.getElementById('deal-input');
+  if(inp && inp.value.trim()) {{
+    api('/api/deal/text',{{text:inp.value.trim()}}).then(update);
+  }}
 }}
+function dealTextChanged(){{
+  // No auto-submit — wait for Set Game button or Enter key
+}}
+// Allow Enter key to submit game name
+document.addEventListener('keydown',function(e){{
+  if(e.key==='Enter' && document.activeElement && document.activeElement.id==='deal-input'){{
+    submitGameName();
+  }}
+}});
 
 function resetBaselines(){{
   if(!confirm('Clear all cards, then click OK')) return;
@@ -870,9 +921,24 @@ function update(){{
     if(d.deal_mode){{
       dp.style.display='block';
       dbtn.textContent='Stop Dealing';dbtn.className='btn-red';
-      document.getElementById('deal-game').textContent=d.deal_mode.game||'—';
+      var dm=d.deal_mode;
+      document.getElementById('deal-game').textContent=dm.game||'—';
+      // Show/hide game input vs dealing status
+      var gi=document.getElementById('deal-game-input');
+      var ds=document.getElementById('deal-status');
+      if(dm.phase=='game_select'){{
+        gi.style.display='';ds.style.display='none';
+      }} else {{
+        gi.style.display='none';ds.style.display='';
+        document.getElementById('deal-active-player').textContent=dm.active_player||'—';
+        document.getElementById('deal-round').textContent=(dm.round_idx||0)+1;
+        document.getElementById('deal-total').textContent=dm.total_rounds||'?';
+      }}
+      if(dm.phase=='complete'){{
+        ds.innerHTML='<p style="color:#4caf50;font-size:1.1em">All rounds dealt!</p>';
+      }}
       var ch='';
-      (d.deal_mode.cards||[]).forEach(function(c){{
+      (dm.cards||[]).forEach(function(c){{
         ch+='<span style="display:inline-block;margin:3px;padding:4px 8px;background:#1b5e20;border-radius:4px">'
           +c.player+': '+c.card+'</span>';
       }});
