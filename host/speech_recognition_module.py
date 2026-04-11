@@ -405,13 +405,8 @@ class SpeechListener:
         self._request = Speech.SFSpeechAudioBufferRecognitionRequest.alloc().init()
         self._request.setShouldReportPartialResults_(True)
 
-        # Try on-device recognition first, fall back to server
-        try:
-            if hasattr(self._request, 'requiresOnDeviceRecognition'):
-                self._request.setRequiresOnDeviceRecognition_(True)
-                _log("On-device recognition enabled")
-        except Exception as e:
-            _log(f"On-device recognition not available, using server: {e}")
+        # Use server-based recognition (on-device model may not be downloaded)
+        _log("Using server-based recognition")
 
         # Set up audio engine
         self._audio_engine = AVFoundation.AVAudioEngine.alloc().init()
