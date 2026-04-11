@@ -617,8 +617,8 @@ def _collect_scan(s):
     cm["captured"] = True
 
 
-def _collect_next(s):
-    """Advance to the next rank or pass and start countdown."""
+def _collect_advance(s):
+    """Advance to the next rank or pass."""
     cm = s.collect_mode
     if not cm:
         return
@@ -631,43 +631,88 @@ def _collect_next(s):
             p = COLLECT_PASSES[cm["pass_idx"]]
             log.log(f"[COLLECT] Pass {cm['pass_idx']+1}: " +
                     ", ".join(f"{k}={v.capitalize()}" for k, v in p.items()))
-            speech.say(f"Pass {cm['pass_idx']+1}. New suit assignments.")
+            # Pause for new pass — user needs to re-sort deck
+            cm["phase"] = "paused_new_pass"
+            speech.say(f"Pass {cm['pass_idx']+1}. New suit assignments. Press Start when ready.")
+            return
         else:
+            cm["phase"] = "done"
             log.log("[COLLECT] All 4 passes complete!")
             speech.say("Data collection complete")
             return
-
-    # Start countdown for next deal
-    cm["countdown"] = 5
-    cm["countdown_start"] = time.time()
-    speech.say("Next")
+    # Start the deal phase
+    _collect_start_deal(s)
 
 
-def _collect_auto_cycle(s):
-    """Called from bg_loop — handles countdown and auto-scan."""
-    cm = s.collect_mode
-    if not cm or cm.get("countdown", 0) <= 0:
-        return
-
-    elapsed = time.time() - cm.get("countdown_start", 0)
-    remaining = max(0, cm["countdown"] - int(elapsed))
-
-    if remaining <= 0 and not cm["captured"]:
-        # Countdown done — scan
-        _collect_scan(s)
-        # Auto-advance after a brief pause
-        time.sleep(0.5)
-        _collect_next(s)
-
-
-def _collect_start_first(s):
-    """Start the first countdown."""
+def _collect_start_deal(s):
+    """Start the 5-second deal countdown."""
     cm = s.collect_mode
     if not cm:
         return
-    cm["countdown"] = 5
-    cm["countdown_start"] = time.time()
-    speech.say("Deal cards now")
+    cm["phase"] = "dealing"
+    cm["timer_start"] = time.time()
+    cm["timer_duration"] = 5
+    speech.say("Deal")
+
+
+def _collect_start_clear(s):
+    """Start the 5-second clear countdown."""
+    cm = s.collect_mode
+    if not cm:
+        return
+    cm["phase"] = "clearing"
+    cm["timer_start"] = time.time()
+    cm["timer_duration"] = 5
+    speech.say("Clear")
+
+
+def _collect_redo(s):
+    """Go back to previous rank and redo."""
+    cm = s.collect_mode
+    if not cm:
+        return
+    # Delete the images we just saved for this rank
+    if cm["captured"]:
+        info = _collect_deal_info(cm)
+        if info:
+            pass_num = info["pass"]
+            rank = info["rank"]
+            # Find and delete files matching this rank/pass
+            for f in TRAINING_DIR.glob(f"collect_p{pass_num}_*_{rank}_*"):
+                f.unlink()
+                log.log(f"[COLLECT] Deleted: {f.name}")
+
+    cm["captured"] = False
+    cm["phase"] = "paused"
+    log.log(f"[COLLECT] Redo — re-deal rank {COLLECT_RANKS[cm['rank_idx']]}")
+    speech.say("Redo")
+
+
+def _collect_auto_cycle(s):
+    """Called from bg_loop — handles the timed phases."""
+    cm = s.collect_mode
+    if not cm or cm.get("phase") not in ("dealing", "clearing"):
+        return
+
+    elapsed = time.time() - cm.get("timer_start", 0)
+    remaining = cm.get("timer_duration", 5) - elapsed
+
+    if remaining <= 0:
+        if cm["phase"] == "dealing":
+            # Deal time is up — scan now
+            _collect_scan(s)
+            _collect_start_clear(s)
+        elif cm["phase"] == "clearing":
+            # Clear time is up — advance to next rank
+            _collect_advance(s)
+
+
+def _collect_start_first(s):
+    """Start the first deal cycle."""
+    cm = s.collect_mode
+    if not cm:
+        return
+    _collect_start_deal(s)
 
 
 def _collect_mode_json(s):
@@ -678,10 +723,11 @@ def _collect_mode_json(s):
     done = cm["pass_idx"] >= len(COLLECT_PASSES)
     total = len(COLLECT_RANKS) * len(COLLECT_PASSES)
     current = cm["pass_idx"] * len(COLLECT_RANKS) + cm["rank_idx"]
+    phase = cm.get("phase", "paused")
     countdown = 0
-    if cm.get("countdown", 0) > 0:
-        elapsed = time.time() - cm.get("countdown_start", 0)
-        countdown = max(0, cm["countdown"] - int(elapsed))
+    if phase in ("dealing", "clearing"):
+        elapsed = time.time() - cm.get("timer_start", 0)
+        countdown = max(0, int(cm.get("timer_duration", 5) - elapsed))
 
     return {
         "rank_idx": cm["rank_idx"],
@@ -694,7 +740,7 @@ def _collect_mode_json(s):
         "current": current,
         "total": total,
         "countdown": countdown,
-        "running": cm.get("countdown", 0) > 0,
+        "phase": phase,
     }
 
 
@@ -914,14 +960,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/collect/pause":
             if s.collect_mode:
-                s.collect_mode["countdown"] = 0
+                s.collect_mode["phase"] = "paused"
             self._r(200,"application/json",'{"ok":true}')
 
         elif p == "/api/collect/resume":
-            if s.collect_mode and not s.collect_mode["captured"]:
-                s.collect_mode["countdown"] = 5
-                s.collect_mode["countdown_start"] = time.time()
-                speech.say("Deal cards now")
+            if s.collect_mode:
+                _collect_start_deal(s)
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/collect/redo":
+            _collect_redo(s)
             self._r(200,"application/json",'{"ok":true}')
 
         elif p == "/api/snapshot/save":
@@ -1040,8 +1088,10 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
   </div>
   <div style="margin-top:8px">
     <button class="btn-green" id="collect-go-btn" onclick="collectGo()" style="font-size:1.1em;padding:10px 20px">Start</button>
-    <button class="btn-orange" id="collect-pause-btn" onclick="collectPause()" style="display:none;font-size:1.1em;padding:10px 20px">Pause</button>
-    <span id="collect-countdown" style="font-size:2em;color:#ff0;margin:0 12px;display:none"></span>
+    <button class="btn-orange" id="collect-pause-btn" onclick="collectPause()" style="display:none">Pause</button>
+    <button class="btn-blue" id="collect-redo-btn" onclick="collectRedo()" style="display:none">Redo</button>
+    <span id="collect-countdown" style="font-size:2.5em;color:#ff0;margin:0 16px;display:none"></span>
+    <span id="collect-phase-label" style="font-size:1em;color:#aaa;display:none"></span>
     <button class="btn-red" onclick="toggleCollect()" style="margin-left:8px">Stop</button>
   </div>
 </div>
@@ -1176,6 +1226,9 @@ function collectPause(){{
 function collectResume(){{
   api('/api/collect/resume').then(update);
 }}
+function collectRedo(){{
+  api('/api/collect/redo').then(update);
+}}
 function copyLog(){{
   window.open('/log','_blank');
 }}
@@ -1244,24 +1297,30 @@ function update(){{
         document.getElementById('collect-progress').style.width=pct+'%';
         var goBtn=document.getElementById('collect-go-btn');
         var pauseBtn=document.getElementById('collect-pause-btn');
+        var redoBtn=document.getElementById('collect-redo-btn');
         var cdSpan=document.getElementById('collect-countdown');
-        if(cm.running){{
+        var phLabel=document.getElementById('collect-phase-label');
+        if(cm.phase=='dealing'||cm.phase=='clearing'){{
           goBtn.style.display='none';
           pauseBtn.style.display='';
-          if(cm.countdown>0){{
-            cdSpan.style.display='';
-            cdSpan.textContent=cm.countdown;
-          }} else {{
-            cdSpan.style.display='none';
-          }}
-        }} else if(!cm.running && !cm.captured){{
+          redoBtn.style.display=cm.phase=='clearing'?'':'none';
+          cdSpan.style.display='';cdSpan.textContent=cm.countdown;
+          phLabel.style.display='';
+          phLabel.textContent=cm.phase=='dealing'?'DEAL':'CLEAR';
+          phLabel.style.color=cm.phase=='dealing'?'#4caf50':'#ff9800';
+        }} else if(cm.phase=='paused'||cm.phase=='paused_new_pass'){{
+          goBtn.style.display='';goBtn.textContent=cm.phase=='paused_new_pass'?'Start New Pass':'Resume';
+          goBtn.onclick=cm.phase=='paused_new_pass'?collectGo:collectResume;
+          pauseBtn.style.display='none';
+          redoBtn.style.display='';
+          cdSpan.style.display='none';
+          phLabel.style.display='';phLabel.textContent='PAUSED';phLabel.style.color='#888';
+        }} else {{
           goBtn.style.display='';goBtn.textContent='Start';goBtn.onclick=collectGo;
           pauseBtn.style.display='none';
+          redoBtn.style.display='none';
           cdSpan.style.display='none';
-        }} else {{
-          goBtn.style.display='';goBtn.textContent='Resume';goBtn.onclick=collectResume;
-          pauseBtn.style.display='none';
-          cdSpan.style.display='none';
+          phLabel.style.display='none';
         }}
       }}
     }} else {{
