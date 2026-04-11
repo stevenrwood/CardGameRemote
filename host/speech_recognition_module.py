@@ -405,17 +405,29 @@ class SpeechListener:
         self._request = Speech.SFSpeechAudioBufferRecognitionRequest.alloc().init()
         self._request.setShouldReportPartialResults_(True)
 
-        # Enable on-device recognition if available (macOS 14+)
-        if hasattr(self._request, 'requiresOnDeviceRecognition'):
-            self._request.setRequiresOnDeviceRecognition_(True)
+        # Try on-device recognition first, fall back to server
+        try:
+            if hasattr(self._request, 'requiresOnDeviceRecognition'):
+                self._request.setRequiresOnDeviceRecognition_(True)
+                _log("On-device recognition enabled")
+        except Exception as e:
+            _log(f"On-device recognition not available, using server: {e}")
 
         # Set up audio engine
         self._audio_engine = AVFoundation.AVAudioEngine.alloc().init()
         input_node = self._audio_engine.inputNode()
         record_format = input_node.outputFormatForBus_(0)
 
+        _log(f"Audio format: {record_format.sampleRate()}Hz, {record_format.channelCount()}ch")
+
         # Install tap to feed audio to the recognizer
+        self._tap_count = 0
         def audio_tap(buffer, when):
+            self._tap_count += 1
+            if self._tap_count == 1:
+                _log("First audio buffer received from mic")
+            elif self._tap_count == 50:
+                _log(f"Audio flowing — {self._tap_count} buffers received")
             self._request.appendAudioPCMBuffer_(buffer)
 
         input_node.installTapOnBus_bufferSize_format_block_(
@@ -434,23 +446,25 @@ class SpeechListener:
         self._last_final_text = ""
         self._last_partial_text = ""
 
+        self._result_count = 0
         def result_handler(result, error):
             if error:
                 error_desc = str(error)
-                # Code 216 = "Retry" (normal timeout after ~60s of silence)
-                # Code 209 = recognition task finished
-                # Code 1110 = no speech detected
                 if any(code in error_desc for code in ["216", "209", "1110"]):
                     _log(f"Recognition ended (will restart): {error_desc}")
                 else:
                     _log(f"Recognition error: {error_desc}")
-                self._task = None  # triggers restart in _run_loop
+                self._task = None
                 return
 
             if result is None:
                 return
 
+            self._result_count += 1
             text = result.bestTranscription().formattedString()
+            is_final = result.isFinal()
+            if self._result_count <= 3 or is_final:
+                _log(f"Result #{self._result_count} (final={is_final}): \"{text}\"")
 
             if result.isFinal():
                 # Only process the new portion of text
