@@ -159,14 +159,14 @@ class UnrecognizedCommand:
 
 
 # Type alias for the callback
-CommandCallback = Callable[[GameCommand | CardCallCommand | UnrecognizedCommand], None]
+CommandCallback = Callable  # callback(GameCommand | CardCallCommand | UnrecognizedCommand)
 
 
 # ---------------------------------------------------------------------------
 # Text parsing / fuzzy matching
 # ---------------------------------------------------------------------------
 
-def _fuzzy_match_game(text: str) -> tuple[str, float] | None:
+def _fuzzy_match_game(text):
     """Try to match text against known game names. Returns (name, score) or None."""
     text_lower = text.lower().strip()
 
@@ -190,7 +190,7 @@ def _fuzzy_match_game(text: str) -> tuple[str, float] | None:
     return None
 
 
-def _parse_card_call(text: str) -> CardCallCommand | None:
+def _parse_card_call(text):
     """
     Try to parse "[player], [rank] of [suit]" from text.
     Handles variations like:
@@ -251,7 +251,7 @@ def _parse_card_call(text: str) -> CardCallCommand | None:
     )
 
 
-def parse_speech(text: str) -> GameCommand | CardCallCommand | UnrecognizedCommand:
+def parse_speech(text):
     """
     Parse a transcribed speech string into a structured command.
     Tries game commands first, then card calls.
