@@ -167,11 +167,14 @@ def _parse_card_call(text):
     # Fix common Whisper substitutions before parsing
     text_lower = re.sub(r'^oh,?\s+', '', text_lower)  # strip leading "Oh,"
     text_lower = re.sub(r'\bto a\b', 'two of', text_lower)
+    text_lower = re.sub(r'\bto your\b', 'two of', text_lower)
     text_lower = re.sub(r'\b80\b', 'eight of', text_lower)
     text_lower = re.sub(r'\bat a\b', 'eight of', text_lower)
     text_lower = re.sub(r'\bfive at\b', 'five of', text_lower)
-    text_lower = re.sub(r'\bin\b', 'nine', text_lower)  # "Bill in spades" → "Bill nine spades"
+    text_lower = re.sub(r"\bo'clock\b", 'of clubs', text_lower)
     text_lower = re.sub(r'\bfly with\b', 'five of', text_lower)
+    text_lower = re.sub(r"\bit's a\b", 'ace of', text_lower)
+    text_lower = re.sub(r"\bin his\b", 'ace of', text_lower)
     matched_player = None
     remaining = text_lower
     # Try exact player names first, then aliases
@@ -258,8 +261,12 @@ def _extract_card_only(text):
     text_lower = text.lower().strip()
     text_lower = re.sub(r'^oh,?\s+', '', text_lower)
     text_lower = re.sub(r'\bto a\b', 'two of', text_lower)
+    text_lower = re.sub(r'\bto your\b', 'two of', text_lower)
     text_lower = re.sub(r'\b80\b', 'eight of', text_lower)
     text_lower = re.sub(r'\bat a\b', 'eight of', text_lower)
+    text_lower = re.sub(r"\bo'clock\b", 'of clubs', text_lower)
+    text_lower = re.sub(r"\bit's a\b", 'ace of', text_lower)
+    text_lower = re.sub(r"\bin his\b", 'ace of', text_lower)
 
     matched_rank = None
     rank_end = 0
@@ -470,22 +477,27 @@ class SpeechListener:
                         commands = parse_speech(text)
                         for command in commands:
                             if isinstance(command, UnrecognizedCommand):
-                                # Check if it's a card without player
                                 card_only = _extract_card_only(command.raw_text)
                                 player_only = _extract_player_only(command.raw_text)
 
-                                if card_only and self._pending_player and (time.time() - self._pending_time) < 5:
-                                    # Match orphaned player with this card
-                                    matched = CardCallCommand(
-                                        player=self._pending_player,
-                                        rank=card_only[0], suit=card_only[1],
-                                        raw_text=f"(matched) {self._pending_player} + {command.raw_text}",
-                                        confidence=0.8)
-                                    _log(f"Matched pending player '{self._pending_player}' with card")
+                                if card_only:
+                                    # We have a card — try to find a player
+                                    player = None
+                                    # 1. Check if pending player from previous chunk
+                                    if self._pending_player and (time.time() - self._pending_time) < 5:
+                                        player = self._pending_player
+                                        _log(f"Matched pending player '{player}' with card")
                                     self._pending_player = None
-                                    self._callback(matched)
+
+                                    if player:
+                                        self._callback(CardCallCommand(
+                                            player=player, rank=card_only[0], suit=card_only[1],
+                                            raw_text=f"(matched) {player} + {command.raw_text}",
+                                            confidence=0.8))
+                                    else:
+                                        _log(f"Card without player: {card_only[0]} of {card_only[1]}")
+                                        self._callback(command)
                                 elif player_only:
-                                    # Just a player name, remember it
                                     self._pending_player = player_only
                                     self._pending_time = time.time()
                                     _log(f"Pending player: {player_only}")
