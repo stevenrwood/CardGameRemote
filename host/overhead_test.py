@@ -587,7 +587,8 @@ def bg_loop():
                             result = _state.monitor.last_card.get(player, "No card")
                         if result and result != "No card":
                             _deal_card_recognized(_state, player, result)
-                            # Reset zone state so it can detect removal
+                            # Update baseline to current frame so same card won't re-trigger
+                            _state.monitor.baselines[player] = crop.copy()
                             _state.monitor.zone_state[player] = "empty"
                             _state.monitor.last_card[player] = ""
 
