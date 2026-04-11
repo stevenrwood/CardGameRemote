@@ -540,10 +540,10 @@ RANK_NAMES = {"A": "Ace", "2": "2", "3": "3", "4": "4", "5": "5", "6": "6", "7":
 # Pass assignments: which suit goes to which player zone each pass
 # 4 suits across 4 players (Bill, David, Joe, Rodney), Steve rotates
 COLLECT_PASSES = [
-    {"Bill": "clubs", "David": "diamonds", "Joe": "hearts", "Rodney": "spades", "Steve": "clubs"},
-    {"Bill": "diamonds", "David": "hearts", "Joe": "spades", "Rodney": "clubs", "Steve": "diamonds"},
-    {"Bill": "hearts", "David": "spades", "Joe": "clubs", "Rodney": "diamonds", "Steve": "hearts"},
-    {"Bill": "spades", "David": "clubs", "Joe": "diamonds", "Rodney": "hearts", "Steve": "spades"},
+    {"Bill": "clubs", "David": "diamonds", "Joe": "hearts", "Rodney": "spades"},
+    {"Bill": "diamonds", "David": "hearts", "Joe": "spades", "Rodney": "clubs"},
+    {"Bill": "hearts", "David": "spades", "Joe": "clubs", "Rodney": "diamonds"},
+    {"Bill": "spades", "David": "clubs", "Joe": "diamonds", "Rodney": "hearts"},
 ]
 
 
