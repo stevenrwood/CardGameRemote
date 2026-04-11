@@ -343,8 +343,10 @@ class AppState:
         self.latest_jpg = None  # cropped + overlay
         self.quit_flag = False
         self.test_mode = None   # None or {"zone_idx":0, "waiting":"card"|"confirm", "result":""}
-        # Deal test mode — dictation via text input
-        self.deal_mode = None   # None or {"game":..., "cards":[...], "last_text":"", "last_parsed":""}
+        # Deal test mode
+        self.deal_mode = None
+        # Data collection mode
+        self.collect_mode = None  # None or {"card_idx":0, "pass":1, "captured":False}
 
 _state = None
 
@@ -521,6 +523,135 @@ def _deal_mode_json(s):
         "active_player": active["player"] if active else None,
         "round_idx": dm.get("round_idx", 0),
         "total_rounds": len(dm.get("pattern", [])),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Data collection mode
+# ---------------------------------------------------------------------------
+
+COLLECT_RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
+COLLECT_SUITS = ["clubs", "diamonds", "hearts", "spades"]
+
+SUIT_NAMES = {"clubs": "Clubs", "diamonds": "Diamonds", "hearts": "Hearts", "spades": "Spades"}
+RANK_NAMES = {"A": "Ace", "2": "2", "3": "3", "4": "4", "5": "5", "6": "6", "7": "7",
+              "8": "8", "9": "9", "10": "10", "J": "Jack", "Q": "Queen", "K": "King"}
+
+# Pass assignments: which suit goes to which player zone each pass
+# 4 suits across 4 players (Bill, David, Joe, Rodney), Steve rotates
+COLLECT_PASSES = [
+    {"Bill": "clubs", "David": "diamonds", "Joe": "hearts", "Rodney": "spades", "Steve": "clubs"},
+    {"Bill": "diamonds", "David": "hearts", "Joe": "spades", "Rodney": "clubs", "Steve": "diamonds"},
+    {"Bill": "hearts", "David": "spades", "Joe": "clubs", "Rodney": "diamonds", "Steve": "hearts"},
+    {"Bill": "spades", "David": "clubs", "Joe": "diamonds", "Rodney": "hearts", "Steve": "spades"},
+]
+
+
+def _start_collect_mode(s):
+    if s.collect_mode:
+        return
+    s.collect_mode = {"rank_idx": 0, "pass_idx": 0, "captured": False}
+    log.log("Data collection started")
+    log.log("[COLLECT] Pass 1: Bill=Clubs, David=Diamonds, Joe=Hearts, Rodney=Spades, Steve=Clubs")
+
+
+def _stop_collect_mode(s):
+    s.collect_mode = None
+    log.log("Data collection stopped")
+
+
+def _collect_deal_info(cm):
+    """Return what to deal for current state."""
+    if cm["pass_idx"] >= len(COLLECT_PASSES):
+        return None
+    if cm["rank_idx"] >= len(COLLECT_RANKS):
+        return None
+    rank = COLLECT_RANKS[cm["rank_idx"]]
+    assignments = COLLECT_PASSES[cm["pass_idx"]]
+    cards = {}
+    for player, suit in assignments.items():
+        cards[player] = f"{RANK_NAMES[rank]} of {SUIT_NAMES[suit]}"
+    return {"rank": rank, "cards": cards, "pass": cm["pass_idx"] + 1}
+
+
+def _collect_scan(s):
+    """Capture zone crops and save with correct labels per player/suit."""
+    cm = s.collect_mode
+    if not cm:
+        return
+
+    info = _collect_deal_info(cm)
+    if not info:
+        return
+
+    frame = s.latest_frame
+    if frame is None:
+        log.log("[COLLECT] No frame available")
+        return
+
+    TRAINING_DIR.mkdir(parents=True, exist_ok=True)
+    saved = 0
+    pass_num = info["pass"]
+
+    for zone in s.cal.zones:
+        name = zone["name"]
+        label = info["cards"].get(name)
+        if not label:
+            continue
+
+        crop = s.monitor._crop(frame, zone)
+        if crop is None or crop.size == 0:
+            log.log(f"[COLLECT] {name}: crop failed")
+            continue
+
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        safe_label = label.replace(" ", "_")
+        filename = f"collect_p{pass_num}_{safe_label}_{name}_{ts}"
+        cv2.imwrite(str(TRAINING_DIR / f"{filename}.jpg"), crop)
+        (TRAINING_DIR / f"{filename}.txt").write_text(label)
+        saved += 1
+        log.log(f"[COLLECT] {name}: {label}")
+
+    log.log(f"[COLLECT] Saved {saved} images")
+    cm["captured"] = True
+
+
+def _collect_next(s):
+    """Advance to the next rank or pass."""
+    cm = s.collect_mode
+    if not cm:
+        return
+    cm["rank_idx"] += 1
+    cm["captured"] = False
+    if cm["rank_idx"] >= len(COLLECT_RANKS):
+        cm["pass_idx"] += 1
+        cm["rank_idx"] = 0
+        if cm["pass_idx"] < len(COLLECT_PASSES):
+            p = COLLECT_PASSES[cm["pass_idx"]]
+            log.log(f"[COLLECT] Pass {cm['pass_idx']+1}: " +
+                    ", ".join(f"{k}={v.capitalize()}" for k, v in p.items()))
+        else:
+            log.log("[COLLECT] All 4 passes complete!")
+
+
+def _collect_mode_json(s):
+    cm = s.collect_mode
+    if not cm:
+        return None
+    info = _collect_deal_info(cm)
+    done = cm["pass_idx"] >= len(COLLECT_PASSES)
+    total = len(COLLECT_RANKS) * len(COLLECT_PASSES)
+    current = cm["pass_idx"] * len(COLLECT_RANKS) + cm["rank_idx"]
+    return {
+        "rank_idx": cm["rank_idx"],
+        "pass_idx": cm["pass_idx"],
+        "pass_total": len(COLLECT_PASSES),
+        "cards": info["cards"] if info else {},
+        "rank": COLLECT_RANKS[cm["rank_idx"]] if cm["rank_idx"] < len(COLLECT_RANKS) else None,
+        "captured": cm["captured"],
+        "done": done,
+        "current": current,
+        "total": total,
     }
 
 
@@ -722,6 +853,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _start_deal_mode(s)
             self._r(200,"application/json",'{"ok":true}')
 
+        elif p == "/api/collect/start":
+            _start_collect_mode(s)
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/collect/stop":
+            _stop_collect_mode(s)
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/collect/scan":
+            _collect_scan(s)
+            self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/collect/next":
+            _collect_next(s)
+            self._r(200,"application/json",'{"ok":true}')
+
         elif p == "/api/snapshot/save":
             if s.latest_frame is not None:
                 cropped = crop_circle(s.latest_frame, s.cal)
@@ -765,6 +912,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "resolution": s.capture.resolution,
             "test_mode": test_info,
             "deal_mode": _deal_mode_json(s),
+            "collect_mode": _collect_mode_json(s),
             "zones": {z["name"]: {"state": s.monitor.zone_state.get(z["name"],"empty"),
                                    "card": s.monitor.last_card.get(z["name"],"")}
                       for z in s.cal.zones},
@@ -804,6 +952,7 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
   <button class="btn-blue" id="btn-deal" onclick="toggleDeal()">Test Dealing</button>
   <button class="btn-blue" onclick="resetBaselines()">Reset Baselines</button>
   <button class="btn-blue" onclick="saveSnapshot()">Snapshot</button>
+  <button class="btn-blue" id="btn-collect" onclick="toggleCollect()">Collect Data</button>
   <span id="status-bar">Loading...</span>
 </div>
 <div id="test-panel">
@@ -814,6 +963,30 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
     <button class="btn-red" onclick="testConfirm(false)">Incorrect</button>
     <button class="btn-orange" onclick="testSkip()">Skip</button>
     <button class="btn-off" onclick="testStop()">Stop Test</button>
+  </div>
+</div>
+<div id="collect-panel" style="display:none;background:#1b5e20;padding:12px;border-radius:8px;margin:8px 0">
+  <h3>Data Collection</h3>
+  <div id="collect-info">
+    <p style="font-size:1.1em;color:#fff;margin:8px 0">
+      Deal rank <span id="collect-rank" style="color:#ff0;font-weight:bold;font-size:1.3em">—</span> to each player:
+    </p>
+    <div id="collect-assignments" style="margin:6px 0"></div>
+    <p style="font-size:.9em;color:#aaa">
+      Pass <span id="collect-pass">1</span>/<span id="collect-pass-total">4</span> |
+      Card <span id="collect-idx">0</span>/<span id="collect-total">52</span>
+    </p>
+    <div style="background:#333;border-radius:4px;height:8px;margin:8px 0">
+      <div id="collect-progress" style="background:#4caf50;height:100%;border-radius:4px;width:0%"></div>
+    </div>
+  </div>
+  <div id="collect-done" style="display:none">
+    <p style="font-size:1.2em;color:#4caf50">All cards collected!</p>
+  </div>
+  <div style="margin-top:8px">
+    <button class="btn-green" id="collect-scan-btn" onclick="collectScan()" style="font-size:1.1em;padding:10px 20px">Scan All Zones</button>
+    <button class="btn-blue" id="collect-next-btn" onclick="collectNext()" style="display:none;font-size:1.1em;padding:10px 20px">Next Card</button>
+    <button class="btn-red" onclick="toggleCollect()" style="margin-left:8px">Stop</button>
   </div>
 </div>
 <div id="deal-panel" style="display:none;background:#0f3460;padding:12px;border-radius:8px;margin:8px 0">
@@ -931,6 +1104,21 @@ function resetBaselines(){{
   api('/api/baselines').then(function(){{ log.log && update(); }});
 }}
 function saveSnapshot(){{ api('/api/snapshot/save'); }}
+
+function toggleCollect(){{
+  fetch('/api/state').then(function(r){{return r.json()}}).then(function(d){{
+    if(d.collect_mode) api('/api/collect/stop').then(update);
+    else api('/api/collect/start').then(update);
+  }});
+}}
+function collectScan(){{
+  api('/api/collect/scan').then(function(){{
+    update();
+  }});
+}}
+function collectNext(){{
+  api('/api/collect/next').then(update);
+}}
 function copyLog(){{
   window.open('/log','_blank');
 }}
@@ -967,6 +1155,48 @@ function update(){{
         +'<div class="zone-card" style="color:'+bc+'">'+card+'</div></div></div>';
     }});
     document.getElementById('zones').innerHTML=zh;
+
+    // Collect mode panel
+    var cp=document.getElementById('collect-panel');
+    var cbtn=document.getElementById('btn-collect');
+    if(d.collect_mode){{
+      cp.style.display='block';
+      cbtn.textContent='Stop Collect';cbtn.className='btn-red';
+      var cm=d.collect_mode;
+      if(cm.done){{
+        document.getElementById('collect-info').style.display='none';
+        document.getElementById('collect-done').style.display='';
+        document.getElementById('collect-scan-btn').style.display='none';
+        document.getElementById('collect-next-btn').style.display='none';
+      }} else {{
+        document.getElementById('collect-info').style.display='';
+        document.getElementById('collect-done').style.display='none';
+        document.getElementById('collect-rank').textContent=cm.rank||'?';
+        document.getElementById('collect-pass').textContent=cm.pass_idx+1;
+        document.getElementById('collect-pass-total').textContent=cm.pass_total;
+        document.getElementById('collect-idx').textContent=cm.current+1;
+        document.getElementById('collect-total').textContent=cm.total;
+        // Show per-player assignments
+        var ah='';
+        Object.keys(cm.cards||{{}}).forEach(function(p){{
+          ah+='<span style="display:inline-block;margin:3px;padding:4px 10px;background:#0f3460;border-radius:4px">'
+            +p+': <b>'+cm.cards[p]+'</b></span>';
+        }});
+        document.getElementById('collect-assignments').innerHTML=ah;
+        var pct=Math.round(cm.current/cm.total*100);
+        document.getElementById('collect-progress').style.width=pct+'%';
+        if(cm.captured){{
+          document.getElementById('collect-scan-btn').style.display='none';
+          document.getElementById('collect-next-btn').style.display='';
+        }} else {{
+          document.getElementById('collect-scan-btn').style.display='';
+          document.getElementById('collect-next-btn').style.display='none';
+        }}
+      }}
+    }} else {{
+      cp.style.display='none';
+      cbtn.textContent='Collect Data';cbtn.className='btn-blue';
+    }}
 
     // Deal mode panel
     var dp=document.getElementById('deal-panel');
