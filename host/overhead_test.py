@@ -343,60 +343,63 @@ class AppState:
         self.latest_jpg = None  # cropped + overlay
         self.quit_flag = False
         self.test_mode = None   # None or {"zone_idx":0, "waiting":"card"|"confirm", "result":""}
-        # Deal test mode — speech recognition
-        self.deal_mode = None   # None or {"game":None, "cards":[{"player":..,"card":..}], "listening":True, "last_heard":""}
-        self._speech_listener = None
+        # Deal test mode — dictation via text input
+        self.deal_mode = None   # None or {"game":..., "cards":[...], "last_text":"", "last_parsed":""}
 
 _state = None
 
 # ---------------------------------------------------------------------------
-# Deal mode — speech recognition
+# Deal mode — dictation via text input
 # ---------------------------------------------------------------------------
 
 def _start_deal_mode(s):
     if s.deal_mode:
-        return  # already running
-    try:
-        from speech_recognition_module import SpeechListener, GameCommand, CardCallCommand, UnrecognizedCommand, set_log_function
-
-        set_log_function(log.log)
-        s.deal_mode = {"game": None, "cards": [], "listening": True, "last_heard": ""}
-
-        def on_speech(cmd):
-            if not s.deal_mode:
-                return
-            if isinstance(cmd, GameCommand):
-                s.deal_mode["game"] = cmd.game_name
-                s.deal_mode["last_heard"] = cmd.raw_text
-                log.log(f"[DEAL] Game: {cmd.game_name}")
-                speech.say(f"The game is {cmd.game_name}")
-            elif isinstance(cmd, CardCallCommand):
-                card_str = f"{cmd.rank} of {cmd.suit}"
-                s.deal_mode["cards"].append({"player": cmd.player, "card": card_str})
-                s.deal_mode["last_heard"] = cmd.raw_text
-                log.log(f"[DEAL] {cmd.player}: {card_str}")
-                speech.say(f"{cmd.player}, {card_str}")
-            elif isinstance(cmd, UnrecognizedCommand):
-                s.deal_mode["last_heard"] = cmd.raw_text
-                log.log(f"[DEAL] Unrecognized: \"{cmd.raw_text}\"")
-
-        s._speech_listener = SpeechListener(callback=on_speech)
-        s._speech_listener.start()
-        log.log("Deal mode started — listening for speech")
-    except ImportError as e:
-        log.log(f"Speech recognition not available: {e}")
-        s.deal_mode = None
-    except Exception as e:
-        log.log(f"Failed to start speech: {e}")
-        s.deal_mode = None
+        return
+    s.deal_mode = {"game": None, "cards": [], "last_text": "", "last_parsed": ""}
+    log.log("Deal mode started — use Dictation (Fn Fn) in the text field")
 
 
 def _stop_deal_mode(s):
-    if s._speech_listener:
-        s._speech_listener.stop()
-        s._speech_listener = None
     s.deal_mode = None
     log.log("Deal mode stopped")
+
+
+def _process_deal_text(s, text):
+    """Parse dictated text for game names and card calls."""
+    from speech_recognition_module import parse_speech, GameCommand, CardCallCommand, UnrecognizedCommand
+
+    if not s.deal_mode:
+        return
+
+    # Only process new text (what was added since last parse)
+    old = s.deal_mode["last_text"]
+    s.deal_mode["last_text"] = text
+
+    # Find new portion
+    if text.lower().startswith(old.lower()) and len(text) > len(old):
+        new_text = text[len(old):].strip()
+    else:
+        new_text = text.strip()
+
+    if not new_text:
+        return
+
+    s.deal_mode["last_parsed"] = new_text
+    log.log(f"[DEAL] Parsing: \"{new_text}\"")
+
+    commands = parse_speech(new_text)
+    for cmd in commands:
+        if isinstance(cmd, GameCommand):
+            s.deal_mode["game"] = cmd.game_name
+            log.log(f"[DEAL] Game: {cmd.game_name}")
+            speech.say(f"The game is {cmd.game_name}")
+        elif isinstance(cmd, CardCallCommand):
+            card_str = f"{cmd.rank} of {cmd.suit}"
+            s.deal_mode["cards"].append({"player": cmd.player, "card": card_str})
+            log.log(f"[DEAL] {cmd.player}: {card_str}")
+            speech.say(f"{cmd.player}, {card_str}")
+        elif isinstance(cmd, UnrecognizedCommand):
+            log.log(f"[DEAL] Unrecognized: \"{cmd.raw_text}\"")
 
 
 # ---------------------------------------------------------------------------
@@ -540,11 +543,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _stop_deal_mode(s)
             self._r(200,"application/json",'{"ok":true}')
 
+        elif p == "/api/deal/text":
+            text = data.get("text", "")
+            _process_deal_text(s, text)
+            self._r(200,"application/json",'{"ok":true}')
+
         elif p == "/api/deal/clear":
             if s.deal_mode:
                 s.deal_mode["cards"] = []
                 s.deal_mode["game"] = None
-                s.deal_mode["last_heard"] = ""
+                s.deal_mode["last_text"] = ""
+                s.deal_mode["last_parsed"] = ""
             self._r(200,"application/json",'{"ok":true}')
 
         elif p == "/api/snapshot/save":
@@ -642,9 +651,12 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
   </div>
 </div>
 <div id="deal-panel" style="display:none;background:#0f3460;padding:12px;border-radius:8px;margin:8px 0">
-  <h3>Test Dealing — Voice Recognition</h3>
-  <p style="margin:4px 0">Game: <span id="deal-game" style="color:#4fc3f7;font-size:1.1em">Waiting... say "The game is..."</span></p>
-  <p style="margin:4px 0;color:#888;font-size:.85em">Last heard: <span id="deal-heard"></span></p>
+  <h3>Test Dealing — Dictation</h3>
+  <p style="margin:4px 0">Game: <span id="deal-game" style="color:#4fc3f7;font-size:1.1em">—</span></p>
+  <p style="margin:4px 0;font-size:.85em;color:#888">Click the text field, press Fn twice to start Dictation, then call cards.</p>
+  <input id="deal-input" type="text" placeholder="Dictate here: 'The game is 5 Card Draw. Bill, ace of spades...'"
+    style="width:100%;padding:8px;border-radius:6px;border:1px solid #444;background:#1a1a2e;color:#e0e0e0;font-size:1em;margin:6px 0"
+    oninput="dealTextChanged()">
   <div id="deal-cards" style="margin:8px 0"></div>
   <button class="btn-orange" onclick="clearDeal()">Clear</button>
   <button class="btn-red" onclick="toggleDeal()">Stop Dealing</button>
@@ -691,10 +703,30 @@ function testStop(){{ api('/api/test/stop').then(update); }}
 function toggleDeal(){{
   fetch('/api/state').then(function(r){{return r.json()}}).then(function(d){{
     if(d.deal_mode) api('/api/deal/stop').then(update);
-    else api('/api/deal/start').then(update);
+    else api('/api/deal/start').then(function(){{
+      update();
+      setTimeout(function(){{
+        var inp=document.getElementById('deal-input');
+        if(inp) inp.focus();
+      }}, 300);
+    }});
   }});
 }}
-function clearDeal(){{ api('/api/deal/clear').then(update); }}
+function clearDeal(){{
+  api('/api/deal/clear').then(function(){{
+    var inp=document.getElementById('deal-input');
+    if(inp) inp.value='';
+    update();
+  }});
+}}
+var _dealDebounce=null;
+function dealTextChanged(){{
+  clearTimeout(_dealDebounce);
+  _dealDebounce=setTimeout(function(){{
+    var inp=document.getElementById('deal-input');
+    if(inp) api('/api/deal/text',{{text:inp.value}}).then(update);
+  }}, 500);
+}}
 
 function resetBaselines(){{
   if(!confirm('Clear all cards, then click OK')) return;
@@ -744,8 +776,7 @@ function update(){{
     if(d.deal_mode){{
       dp.style.display='block';
       dbtn.textContent='Stop Dealing';dbtn.className='btn-red';
-      document.getElementById('deal-game').textContent=d.deal_mode.game||'Waiting... say "The game is..."';
-      document.getElementById('deal-heard').textContent=d.deal_mode.last_heard||'';
+      document.getElementById('deal-game').textContent=d.deal_mode.game||'—';
       var ch='';
       (d.deal_mode.cards||[]).forEach(function(c){{
         ch+='<span style="display:inline-block;margin:3px;padding:4px 8px;background:#1b5e20;border-radius:4px">'
