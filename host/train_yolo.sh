@@ -1,19 +1,15 @@
 #!/bin/bash
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
-VENV="$REPO_DIR/.venv/bin"
+cd "$(dirname "$0")"
 
-cd "$SCRIPT_DIR"
-
-"$VENV/pip" install --quiet ultralytics
+pip3 install --quiet ultralytics opencv-python numpy
 
 if [[ "$1" != "--train" ]]; then
     echo ""
     echo "=== Preparing dataset ==="
     echo ""
-    "$VENV/python" prepare_training.py
+    python3 prepare_training.py
     echo ""
 fi
 
@@ -26,7 +22,7 @@ echo ""
 echo "=== Training YOLO model ==="
 echo ""
 
-"$VENV/python" -c "
+python3 -c "
 from ultralytics import YOLO
 
 model = YOLO('yolov8n.pt')
