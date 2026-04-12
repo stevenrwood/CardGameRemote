@@ -41,8 +41,9 @@ CALIBRATION_FILE = Path(__file__).parent / "calibration.json"
 TRAINING_DIR = Path(__file__).parent / "training_data"
 CONFIG_FILE = Path(__file__).parent.parent / "local" / "config.json"
 CAPTURE_FILE = Path("/tmp/card_scanner_frame.jpg")
+YOLO_MODEL_PATH = Path(__file__).parent / "models" / "card_detector.pt"
 
-MODEL = "claude-sonnet-4-20250514"
+CLAUDE_MODEL = "claude-sonnet-4-20250514"
 
 # ---------------------------------------------------------------------------
 # Speech queue
@@ -219,7 +220,20 @@ class ZoneMonitor:
         self.last_card = {}
         self.zone_state = {}
         self.pending = {}
+        self._yolo_model = None
         self._client = None
+        self._load_yolo()
+
+    def _load_yolo(self):
+        if YOLO_MODEL_PATH.exists():
+            try:
+                from ultralytics import YOLO
+                self._yolo_model = YOLO(str(YOLO_MODEL_PATH))
+                log.log(f"YOLO model loaded: {YOLO_MODEL_PATH.name}")
+            except Exception as e:
+                log.log(f"YOLO load failed: {e}")
+        else:
+            log.log("No YOLO model found — will use Claude API")
 
     @property
     def client(self):
@@ -231,10 +245,8 @@ class ZoneMonitor:
                     key = json.loads(CONFIG_FILE.read_text()).get("anthropic_api_key")
                 if key and key != "YOUR_KEY_HERE":
                     self._client = anthropic.Anthropic(api_key=key)
-                else:
-                    log.log("WARNING: No API key")
             except ImportError:
-                log.log("WARNING: anthropic not installed")
+                pass
         return self._client
 
     def capture_baselines(self, frame):
@@ -295,32 +307,74 @@ class ZoneMonitor:
     def _recognize(self, name, crop):
         t0 = time.time()
         try:
-            if not self.client:
+            result = None
+            method = ""
+
+            # Try YOLO first
+            if self._yolo_model is not None:
+                result, conf = self._recognize_yolo(crop)
+                method = f"YOLO {conf:.0%}"
+                if result == "No card" or conf < 0.4:
+                    # Low confidence — fall back to Claude
+                    yolo_result = result
+                    yolo_conf = conf
+                    if self.client:
+                        result = self._recognize_claude(crop)
+                        method = f"Claude (YOLO was {yolo_result} {yolo_conf:.0%})"
+                    elif result == "No card":
+                        result = None
+            elif self.client:
+                result = self._recognize_claude(crop)
+                method = "Claude"
+            else:
                 self.zone_state[name] = "empty"
                 return
-            b64 = base64.b64encode(
-                cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes()
-            ).decode()
-            resp = self.client.messages.create(
-                model=MODEL, max_tokens=20,
-                messages=[{"role":"user","content":[
-                    {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":b64}},
-                    {"type":"text","text":"What playing card is this? Reply ONLY: 'Rank of Suit' (e.g. '4 of Clubs'). If unclear: 'No card'"},
-                ]}])
-            raw = resp.content[0].text.strip()
-            m = re.search(r'(Ace|King|Queen|Jack|10|[2-9])\s+of\s+(Hearts|Diamonds|Clubs|Spades)', raw, re.I)
-            result = f"{m.group(1).capitalize()} of {m.group(2).capitalize()}" if m else "No card"
-            self.last_card[name] = result
-            self.zone_state[name] = "recognized"
-            log.log(f"{name}: {result}  ({time.time()-t0:.1f}s)")
-            self._save(name, crop, result)
-            if "no card" not in result.lower():
-                speech.say(f"{name}, {result}")
+
+            if result and result != "No card":
+                self.last_card[name] = result
+                self.zone_state[name] = "recognized"
+                log.log(f"{name}: {result}  ({time.time()-t0:.1f}s) [{method}]")
+                self._save(name, crop, result)
+                if "no card" not in result.lower():
+                    speech.say(f"{name}, {result}")
+            else:
+                log.log(f"{name}: No card  ({time.time()-t0:.1f}s) [{method}]")
+                self.zone_state[name] = "empty"
+
         except Exception as e:
             log.log(f"[{name}] error: {e}")
             self.zone_state[name] = "empty"
         finally:
             self.pending[name] = False
+
+    def _recognize_yolo(self, crop):
+        results = self._yolo_model.predict(crop, conf=0.2, verbose=False)
+        if results and len(results[0].boxes) > 0:
+            box = results[0].boxes[0]
+            cls_idx = int(box.cls[0])
+            conf = float(box.conf[0])
+            cls_name = results[0].names[cls_idx]
+            # Convert class name like "4c" to "4 of Clubs"
+            rank = cls_name[:-1]
+            suit_letter = cls_name[-1]
+            suit = {"c": "Clubs", "d": "Diamonds", "h": "Hearts", "s": "Spades"}.get(suit_letter, suit_letter)
+            rank_name = {"A": "Ace", "K": "King", "Q": "Queen", "J": "Jack"}.get(rank, rank)
+            return f"{rank_name} of {suit}", conf
+        return "No card", 0.0
+
+    def _recognize_claude(self, crop):
+        b64 = base64.b64encode(
+            cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes()
+        ).decode()
+        resp = self.client.messages.create(
+            model=CLAUDE_MODEL, max_tokens=20,
+            messages=[{"role":"user","content":[
+                {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":b64}},
+                {"type":"text","text":"What playing card is this? Reply ONLY: 'Rank of Suit' (e.g. '4 of Clubs'). If unclear: 'No card'"},
+            ]}])
+        raw = resp.content[0].text.strip()
+        m = re.search(r'(Ace|King|Queen|Jack|10|[2-9])\s+of\s+(Hearts|Diamonds|Clubs|Spades)', raw, re.I)
+        return f"{m.group(1).capitalize()} of {m.group(2).capitalize()}" if m else "No card"
 
     def _save(self, name, crop, result):
         TRAINING_DIR.mkdir(parents=True, exist_ok=True)
