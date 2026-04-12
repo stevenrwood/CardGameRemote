@@ -38,6 +38,7 @@ results = model.train(
     batch=16,
     name='card_detector',
     project='yolo_runs',
+    device='mps',
 )
 
 print()
