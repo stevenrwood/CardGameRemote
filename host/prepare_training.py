@@ -116,13 +116,33 @@ def prepare_dataset(pairs, val_split=0.2):
         suit = {"c": "clubs", "d": "diamonds", "h": "hearts", "s": "spades"}[cls[-1]]
         print(f"  {rank:>3} of {suit:<10} ({cls}): {class_counts[cls]} images")
 
-    # Shuffle and split
-    random.shuffle(valid)
-    split_idx = int(len(valid) * (1 - val_split))
-    train_set = valid[:split_idx]
-    val_set = valid[split_idx:]
+    # Group by class
+    by_class = {}
+    for item in valid:
+        cls = label_to_class(item[1], item[2])
+        by_class.setdefault(cls, []).append(item)
 
-    print(f"\nTrain: {len(train_set)}, Val: {len(val_set)}")
+    # Cap each class to the minimum count for equal representation
+    min_count = min(len(v) for v in by_class.values())
+    print(f"\nMin images per class: {min_count}")
+    print(f"Capping all classes to {min_count} images")
+
+    # Stratified split: for each class, shuffle and split 80/20
+    train_set = []
+    val_set = []
+    for cls in sorted(by_class.keys()):
+        items = by_class[cls]
+        random.shuffle(items)
+        items = items[:min_count]  # cap to equal count
+        split_idx = int(len(items) * (1 - val_split))
+        train_set.extend(items[:split_idx])
+        val_set.extend(items[split_idx:])
+
+    random.shuffle(train_set)
+    random.shuffle(val_set)
+
+    print(f"Train: {len(train_set)}, Val: {len(val_set)}")
+    print(f"Per class: {int(min_count * (1-val_split))} train, {min_count - int(min_count * (1-val_split))} val")
 
     # Create dataset directory structure
     if DATASET_DIR.exists():
