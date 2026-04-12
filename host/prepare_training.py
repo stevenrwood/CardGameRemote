@@ -73,7 +73,7 @@ def scan_training_data():
             for line in label.split("\n"):
                 parsed = parse_label(line)
                 if parsed:
-                    label = f"{parsed[0]} of {parsed[1]}"
+                    label = line.strip()
                     break
             pairs.append((jpg, label))
         else:
