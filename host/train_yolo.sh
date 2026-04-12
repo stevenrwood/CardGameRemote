@@ -35,14 +35,16 @@ results = model.train(
     name='card_detector',
     project='yolo_runs',
     device='mps',
+    exist_ok=True,
 )
 
+best = 'yolo_runs/card_detector/weights/best.pt'
 print()
 print('=== Training complete ===')
-print(f'Best model: yolo_runs/card_detector/weights/best.pt')
+print(f'Best model: {best}')
 print()
 
-model = YOLO('yolo_runs/card_detector/weights/best.pt')
+model = YOLO(best)
 metrics = model.val()
 print(f'mAP50: {metrics.box.map50:.3f}')
 print(f'mAP50-95: {metrics.box.map:.3f}')
