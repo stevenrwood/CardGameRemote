@@ -1978,7 +1978,7 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
   </div>
 
   <!-- Zone recognized cards (live) — tap to correct -->
-  <h2>Cards (tap to correct)</h2>
+  <h2 id="zone-header">Cards dealt</h2>
   <div id="zone-cards"></div>
 
   <!-- Last round cards -->
@@ -2106,6 +2106,11 @@ function render(){
 
     // Continue button visible during betting
     contBtn.style.display=(ge.state==='betting')?'':'none';
+
+    // Zone cards header with round number
+    var zh_title='Cards dealt';
+    if(ge.deal_round) zh_title='Cards dealt in round '+ge.deal_round+' (touch to correct)';
+    document.getElementById('zone-header').textContent=zh_title;
 
     // Zone cards (live from camera) — tappable
     var zc=document.getElementById('zone-cards');

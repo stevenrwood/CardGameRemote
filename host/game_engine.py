@@ -328,6 +328,14 @@ class GameEngine:
 
     def get_hand_state(self) -> dict:
         """Return the full current hand state for syncing."""
+        # Count deal/community phases up to current position (for round display)
+        deal_round = 0
+        if self.current_game:
+            for i, ph in enumerate(self.current_game.phases):
+                if i > self.phase_index:
+                    break
+                if ph.type in (PhaseType.DEAL, PhaseType.COMMUNITY):
+                    deal_round += 1
         return {
             "game_name": self.current_game.name if self.current_game else None,
             "state": self.state.value,
@@ -337,6 +345,7 @@ class GameEngine:
             "wild_label": self.wild_label,
             "expected_card_type": self.get_expected_card_type(),
             "current_phase": self._describe_current_phase(),
+            "deal_round": deal_round,
             "dealer": self.get_dealer().name,
             "players": self.get_players_info(),
         }
