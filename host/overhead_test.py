@@ -736,6 +736,7 @@ class AppState:
         self.game_engine = GameEngine()
         self.console_active_players = list(PLAYER_NAMES)  # who's playing tonight
         self.console_last_round_cards = []  # cards from last upcard scan
+        self.console_hand_cards = []  # all confirmed up cards this hand: [{player, card, round}]
         self.console_up_round = 0     # current up-card round number
         self.console_total_up_rounds = 0  # total up-card rounds in this game
         self.console_scan_phase = "idle"  # "idle" | "watching" | "settling" | "scanned" | "confirmed"
@@ -1523,8 +1524,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "claude": details.get("claude", ""),
                     "duplicate": False,
                 }
-            # Flag duplicates
-            seen = {}  # card -> first player name
+            # Flag duplicates against current round AND all prior rounds this hand
+            seen = {}  # card -> "player round N" descriptor
+            for c in s.console_hand_cards:
+                seen[c["card"]] = f"{c['player']} (round {c['round']})"
             for name in s.console_active_players:
                 zi = zone_cards.get(name)
                 if not zi or not zi["card"]:
@@ -1532,7 +1535,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 card = zi["card"]
                 if card in seen:
                     zi["duplicate"] = True
-                    zone_cards[seen[card]]["duplicate"] = True
+                    # If the prior is in current zone_cards, flag that too
+                    prior_name = seen[card].split(" ")[0]
+                    if prior_name in zone_cards:
+                        zone_cards[prior_name]["duplicate"] = True
                 else:
                     seen[card] = name
             self._r(200, "application/json", json.dumps({
@@ -1575,6 +1581,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 result = ge.new_hand(game_name)
                 s.console_last_round_cards = []
+                s.console_hand_cards = []
                 # Count total up-card rounds from template
                 s.console_up_round = 0
                 template = ge.templates[game_name]
@@ -1610,11 +1617,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     round_cards.append({"player": p2.name, "card": card})
             # Check Follow the Queen wild cards — announce before betting
             _check_follow_the_queen_round(s, round_cards)
-            # Save as last round
+            # Save as last round and accumulate into hand-wide history
+            round_num = s.console_up_round + 1
             if round_cards:
                 s.console_last_round_cards = round_cards
+                for c in round_cards:
+                    s.console_hand_cards.append({"player": c["player"], "card": c["card"], "round": round_num})
             s.console_scan_phase = "confirmed"
-            log.log(f"[CONSOLE] Cards confirmed for up round {s.console_up_round + 1}")
+            log.log(f"[CONSOLE] Cards confirmed for up round {round_num}")
             self._r(200, "application/json", json.dumps({"ok": True}))
 
         elif p == "/api/console/next_round":
@@ -1642,6 +1652,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ge = s.game_engine
             result = ge.end_hand()
             s.console_last_round_cards = []
+            s.console_hand_cards = []
             s.monitoring = False
             s.console_scan_phase = "idle"
             # Reset all zone states
