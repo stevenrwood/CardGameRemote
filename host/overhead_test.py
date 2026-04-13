@@ -574,14 +574,11 @@ def _deal_scan_all_zones(s):
         dm["phase"] = "retry_missing"
         dm["retry_time"] = time.time()
     else:
-        # All recognized — advance to next round
+        # All recognized — wait for players to clear zones
         log.log(f"[DEAL] Round {dm['round_idx']+1} complete — all {len(order)} cards recognized")
-        dm["round_idx"] += 1
-        dm["announced_this_round"] = set()
-        _advance_to_next_up(s)
-        if dm["phase"] == "dealing":
-            dealer_name = order[-1]
-            log.log(f"[DEAL] Round {dm['round_idx']+1}: waiting for {dealer_name}'s card")
+        speech.say("Clear zones")
+        dm["phase"] = "waiting_to_clear"
+        log.log("[DEAL] Waiting for all zones to be cleared")
 
 
 def _deal_check_dealer_zone(s):
@@ -619,6 +616,47 @@ def _deal_retry_missing(s):
     log.log("[DEAL] Retrying missing zones...")
     dm["phase"] = "scanning"
     _deal_scan_all_zones(s)
+
+
+def _deal_check_zones_clear(s):
+    """Check if all zones are empty — players moved cards out."""
+    dm = s.deal_mode
+    if not dm or dm["phase"] != "waiting_to_clear":
+        return
+
+    frame = s.latest_frame
+    if frame is None:
+        return
+
+    order = dm["deal_order"]
+    still_occupied = []
+    for player in order:
+        zone = next((z for z in s.cal.zones if z["name"] == player), None)
+        if not zone:
+            continue
+        crop = s.monitor._crop(frame, zone)
+        if crop is None or crop.size == 0:
+            continue
+        baseline = s.monitor.baselines.get(player)
+        if baseline is None or crop.shape != baseline.shape:
+            continue
+        diff = float(np.mean(cv2.absdiff(crop, baseline)))
+        if diff > s.monitor.threshold:
+            still_occupied.append(player)
+
+    if not still_occupied:
+        # All zones clear — recapture baselines and advance
+        log.log("[DEAL] All zones cleared")
+        s.monitor.capture_baselines(frame)
+        log.log("[DEAL] Baselines recaptured")
+        dm["round_idx"] += 1
+        dm["round_results"] = {}
+        dm["announced_this_round"] = set()
+        _advance_to_next_up(s)
+        if dm["phase"] == "dealing":
+            dealer_name = order[-1]
+            log.log(f"[DEAL] Round {dm['round_idx']+1}: waiting for {dealer_name}'s card")
+            speech.say("Deal")
 
 
 def _deal_mode_json(s):
@@ -948,6 +986,8 @@ def bg_loop():
                     _deal_check_dealer_zone(_state)
                 elif dm["phase"] == "retry_missing":
                     _deal_retry_missing(_state)
+                elif dm["phase"] == "waiting_to_clear":
+                    _deal_check_zones_clear(_state)
 
         time.sleep(1)  # 1 second capture rate
 
