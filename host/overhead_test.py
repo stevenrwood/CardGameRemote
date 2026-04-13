@@ -82,7 +82,7 @@ class LogBuffer:
     def __init__(self, maxlines=500):
         self._lines = []
         self._lock = Lock()
-        # Clear log file on startup
+        # Overwrite log file on startup
         LOG_FILE.write_text("")
 
     def log(self, msg):
