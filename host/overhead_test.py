@@ -228,7 +228,7 @@ def to_jpeg(frame, q=85):
 class ZoneMonitor:
     def __init__(self, threshold):
         self.threshold = threshold
-        self.yolo_min_conf = 0.5  # below this, fall back to Claude API
+        self.yolo_min_conf = 0.50  # below this, fall back to Claude API
         self.baselines = {}
         self.last_card = {}
         self.zone_state = {}
@@ -276,9 +276,15 @@ class ZoneMonitor:
         log.log("Baselines captured")
 
     def check_zones(self, frame):
+        """Check all zones. YOLO runs for each changed zone, then one batched
+        Claude call handles all zones where YOLO was below threshold."""
+        changed = {}  # name -> crop for zones needing recognition
         for z in _state.cal.zones:
             name = z["name"]
             if name not in self.baselines or self.pending.get(name):
+                continue
+            # Skip corrected zones — dealer already fixed this card
+            if self.zone_state.get(name) == "corrected":
                 continue
             crop = self._crop(frame, z)
             if crop is None or crop.size == 0:
@@ -295,9 +301,175 @@ class ZoneMonitor:
                 continue
 
             if diff > self.threshold:
-                self.zone_state[name] = "processing"
+                changed[name] = crop.copy()
+
+        if changed:
+            # Mark all as pending so we don't double-process
+            for name in changed:
                 self.pending[name] = True
-                Thread(target=self._recognize, args=(name, crop.copy()), daemon=True).start()
+            Thread(target=self._recognize_batch, args=(changed,), daemon=True).start()
+
+    def _recognize_batch(self, zone_crops):
+        """Run YOLO on all zones, then batch Claude call for low-confidence ones."""
+        need_claude = {}  # name -> (crop, yolo_result, yolo_conf)
+
+        # Phase 1: YOLO all zones (sequential, under lock)
+        for name, crop in zone_crops.items():
+            details = {"yolo": "", "yolo_conf": 0, "claude": "", "final": ""}
+            t0 = time.time()
+            try:
+                if self._yolo_model is not None:
+                    log.log(f"[{name}] YOLO inference started")
+                    t_yolo = time.time()
+                    result, conf = self._recognize_yolo(crop)
+                    yolo_ms = (time.time() - t_yolo) * 1000
+                    log.log(f"[{name}] YOLO result: {result} ({conf:.0%}) in {yolo_ms:.0f}ms")
+                    details["yolo"] = result
+                    details["yolo_conf"] = round(conf * 100)
+
+                    if result != "No card" and conf >= self.yolo_min_conf:
+                        # YOLO confident — accept it
+                        total_ms = (time.time() - t0) * 1000
+                        self.last_card[name] = result
+                        self.zone_state[name] = "recognized"
+                        details["final"] = result
+                        log.log(f"[{name}] RECOGNIZED: {result} (total {total_ms:.0f}ms)")
+                        self._save(name, crop, result)
+                        speech.say(f"{name}, {result}")
+                    else:
+                        # Need Claude
+                        need_claude[name] = (crop, details)
+                        self.zone_state[name] = "processing"
+                        continue
+                else:
+                    need_claude[name] = (crop, details)
+                    self.zone_state[name] = "processing"
+                    continue
+            except Exception as e:
+                log.log(f"[{name}] YOLO error: {e}")
+                self.zone_state[name] = "empty"
+
+            self.recognition_details[name] = details
+            self.recognition_crops[name] = crop
+            self.pending[name] = False
+
+        # Phase 2: Batch Claude call for all low-confidence zones
+        if need_claude and self.client:
+            self._recognize_claude_batch(need_claude)
+        else:
+            # No Claude available — mark remaining as empty
+            for name, (crop, details) in need_claude.items():
+                yolo_result = details.get("yolo", "")
+                if yolo_result and yolo_result != "No card":
+                    # Accept low-conf YOLO rather than nothing
+                    self.last_card[name] = yolo_result
+                    self.zone_state[name] = "recognized"
+                    details["final"] = yolo_result
+                    log.log(f"[{name}] RECOGNIZED (low conf, no Claude): {yolo_result}")
+                    self._save(name, crop, yolo_result)
+                    speech.say(f"{name}, {yolo_result}")
+                else:
+                    self.zone_state[name] = "empty"
+                self.recognition_details[name] = details
+                self.recognition_crops[name] = crop
+                self.pending[name] = False
+
+    def _recognize_claude_batch(self, need_claude):
+        """Single Claude API call with all zone images."""
+        names = list(need_claude.keys())
+        log.log(f"[CLAUDE] Batch call for {len(names)} zones: {', '.join(names)}")
+
+        # Build multi-image message
+        content = []
+        for name in names:
+            crop, details = need_claude[name]
+            b64 = base64.b64encode(
+                cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes()
+            ).decode()
+            content.append({"type": "text", "text": f"Image {name}:"})
+            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
+        content.append({"type": "text", "text":
+            "For each labeled image above, identify the playing card. "
+            "Reply with one line per image: 'Name: Rank of Suit' (e.g. 'Steve: 4 of Clubs'). "
+            "If unclear or no card visible, reply 'Name: No card'."})
+
+        t0 = time.time()
+        try:
+            resp = self.client.messages.create(
+                model=CLAUDE_MODEL, max_tokens=200,
+                messages=[{"role": "user", "content": content}])
+            claude_ms = (time.time() - t0) * 1000
+            raw = resp.content[0].text.strip()
+            log.log(f"[CLAUDE] Response in {claude_ms:.0f}ms: {raw}")
+
+            # Parse response lines
+            for line in raw.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                # Match "Name: Rank of Suit" or "Name: No card"
+                for name in names:
+                    if line.lower().startswith(name.lower() + ":"):
+                        value = line[len(name)+1:].strip()
+                        crop, details = need_claude[name]
+                        m = re.search(r'(Ace|King|Queen|Jack|10|[2-9])\s+of\s+(Hearts|Diamonds|Clubs|Spades)', value, re.I)
+                        if m:
+                            result = f"{m.group(1).capitalize()} of {m.group(2).capitalize()}"
+                            details["claude"] = result
+                            details["final"] = result
+                            self.last_card[name] = result
+                            self.zone_state[name] = "recognized"
+                            log.log(f"[{name}] RECOGNIZED (Claude): {result}")
+                            self._save(name, crop, result)
+                            speech.say(f"{name}, {result}")
+                        else:
+                            details["claude"] = "No card"
+                            self.zone_state[name] = "empty"
+                            log.log(f"[{name}] Claude: No card")
+                        self.recognition_details[name] = details
+                        self.recognition_crops[name] = crop
+                        self.pending[name] = False
+                        break
+
+            # Handle any names not found in response
+            for name in names:
+                if self.pending.get(name):
+                    crop, details = need_claude[name]
+                    # Fall back to low-conf YOLO if available
+                    yolo_result = details.get("yolo", "")
+                    if yolo_result and yolo_result != "No card":
+                        details["final"] = yolo_result
+                        self.last_card[name] = yolo_result
+                        self.zone_state[name] = "recognized"
+                        log.log(f"[{name}] RECOGNIZED (YOLO fallback): {yolo_result}")
+                        self._save(name, crop, yolo_result)
+                        speech.say(f"{name}, {yolo_result}")
+                    else:
+                        self.zone_state[name] = "empty"
+                    self.recognition_details[name] = details
+                    self.recognition_crops[name] = crop
+                    self.pending[name] = False
+
+        except Exception as e:
+            log.log(f"[CLAUDE] Batch error: {e}")
+            # Fall back to YOLO results for all
+            for name in names:
+                if not self.pending.get(name):
+                    continue
+                crop, details = need_claude[name]
+                yolo_result = details.get("yolo", "")
+                if yolo_result and yolo_result != "No card":
+                    details["final"] = yolo_result
+                    self.last_card[name] = yolo_result
+                    self.zone_state[name] = "recognized"
+                    log.log(f"[{name}] RECOGNIZED (YOLO, Claude failed): {yolo_result}")
+                    self._save(name, crop, yolo_result)
+                    speech.say(f"{name}, {yolo_result}")
+                else:
+                    self.zone_state[name] = "empty"
+                self.recognition_details[name] = details
+                self.recognition_crops[name] = crop
+                self.pending[name] = False
 
     def check_single(self, frame, zone):
         name = zone["name"]
@@ -320,60 +492,32 @@ class ZoneMonitor:
         x2, y2 = min(w, cx+r), min(h, cy+r)
         return frame[y1:y2, x1:x2] if x2 > x1 and y2 > y1 else None
 
-    def _recognize(self, name, crop):
-        t0 = time.time()
+    def _recognize_single(self, name, crop):
+        """Recognize a single zone (used by test mode and deal mode)."""
         details = {"yolo": "", "yolo_conf": 0, "claude": "", "final": ""}
         try:
-            result = None
-
-            # Try YOLO first
             if self._yolo_model is not None:
-                log.log(f"[{name}] YOLO inference started")
-                t_yolo = time.time()
                 result, conf = self._recognize_yolo(crop)
-                yolo_ms = (time.time() - t_yolo) * 1000
-                log.log(f"[{name}] YOLO result: {result} ({conf:.0%}) in {yolo_ms:.0f}ms")
                 details["yolo"] = result
                 details["yolo_conf"] = round(conf * 100)
-
-                if result == "No card" or conf < self.yolo_min_conf:
-                    yolo_result = result
-                    if self.client:
-                        log.log(f"[{name}] YOLO low confidence, calling Claude API...")
-                        t_claude = time.time()
-                        result = self._recognize_claude(crop)
-                        claude_ms = (time.time() - t_claude) * 1000
-                        log.log(f"[{name}] Claude result: {result} in {claude_ms:.0f}ms")
-                        details["claude"] = result
-                    elif result == "No card":
-                        result = None
-            elif self.client:
-                log.log(f"[{name}] No YOLO model, calling Claude API...")
-                t_claude = time.time()
-                result = self._recognize_claude(crop)
-                claude_ms = (time.time() - t_claude) * 1000
-                log.log(f"[{name}] Claude result: {result} in {claude_ms:.0f}ms")
-                details["claude"] = result
-            else:
-                self.zone_state[name] = "empty"
-                return
-
-            total_ms = (time.time() - t0) * 1000
-            if result and result != "No card":
-                self.last_card[name] = result
-                self.zone_state[name] = "recognized"
-                details["final"] = result
-                log.log(f"[{name}] RECOGNIZED: {result} (total {total_ms:.0f}ms)")
-                self._save(name, crop, result)
-                speech.say(f"{name}, {result}")
-            else:
-                log.log(f"[{name}] No card (total {total_ms:.0f}ms)")
-                self.zone_state[name] = "empty"
-
+                if result != "No card" and conf >= self.yolo_min_conf:
+                    self.last_card[name] = result
+                    self.zone_state[name] = "recognized"
+                    details["final"] = result
+                    self._save(name, crop, result)
+                    return
+                if self.client:
+                    result = self._recognize_claude(crop)
+                    details["claude"] = result
+                    if result and result != "No card":
+                        self.last_card[name] = result
+                        self.zone_state[name] = "recognized"
+                        details["final"] = result
+                        self._save(name, crop, result)
+                        return
+            self.zone_state[name] = "empty"
         except Exception as e:
-            import traceback
             log.log(f"[{name}] error: {e}")
-            log.log(f"[{name}] traceback: {traceback.format_exc().splitlines()[-2]}")
             self.zone_state[name] = "empty"
         finally:
             self.recognition_details[name] = details
@@ -616,7 +760,7 @@ def _deal_scan_all_zones(s):
             missing.append(player)
             continue
 
-        s.monitor._recognize(player, crop)
+        s.monitor._recognize_single(player, crop)
         result = s.monitor.last_card.get(player, "No card")
         if result and result != "No card":
             dm["round_results"][player] = result
@@ -1390,6 +1534,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     new_card = f"{rank_name} of {suit_name}"
                     old_card = s.monitor.last_card.get(player, "")
                     s.monitor.last_card[player] = new_card
+                    s.monitor.zone_state[player] = "corrected"
                     s.monitor.recognition_details[player] = {
                         "yolo": s.monitor.recognition_details.get(player, {}).get("yolo", ""),
                         "yolo_conf": s.monitor.recognition_details.get(player, {}).get("yolo_conf", 0),
