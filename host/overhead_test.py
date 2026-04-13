@@ -312,33 +312,39 @@ class ZoneMonitor:
 
             # Try YOLO first
             if self._yolo_model is not None:
+                t_yolo = time.time()
                 result, conf = self._recognize_yolo(crop)
-                method = f"YOLO {conf:.0%}"
+                yolo_ms = (time.time() - t_yolo) * 1000
+                method = f"YOLO {conf:.0%} ({yolo_ms:.0f}ms)"
                 if result == "No card" or conf < 0.4:
-                    # Low confidence — fall back to Claude
                     yolo_result = result
                     yolo_conf = conf
                     if self.client:
+                        t_claude = time.time()
                         result = self._recognize_claude(crop)
-                        method = f"Claude (YOLO was {yolo_result} {yolo_conf:.0%})"
+                        claude_ms = (time.time() - t_claude) * 1000
+                        method = f"Claude ({claude_ms:.0f}ms) [YOLO was {yolo_result} {yolo_conf:.0%} ({yolo_ms:.0f}ms)]"
                     elif result == "No card":
                         result = None
             elif self.client:
+                t_claude = time.time()
                 result = self._recognize_claude(crop)
-                method = "Claude"
+                claude_ms = (time.time() - t_claude) * 1000
+                method = f"Claude ({claude_ms:.0f}ms)"
             else:
                 self.zone_state[name] = "empty"
                 return
 
+            total_ms = (time.time() - t0) * 1000
             if result and result != "No card":
                 self.last_card[name] = result
                 self.zone_state[name] = "recognized"
-                log.log(f"{name}: {result}  ({time.time()-t0:.1f}s) [{method}]")
+                log.log(f"{name}: {result}  (total {total_ms:.0f}ms) [{method}]")
                 self._save(name, crop, result)
                 if "no card" not in result.lower():
                     speech.say(f"{name}, {result}")
             else:
-                log.log(f"{name}: No card  ({time.time()-t0:.1f}s) [{method}]")
+                log.log(f"{name}: No card  (total {total_ms:.0f}ms) [{method}]")
                 self.zone_state[name] = "empty"
 
         except Exception as e:
@@ -817,10 +823,19 @@ def _process_deal_text(s, text):
 # Background capture
 # ---------------------------------------------------------------------------
 
+_last_capture_log = [0]  # throttle capture timing logs
+
 def bg_loop():
     while not _state.quit_flag:
+        t_cap = time.time()
         frame = _state.capture.capture()
+        cap_ms = (time.time() - t_cap) * 1000
         if frame is not None:
+            # Log capture timing every 30 seconds
+            now = time.time()
+            if now - _last_capture_log[0] > 30:
+                log.log(f"[CAPTURE] frame grabbed in {cap_ms:.0f}ms")
+                _last_capture_log[0] = now
             _state.latest_frame = frame
             disp = crop_circle(frame, _state.cal).copy()
             draw_overlay(disp, _state.cal, _state.monitor)
@@ -847,7 +862,23 @@ def bg_loop():
                     if result and result != "No card":
                         tm["result"] = result
                         tm["waiting"] = "confirm"
+                        tm["confirm_time"] = time.time()
                         speech.say(f"{zone['name']}, {result}")
+
+            # Test mode: auto-confirm after 4 seconds
+            if tm and tm["waiting"] == "confirm":
+                if time.time() - tm.get("confirm_time", 0) > 4:
+                    # Auto-confirm — advance to next zone
+                    tm["zone_idx"] += 1
+                    if tm["zone_idx"] >= len(_state.cal.zones):
+                        _state.test_mode = None
+                        log.log("[TEST] All zones tested")
+                    else:
+                        tm["waiting"] = "card"
+                        tm["result"] = ""
+                        next_name = _state.cal.zones[tm["zone_idx"]]["name"]
+                        speech.say(f"{next_name} is next")
+                        log.log(f"[TEST] Auto-confirmed. Next: {next_name}")
 
             # Deal mode: watch active player's zone for cards
             dm = _state.deal_mode
