@@ -233,6 +233,7 @@ class ZoneMonitor:
         self.zone_state = {}
         self.pending = {}
         self.recognition_details = {}  # name -> {yolo, yolo_conf, claude, final}
+        self.recognition_crops = {}   # name -> crop (numpy array) at time of recognition
         self._yolo_model = None
         self._client = None
         self._load_yolo()
@@ -372,6 +373,7 @@ class ZoneMonitor:
             self.zone_state[name] = "empty"
         finally:
             self.recognition_details[name] = details
+            self.recognition_crops[name] = crop
             self.pending[name] = False
 
     def _recognize_yolo(self, crop):
@@ -1050,6 +1052,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         }
         if p in routes:
             routes[p](s)
+        elif p.startswith("/zone_snap/"):
+            name = p[11:]
+            crop = s.monitor.recognition_crops.get(name)
+            if crop is not None:
+                j = to_jpeg(crop, 90)
+                if j: self._r(200,"image/jpeg",j)
+                else: self._r(500,"text/plain","Encode failed")
+            else:
+                self._zone_img(s, name)  # fallback to live
         elif p.startswith("/zone/"):
             self._zone_img(s, p[6:])
         elif p.startswith("/training/"):
@@ -1315,6 +1326,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "final": new_card,
                         "corrected": True,
                     }
+                    # Save corrected crop to training_data for future YOLO training
+                    crop = s.monitor.recognition_crops.get(player)
+                    if crop is not None:
+                        s.monitor._save(player, crop, new_card)
+                        log.log(f"[CONSOLE] Saved correction to training_data: {new_card}")
                     log.log(f"[CONSOLE] Corrected {player}: {old_card} -> {new_card}")
             self._r(200, "application/json", '{"ok":true}')
 
@@ -2184,7 +2200,7 @@ function openCorrect(player){
   correctPlayer=player;
   var zi=ST.zone_cards[player]||{};
   document.getElementById('correct-title').textContent=player;
-  document.getElementById('correct-img').src='/zone/'+player+'?'+Date.now();
+  document.getElementById('correct-img').src='/zone_snap/'+player+'?'+Date.now();
 
   // Details
   var dh='';
