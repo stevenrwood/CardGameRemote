@@ -2119,7 +2119,7 @@ function render(){
       var zi=ST.zone_cards[n]||{};
       var card=zi.card||'';
       if(card){
-        zh+='<div class="zone-row" onclick="openCorrect(\\''+n+'\\')">'
+        zh+='<div class="zone-row" onclick="openCorrect(&quot;'+n+'&quot;)">'
           +'<span class="zone-name">'+n+'</span>'
           +'<span class="zone-card">'+card+'</span>'
           +'<span class="zone-arrow">&#9656;</span></div>';
