@@ -519,7 +519,7 @@ def _advance_to_next_up(s):
 
 
 def _deal_scan_all_zones(s):
-    """Scan all player zones and recognize cards."""
+    """Scan all player zones and recognize cards. No baseline comparison — just crop and recognize."""
     dm = s.deal_mode
     if not dm:
         return
@@ -540,23 +540,25 @@ def _deal_scan_all_zones(s):
         if not zone:
             continue
 
-        crop = s.monitor.check_single(frame, zone)
-        if crop is not None:
-            s.monitor._recognize(player, crop)
-            result = s.monitor.last_card.get(player, "No card")
-            if result and result != "No card":
-                dm["round_results"][player] = result
-                dm["cards"].append({
-                    "player": player,
-                    "card": result,
-                    "round": dm["round_idx"] + 1,
-                })
-                # Update baseline so same card won't re-trigger
-                s.monitor.baselines[player] = crop.copy()
-                s.monitor.zone_state[player] = "empty"
-                s.monitor.last_card[player] = ""
-            else:
-                missing.append(player)
+        # Crop zone directly — don't rely on baseline diff
+        crop = s.monitor._crop(frame, zone)
+        if crop is None or crop.size == 0:
+            missing.append(player)
+            continue
+
+        s.monitor._recognize(player, crop)
+        result = s.monitor.last_card.get(player, "No card")
+        if result and result != "No card":
+            dm["round_results"][player] = result
+            dm["cards"].append({
+                "player": player,
+                "card": result,
+                "round": dm["round_idx"] + 1,
+            })
+            # Update baseline so next round detects change
+            s.monitor.baselines[player] = crop.copy()
+            s.monitor.zone_state[player] = "empty"
+            s.monitor.last_card[player] = ""
         else:
             missing.append(player)
 
@@ -617,18 +619,6 @@ def _deal_retry_missing(s):
     log.log("[DEAL] Retrying missing zones...")
     dm["phase"] = "scanning"
     _deal_scan_all_zones(s)
-
-    # Advance to next player
-    dm["player_idx"] += 1
-    if dm["player_idx"] >= len(dm["deal_order"]):
-        # All players dealt this round — next round
-        dm["player_idx"] = 0
-        dm["round_idx"] += 1
-        _advance_to_next_up(s)
-
-    active = _get_active_deal_info(s)
-    if active:
-        log.log(f"[DEAL] Next: {active['player']}'s zone")
 
 
 def _deal_mode_json(s):
