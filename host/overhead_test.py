@@ -1276,10 +1276,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Recapture baselines for next round
             if s.cal.ok and s.latest_frame is not None:
                 s.monitor.capture_baselines(s.latest_frame)
-                # Reset zone states
+                # Reset zone states and recognition details
                 for z in s.cal.zones:
                     s.monitor.zone_state[z["name"]] = "empty"
                     s.monitor.last_card[z["name"]] = ""
+                    s.monitor.recognition_details[z["name"]] = {}
+                    s.monitor.recognition_crops[z["name"]] = None
                 log.log("[CONSOLE] Baselines recaptured for next round")
             msgs = ge.continue_after_betting()
             log.log(f"[CONSOLE] Continue — {ge._describe_current_phase()}")
@@ -1290,10 +1292,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             result = ge.end_hand()
             s.console_last_round_cards = []
             s.monitoring = False
-            # Reset zone states
+            # Reset all zone states
             for z in s.cal.zones:
                 s.monitor.zone_state[z["name"]] = "empty"
                 s.monitor.last_card[z["name"]] = ""
+                s.monitor.recognition_details[z["name"]] = {}
+                s.monitor.recognition_crops[z["name"]] = None
             log.log(f"[CONSOLE] Hand over — next dealer: {result['next_dealer']}")
             self._r(200, "application/json", json.dumps(result))
 
@@ -2112,14 +2116,14 @@ function render(){
     if(ge.deal_round) zh_title='Cards dealt in round '+ge.deal_round+' (touch to correct)';
     document.getElementById('zone-header').textContent=zh_title;
 
-    // Zone cards (live from camera) — tappable
+    // Zone cards (live from camera) — tappable via data attribute
     var zc=document.getElementById('zone-cards');
     var zh='';
     ST.active_players.forEach(function(n){
       var zi=ST.zone_cards[n]||{};
       var card=zi.card||'';
       if(card){
-        zh+='<div class="zone-row" onclick="openCorrect(&quot;'+n+'&quot;)">'
+        zh+='<div class="zone-row zone-tap" data-player="'+n+'">'
           +'<span class="zone-name">'+n+'</span>'
           +'<span class="zone-card">'+card+'</span>'
           +'<span class="zone-arrow">&#9656;</span></div>';
@@ -2239,6 +2243,12 @@ function saveCorrection(){
     refresh();
   });
 }
+
+// Event delegation for zone taps
+document.getElementById('zone-cards').addEventListener('click',function(e){
+  var row=e.target.closest('.zone-tap');
+  if(row){openCorrect(row.dataset.player)}
+});
 
 setInterval(refresh,3000);
 refresh();
