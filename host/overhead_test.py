@@ -2030,6 +2030,7 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
   </button>
   <button class="btn btn-end" style="margin-top:8px" onclick="doEnd()">End Hand</button>
 </div>
+<pre id="dbg" style="font-size:.7em;color:#555;margin-top:20px;max-height:150px;overflow:auto"></pre>
 
 <!-- Correction modal -->
 <div id="correct-modal" onclick="if(event.target===this)closeCorrect()">
@@ -2074,6 +2075,14 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
 var ST=null;
 var dealing=false;
 var correctPlayer=null;
+var dbgLines=[];
+function dbg(msg){
+  dbgLines.push(new Date().toLocaleTimeString()+' '+msg);
+  if(dbgLines.length>30)dbgLines.shift();
+  var el=document.getElementById('dbg');
+  if(el)el.textContent=dbgLines.join('\\n');
+}
+window.onerror=function(m,s,l){dbg('ERR: '+m+' line:'+l)};
 
 function api(path,data){
   return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -2152,6 +2161,7 @@ function render(){
     // Zone cards (live from camera) — tappable
     var zc=document.getElementById('zone-cards');
     zc.innerHTML='';
+    var tapCount=0;
     ST.active_players.forEach(function(n){
       var zi=ST.zone_cards[n]||{};
       var card=zi.card||'';
@@ -2161,13 +2171,20 @@ function render(){
         div.innerHTML='<span class="zone-name">'+n+'</span>'
           +'<span class="zone-card">'+card+'</span>'
           +'<span class="zone-arrow">&#9656;</span>';
-        div.addEventListener('click',(function(name){return function(){openCorrect(name)}})(n));
+        var handler=(function(name){return function(e){
+          dbg('TAP: '+name+' event='+e.type);
+          openCorrect(name);
+        }})(n);
+        div.addEventListener('click',handler);
+        div.addEventListener('touchend',handler);
+        tapCount++;
       } else {
         div.innerHTML='<span class="zone-name">'+n+'</span>'
           +'<span class="zone-card zone-empty">--</span>';
       }
       zc.appendChild(div);
     });
+    dbg('render: '+tapCount+' tappable zones');
 
     // Last round cards
     var lrs=document.getElementById('last-round-section');
@@ -2240,6 +2257,7 @@ function doEnd(){
 // --- Correction popup ---
 
 function openCorrect(player){
+  dbg('openCorrect called: '+player);
   correctPlayer=player;
   var zi=ST.zone_cards[player]||{};
   document.getElementById('correct-title').textContent=player;
