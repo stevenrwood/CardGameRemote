@@ -1403,7 +1403,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "yolo": details.get("yolo", ""),
                     "yolo_conf": details.get("yolo_conf", 0),
                     "claude": details.get("claude", ""),
+                    "duplicate": False,
                 }
+            # Flag duplicates
+            seen = {}  # card -> first player name
+            for name in s.console_active_players:
+                zi = zone_cards.get(name)
+                if not zi or not zi["card"]:
+                    continue
+                card = zi["card"]
+                if card in seen:
+                    zi["duplicate"] = True
+                    zone_cards[seen[card]]["duplicate"] = True
+                else:
+                    seen[card] = name
             self._r(200, "application/json", json.dumps({
                 "active_players": s.console_active_players,
                 "all_players": PLAYER_NAMES,
@@ -2148,6 +2161,7 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
 .zone-name{width:80px;font-weight:600;font-size:1.05em}
 .zone-card{flex:1;font-size:1.1em;color:#4caf50}
 .zone-empty{color:#555}
+.zone-dup{color:#e53935 !important}
 .zone-arrow{color:#555;font-size:1.2em}
 #correct-modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.9);
   z-index:100;overflow-y:auto;padding:12px}
@@ -2406,11 +2420,12 @@ function render(){
     ST.active_players.forEach(function(n){
       var zi=ST.zone_cards[n]||{};
       var card=zi.card||'';
+      var dup=zi.duplicate||false;
       var cs=document.getElementById('zc-'+n);
       var ar=document.getElementById('za-'+n);
       if(cs){
-        cs.textContent=card||'--';
-        cs.className=card?'zone-card':'zone-card zone-empty';
+        cs.textContent=card?(dup?card+' DUP!':card):'--';
+        cs.className=card?(dup?'zone-card zone-dup':'zone-card'):'zone-card zone-empty';
       }
       if(ar) ar.style.display=card?'':'none';
     });
