@@ -1181,8 +1181,7 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
     <img id="tableimg" src="/snapshot/cropped" style="width:100%;cursor:pointer"
          onclick="this.src='/snapshot/cropped?'+Date.now()">
     <div style="margin-top:8px">
-      <button class="btn-off" style="padding:3px 8px;font-size:.75em" onclick="openLogWindow()">Open Log Window</button>
-      <button class="btn-off" style="padding:3px 8px;font-size:.75em" onclick="copyLog()">Copy Log</button>
+      <button class="btn-off" style="padding:3px 8px;font-size:.75em" onclick="openLogWindow()">Log Window</button>
       <a href="/training" style="color:#4fc3f7;font-size:.8em;margin-left:8px">Training data</a>
     </div>
   </div>
@@ -1279,9 +1278,6 @@ function collectResume(){{
 }}
 function collectRedo(){{
   api('/api/collect/redo').then(update);
-}}
-function copyLog(){{
-  window.open('/log','_blank');
 }}
 function openLogWindow(){{
   window.open('/logview','_logview','width=800,height=400,scrollbars=yes');
@@ -1520,8 +1516,12 @@ c.onmousemove=function(e){{if(!pc)return;var p=xy(e);pc[2]=Math.round(Math.sqrt(
         self._r(200, "text/html", """<!DOCTYPE html>
 <html><head><title>Log</title>
 <style>
-body{font-family:monospace;background:#0d1117;color:#e0e0e0;padding:12px;margin:0}
-pre{white-space:pre-wrap;font-size:0.85em;line-height:1.4}
+body{font-family:monospace;background:#0d1117;color:#e0e0e0;padding:0;margin:0}
+#toolbar{padding:6px 12px;background:#16213e;position:sticky;top:0}
+button{padding:4px 12px;border:none;border-radius:4px;cursor:pointer;background:#333;color:#e0e0e0;font-size:0.85em}
+button:hover{background:#555}
+#status{font-size:0.8em;color:#888;margin-left:12px}
+pre{white-space:pre-wrap;font-size:0.85em;line-height:1.4;padding:8px 12px;margin:0}
 </style>
 <script>
 function refresh(){
@@ -1533,8 +1533,23 @@ function refresh(){
   }).catch(function(){});
   setTimeout(refresh,2000);
 }
+function copyLog(){
+  var text=document.getElementById('log').textContent;
+  var ta=document.createElement('textarea');
+  ta.value=text;ta.style.position='fixed';ta.style.left='-9999px';
+  document.body.appendChild(ta);ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+  var btn=document.getElementById('copybtn');
+  btn.textContent='Copied!';
+  setTimeout(function(){btn.textContent='Copy Log'},2000);
+}
 refresh();
 </script></head><body>
+<div id="toolbar">
+  <button id="copybtn" onclick="copyLog()">Copy Log</button>
+  <span id="status">Auto-refreshing every 2s</span>
+</div>
 <pre id="log">Loading...</pre>
 </body></html>""")
 
