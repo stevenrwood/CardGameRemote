@@ -501,7 +501,7 @@ def _set_deal_game(s, game_name):
 def _advance_to_next_up(s):
     """Advance to next up card round, skipping down cards."""
     dm = s.deal_mode
-    if not dm or dm["phase"] not in ("dealing", "round_done"):
+    if not dm:
         return
     pattern = dm["pattern"]
 
@@ -649,6 +649,7 @@ def _deal_check_zones_clear(s):
         log.log("[DEAL] All zones cleared")
         s.monitor.capture_baselines(frame)
         log.log("[DEAL] Baselines recaptured")
+        dm["phase"] = "advancing"  # prevent re-entry
         dm["round_idx"] += 1
         dm["round_results"] = {}
         dm["announced_this_round"] = set()
