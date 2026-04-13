@@ -438,7 +438,7 @@ def _check_follow_the_queen(result):
     if ge.last_up_was_queen:
         # This card follows a Queen — its rank becomes wild
         ge.wild_ranks = ["Q", rank_short]
-        ge.wild_label = f"{rank}s are wild (follows Queen)"
+        ge.wild_label = f"Queens and {rank}s are wild"
         log.log(f"[WILD] {ge.wild_label}")
         speech.say(f"{rank}s are now wild")
 
@@ -2149,24 +2149,25 @@ function render(){
     if(ge.deal_round) zh_title='Cards dealt in round '+ge.deal_round+' (touch to correct)';
     document.getElementById('zone-header').textContent=zh_title;
 
-    // Zone cards (live from camera) — tappable via data attribute
+    // Zone cards (live from camera) — tappable
     var zc=document.getElementById('zone-cards');
-    var zh='';
+    zc.innerHTML='';
     ST.active_players.forEach(function(n){
       var zi=ST.zone_cards[n]||{};
       var card=zi.card||'';
+      var div=document.createElement('div');
+      div.className='zone-row';
       if(card){
-        zh+='<div class="zone-row zone-tap" data-player="'+n+'">'
-          +'<span class="zone-name">'+n+'</span>'
+        div.innerHTML='<span class="zone-name">'+n+'</span>'
           +'<span class="zone-card">'+card+'</span>'
-          +'<span class="zone-arrow">&#9656;</span></div>';
+          +'<span class="zone-arrow">&#9656;</span>';
+        div.addEventListener('click',(function(name){return function(){openCorrect(name)}})(n));
       } else {
-        zh+='<div class="zone-row">'
-          +'<span class="zone-name">'+n+'</span>'
-          +'<span class="zone-card zone-empty">--</span></div>';
+        div.innerHTML='<span class="zone-name">'+n+'</span>'
+          +'<span class="zone-card zone-empty">--</span>';
       }
+      zc.appendChild(div);
     });
-    zc.innerHTML=zh;
 
     // Last round cards
     var lrs=document.getElementById('last-round-section');
@@ -2276,12 +2277,6 @@ function saveCorrection(){
     refresh();
   });
 }
-
-// Event delegation for zone taps
-document.getElementById('zone-cards').addEventListener('click',function(e){
-  var row=e.target.closest('.zone-tap');
-  if(row){openCorrect(row.dataset.player)}
-});
 
 setInterval(refresh,3000);
 refresh();
