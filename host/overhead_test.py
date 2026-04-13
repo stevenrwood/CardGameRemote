@@ -466,7 +466,7 @@ def _stop_deal_mode(s):
 
 
 def _set_deal_game(s, game_name):
-    """Set the game and compute the deal pattern."""
+    """Set the game and start dealing."""
     if not s.deal_mode:
         return
     pattern = GAME_PATTERNS.get(game_name)
@@ -477,9 +477,9 @@ def _set_deal_game(s, game_name):
     s.deal_mode["pattern"] = pattern
     s.deal_mode["phase"] = "dealing"
     s.deal_mode["round_idx"] = 0
-    s.deal_mode["player_idx"] = 0
     s.deal_mode["cards"] = []
-    s.deal_mode["announced"] = set()
+    s.deal_mode["round_results"] = {}
+    s.deal_mode["retry_time"] = 0
 
     # Capture baselines before dealing starts
     if s.latest_frame is not None:
@@ -493,68 +493,130 @@ def _set_deal_game(s, game_name):
     log.log(f"[DEAL] Game: {game_name}, dealer: {s.deal_mode['dealer']}")
     log.log(f"[DEAL] Deal order: {' -> '.join(order)}")
     log.log(f"[DEAL] Pattern: {pattern}")
-    active = _get_active_deal_info(s)
-    if active:
-        log.log(f"[DEAL] Watching {active['player']}'s zone for card {active['round_idx']+1} (up)")
+    if s.deal_mode["phase"] == "dealing":
+        dealer_name = order[-1]
+        log.log(f"[DEAL] Round {s.deal_mode['round_idx']+1}: waiting for {dealer_name}'s card (last dealt)")
 
 
 def _advance_to_next_up(s):
-    """Advance round/player indices to the next up card, skipping down cards."""
+    """Advance to next up card round, skipping down cards."""
     dm = s.deal_mode
-    if not dm or dm["phase"] != "dealing":
+    if not dm or dm["phase"] not in ("dealing", "round_done"):
         return
     pattern = dm["pattern"]
 
     while dm["round_idx"] < len(pattern):
         if pattern[dm["round_idx"]] == "up":
-            return  # found an up card round
-        # Skip entire down round (all players)
+            dm["phase"] = "dealing"
+            dm["round_results"] = {}
+            dm["retry_time"] = 0
+            return
         log.log(f"[DEAL] Skipping round {dm['round_idx']+1} (down cards — use scanner)")
         dm["round_idx"] += 1
-        dm["player_idx"] = 0
 
-    # Past the end of the pattern
     dm["phase"] = "complete"
     log.log("[DEAL] All rounds dealt")
 
 
-def _get_active_deal_info(s):
-    """Get info about the currently expected card."""
+def _deal_scan_all_zones(s):
+    """Scan all player zones and recognize cards."""
     dm = s.deal_mode
-    if not dm or dm["phase"] != "dealing":
-        return None
-    if dm["round_idx"] >= len(dm["pattern"]):
-        return None
+    if not dm:
+        return
+
+    frame = s.latest_frame
+    if frame is None:
+        return
+
     order = dm["deal_order"]
-    player = order[dm["player_idx"]]
-    zone = next((z for z in s.cal.zones if z["name"] == player), None)
-    return {
-        "player": player,
-        "zone": zone,
-        "round_idx": dm["round_idx"],
-        "card_type": dm["pattern"][dm["round_idx"]],
-    }
+    missing = []
+
+    for player in order:
+        # Skip already recognized this round
+        if player in dm["round_results"]:
+            continue
+
+        zone = next((z for z in s.cal.zones if z["name"] == player), None)
+        if not zone:
+            continue
+
+        crop = s.monitor.check_single(frame, zone)
+        if crop is not None:
+            s.monitor._recognize(player, crop)
+            result = s.monitor.last_card.get(player, "No card")
+            if result and result != "No card":
+                dm["round_results"][player] = result
+                dm["cards"].append({
+                    "player": player,
+                    "card": result,
+                    "round": dm["round_idx"] + 1,
+                })
+                # Update baseline so same card won't re-trigger
+                s.monitor.baselines[player] = crop.copy()
+                s.monitor.zone_state[player] = "empty"
+                s.monitor.last_card[player] = ""
+            else:
+                missing.append(player)
+        else:
+            missing.append(player)
+
+    # Announce recognized cards
+    for player in order:
+        if player in dm["round_results"] and player not in dm.get("announced_this_round", set()):
+            dm.setdefault("announced_this_round", set()).add(player)
+
+    if missing:
+        names = " and ".join(missing)
+        log.log(f"[DEAL] Missing: {names}")
+        speech.say(f"{names}, adjust your cards please")
+        dm["phase"] = "retry_missing"
+        dm["retry_time"] = time.time()
+    else:
+        # All recognized — advance to next round
+        log.log(f"[DEAL] Round {dm['round_idx']+1} complete — all {len(order)} cards recognized")
+        dm["round_idx"] += 1
+        dm["announced_this_round"] = set()
+        _advance_to_next_up(s)
+        if dm["phase"] == "dealing":
+            dealer_name = order[-1]
+            log.log(f"[DEAL] Round {dm['round_idx']+1}: waiting for {dealer_name}'s card")
 
 
-def _deal_card_recognized(s, player, card_str):
-    """Called when a card is visually recognized in a player's zone during dealing."""
+def _deal_check_dealer_zone(s):
+    """Check if the dealer (last in order) has a card — triggers full scan."""
     dm = s.deal_mode
     if not dm or dm["phase"] != "dealing":
         return
 
-    # Avoid duplicate announcements
-    key = f"{player}_{dm['round_idx']}_{dm['player_idx']}"
-    if key in dm["announced"]:
+    frame = s.latest_frame
+    if frame is None:
         return
-    dm["announced"].add(key)
 
-    dm["cards"].append({
-        "player": player,
-        "card": card_str,
-        "round": dm["round_idx"] + 1,
-    })
-    log.log(f"[DEAL] {player}: {card_str} (round {dm['round_idx']+1})")
-    speech.say(f"{player}, {card_str}")
+    order = dm["deal_order"]
+    dealer_name = order[-1]  # dealer gets card last
+    dealer_zone = next((z for z in s.cal.zones if z["name"] == dealer_name), None)
+    if not dealer_zone:
+        return
+
+    crop = s.monitor.check_single(frame, dealer_zone)
+    if crop is not None:
+        log.log(f"[DEAL] Card detected in {dealer_name}'s zone — scanning all zones")
+        dm["phase"] = "scanning"
+        dm["announced_this_round"] = set()
+        _deal_scan_all_zones(s)
+
+
+def _deal_retry_missing(s):
+    """After 5 seconds, rescan missing zones."""
+    dm = s.deal_mode
+    if not dm or dm["phase"] != "retry_missing":
+        return
+    if time.time() - dm["retry_time"] < 5:
+        return
+
+    log.log("[DEAL] Retrying missing zones...")
+    dm["phase"] = "scanning"
+    _deal_scan_all_zones(s)
 
     # Advance to next player
     dm["player_idx"] += 1
@@ -574,14 +636,22 @@ def _deal_mode_json(s):
     dm = s.deal_mode
     if not dm:
         return None
-    active = _get_active_deal_info(s)
+    order = dm.get("deal_order", [])
+    dealer_name = order[-1] if order else None
+    missing = []
+    if dm["phase"] in ("retry_missing", "scanning"):
+        for p in order:
+            if p not in dm.get("round_results", {}):
+                missing.append(p)
     return {
         "phase": dm["phase"],
         "game": dm["game"],
         "dealer": dm.get("dealer"),
-        "deal_order": dm.get("deal_order", []),
+        "deal_order": order,
         "cards": dm["cards"],
-        "active_player": active["player"] if active else None,
+        "round_results": dm.get("round_results", {}),
+        "missing": missing,
+        "watching_for": dealer_name if dm["phase"] == "dealing" else None,
         "round_idx": dm.get("round_idx", 0),
         "total_rounds": len(dm.get("pattern", [])),
     }
@@ -881,26 +951,13 @@ def bg_loop():
                         speech.say(f"{next_name} is next")
                         log.log(f"[TEST] Auto-confirmed. Next: {next_name}")
 
-            # Deal mode: watch active player's zone for cards
+            # Deal mode
             dm = _state.deal_mode
-            if dm and dm["phase"] == "dealing" and _state.cal.ok:
-                active = _get_active_deal_info(_state)
-                if active and active["zone"]:
-                    zone = active["zone"]
-                    player = active["player"]
-                    crop = _state.monitor.check_single(frame, zone)
-                    if crop is not None:
-                        # Card detected — recognize it
-                        result = _state.monitor.last_card.get(player, "")
-                        if not result or result == "No card":
-                            _state.monitor._recognize(player, crop)
-                            result = _state.monitor.last_card.get(player, "No card")
-                        if result and result != "No card":
-                            _deal_card_recognized(_state, player, result)
-                            # Update baseline to current frame so same card won't re-trigger
-                            _state.monitor.baselines[player] = crop.copy()
-                            _state.monitor.zone_state[player] = "empty"
-                            _state.monitor.last_card[player] = ""
+            if dm and _state.cal.ok:
+                if dm["phase"] == "dealing":
+                    _deal_check_dealer_zone(_state)
+                elif dm["phase"] == "retry_missing":
+                    _deal_retry_missing(_state)
 
         time.sleep(1)  # 1 second capture rate
 
