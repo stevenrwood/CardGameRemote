@@ -1185,6 +1185,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/state":
             ge = s.game_engine
+            # Include zone-recognized cards
+            zone_cards = {}
+            for z in s.cal.zones:
+                name = z["name"]
+                card = s.monitor.last_card.get(name, "")
+                if card and card != "No card":
+                    zone_cards[name] = card
             self._r(200, "application/json", json.dumps({
                 "active_players": s.console_active_players,
                 "all_players": PLAYER_NAMES,
@@ -1192,6 +1199,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "dealer": ge.get_dealer().name,
                 "hand": ge.get_hand_state(),
                 "last_round_cards": s.console_last_round_cards,
+                "zone_cards": zone_cards,
             }))
 
         elif p == "/api/console/players":
@@ -1201,6 +1209,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log.log(f"[CONSOLE] Active players: {', '.join(s.console_active_players)}")
             self._r(200, "application/json", '{"ok":true}')
 
+        elif p == "/api/console/set_dealer":
+            ge = s.game_engine
+            name = data.get("dealer", "")
+            for i, p2 in enumerate(ge.players):
+                if p2.name.lower() == name.lower():
+                    ge.dealer_index = i
+                    ge._update_dealer()
+                    log.log(f"[CONSOLE] Dealer set to {p2.name}")
+                    break
+            self._r(200, "application/json", json.dumps({"dealer": ge.get_dealer().name}))
+
         elif p == "/api/console/deal":
             ge = s.game_engine
             game_name = data.get("game", "")
@@ -1209,6 +1228,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 result = ge.new_hand(game_name)
                 s.console_last_round_cards = []
+                # Start zone monitoring for up card recognition
+                if s.cal.ok and s.latest_frame is not None:
+                    s.monitor.capture_baselines(s.latest_frame)
+                    s.monitoring = True
+                    log.log("[CONSOLE] Monitoring started, baselines captured")
                 log.log(f"[CONSOLE] New hand: {game_name}, dealer: {result['dealer']}")
                 if result.get("wild_label"):
                     log.log(f"[CONSOLE] {result['wild_label']}")
@@ -1216,6 +1240,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/continue":
             ge = s.game_engine
+            # Save current zone cards as last round before advancing
+            round_cards = []
+            for z in s.cal.zones:
+                name = z["name"]
+                card = s.monitor.last_card.get(name, "")
+                if card and card != "No card":
+                    round_cards.append({"player": name, "card": card})
+            if round_cards:
+                s.console_last_round_cards = round_cards
+            # Recapture baselines for next round
+            if s.cal.ok and s.latest_frame is not None:
+                s.monitor.capture_baselines(s.latest_frame)
+                # Reset zone states
+                for z in s.cal.zones:
+                    s.monitor.zone_state[z["name"]] = "empty"
+                    s.monitor.last_card[z["name"]] = ""
+                log.log("[CONSOLE] Baselines recaptured for next round")
             msgs = ge.continue_after_betting()
             log.log(f"[CONSOLE] Continue — {ge._describe_current_phase()}")
             self._r(200, "application/json", json.dumps({"messages": msgs, "hand": ge.get_hand_state()}))
@@ -1224,6 +1265,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ge = s.game_engine
             result = ge.end_hand()
             s.console_last_round_cards = []
+            s.monitoring = False
+            # Reset zone states
+            for z in s.cal.zones:
+                s.monitor.zone_state[z["name"]] = "empty"
+                s.monitor.last_card[z["name"]] = ""
             log.log(f"[CONSOLE] Hand over — next dealer: {result['next_dealer']}")
             self._r(200, "application/json", json.dumps(result))
 
@@ -1834,6 +1880,10 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
 .player-check label{flex:1;font-size:1em;padding-left:8px}
 .player-check input{width:22px;height:22px;accent-color:#4fc3f7}
 .section{margin-bottom:16px}
+.zone-row{display:flex;align-items:center;padding:6px 0;border-bottom:1px solid #222}
+.zone-name{width:80px;font-weight:600}
+.zone-card{flex:1;font-size:1.1em}
+.zone-empty{color:#555}
 #review-modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.85);
   z-index:100;padding:20px;overflow-y:auto}
 #review-content{background:#16213e;border-radius:12px;padding:16px;max-width:400px;margin:0 auto}
@@ -1857,21 +1907,19 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
 
 <!-- Players section (collapsible) -->
 <div class="section">
-  <h2 onclick="togglePlayers()" style="cursor:pointer">Players ▾</h2>
+  <h2 onclick="togglePlayers()" style="cursor:pointer">Players &#9662;</h2>
   <div id="players-list" style="display:none"></div>
 </div>
 
 <!-- Game + Dealer -->
 <div class="section">
   <h2>Game</h2>
-  <select id="game-select"><option value="">— choose game —</option></select>
+  <select id="game-select"><option value="">-- choose game --</option></select>
 </div>
 
 <div class="section">
-  <div class="status-box">
-    <div class="status-label">Dealer</div>
-    <div class="status-value" id="dealer-name">—</div>
-  </div>
+  <h2>Dealer</h2>
+  <select id="dealer-select" onchange="setDealer()"></select>
 </div>
 
 <!-- Deal button -->
@@ -1881,20 +1929,26 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
 <div id="hand-status" style="display:none">
   <div class="status-box">
     <div class="status-label">Game</div>
-    <div class="status-value" id="hand-game">—</div>
+    <div class="status-value" id="hand-game">--</div>
   </div>
   <div class="status-box">
     <div class="status-label">Status</div>
-    <div class="status-value" id="hand-phase">—</div>
+    <div class="status-value" id="hand-phase">--</div>
   </div>
   <div class="status-box" id="wild-box" style="display:none">
     <div class="status-label">Wild</div>
-    <div class="status-value" id="hand-wild">—</div>
+    <div class="status-value" id="hand-wild">--</div>
   </div>
 
+  <!-- Zone recognized cards (live from camera) -->
+  <h2>Zones (camera)</h2>
+  <div id="zone-cards"></div>
+
   <!-- Last round cards -->
-  <h2>Cards</h2>
-  <div id="cards-display" class="card-row"></div>
+  <div id="last-round-section" style="display:none">
+    <h2>Last Round</h2>
+    <div id="last-round-cards" class="card-row"></div>
+  </div>
 
   <!-- Action buttons -->
   <button class="btn btn-continue" id="btn-continue" onclick="doContinue()" style="display:none">
@@ -1936,9 +1990,10 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
 </div>
 
 <script>
-var ST=null; // latest state
-var corrections={}; // slot_num -> {rank, suit}
+var ST=null;
+var corrections={};
 var pickerSlot=null, pickerRank=null, pickerSuit=null;
+var dealing=false; // debounce flag
 
 function api(path,data){
   return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1956,7 +2011,7 @@ function render(){
   if(!ST) return;
   var ge=ST.hand;
 
-  // Game dropdown
+  // Game dropdown (build once)
   var sel=document.getElementById('game-select');
   if(sel.options.length<=1){
     ST.games.forEach(function(g){
@@ -1965,8 +2020,15 @@ function render(){
     });
   }
 
-  // Dealer
-  document.getElementById('dealer-name').textContent=ge.dealer;
+  // Dealer dropdown (build once)
+  var dsel=document.getElementById('dealer-select');
+  if(dsel.options.length===0){
+    ST.all_players.forEach(function(n){
+      var o=document.createElement('option');o.value=n;o.textContent=n;
+      dsel.appendChild(o);
+    });
+  }
+  dsel.value=ge.dealer;
 
   // Players checklist
   var pl=document.getElementById('players-list');
@@ -1992,6 +2054,7 @@ function render(){
     document.getElementById('hand-phase').textContent=ge.current_phase;
     dealBtn.disabled=true;
     dealBtn.textContent='Dealing...';
+    dsel.disabled=true;
 
     // Wild cards
     var wb=document.getElementById('wild-box');
@@ -2001,32 +2064,50 @@ function render(){
     // Continue button visible during betting
     contBtn.style.display=(ge.state==='betting')?'':'none';
 
-    // Cards display
-    var cd=document.getElementById('cards-display');
-    var ch='';
-    ge.slots.forEach(function(sl){
-      if(sl.status!=='active') return;
-      var cls=sl.card_type==='up'?'card-up':'card-down';
-      var val=sl.card_type==='up'?sl.card.rank+suitSymbol(sl.card.suit):
-        '('+sl.slot_number+') down';
-      ch+='<span class="card-chip '+cls+'">'+val+'</span>';
+    // Zone cards (live from camera)
+    var zc=document.getElementById('zone-cards');
+    var zh='';
+    ST.active_players.forEach(function(n){
+      var card=ST.zone_cards[n]||'';
+      if(card){
+        zh+='<div class="zone-row"><span class="zone-name">'+n+'</span>'
+          +'<span class="zone-card" style="color:#4caf50">'+card+'</span></div>';
+      } else {
+        zh+='<div class="zone-row"><span class="zone-name">'+n+'</span>'
+          +'<span class="zone-card zone-empty">--</span></div>';
+      }
     });
-    cd.innerHTML=ch||'<span style="color:#666">No cards yet</span>';
+    zc.innerHTML=zh;
+
+    // Last round cards
+    var lrs=document.getElementById('last-round-section');
+    var lrc=document.getElementById('last-round-cards');
+    if(ST.last_round_cards && ST.last_round_cards.length){
+      lrs.style.display='';
+      var lh='';
+      ST.last_round_cards.forEach(function(c){
+        lh+='<span class="card-chip card-up">'+c.player+': '+c.card+'</span>';
+      });
+      lrc.innerHTML=lh;
+    } else {
+      lrs.style.display='none';
+    }
 
   } else {
     hs.style.display='none';
     dealBtn.disabled=false;
     dealBtn.textContent='Deal';
+    dsel.disabled=false;
+    dealing=false;
   }
 }
 
 function suitSymbol(s){
-  var m={spades:'♠',hearts:'♥',diamonds:'♦',clubs:'♣',
-    S:'♠',H:'♥',D:'♦',C:'♣'};
+  var m={spades:'\\u2660',hearts:'\\u2665',diamonds:'\\u2666',clubs:'\\u2663'};
   return m[s]||m[s.toLowerCase()]||s;
 }
 function suitColor(s){
-  return (s==='hearts'||s==='diamonds'||s==='H'||s==='D')?'#e53935':'#e0e0e0';
+  return (s==='hearts'||s==='diamonds')?'#e53935':'#e0e0e0';
 }
 
 function togglePlayers(){
@@ -2042,38 +2123,57 @@ function updatePlayers(){
   api('/api/console/players',{players:names}).then(refresh);
 }
 
+function setDealer(){
+  var name=document.getElementById('dealer-select').value;
+  api('/api/console/set_dealer',{dealer:name}).then(refresh);
+}
+
 function doDeal(){
+  if(dealing) return; // debounce
   var game=document.getElementById('game-select').value;
   if(!game){alert('Pick a game first');return}
+  dealing=true;
+  var btn=document.getElementById('btn-deal');
+  btn.disabled=true;
+  btn.textContent='Starting...';
   api('/api/console/deal',{game:game}).then(refresh);
 }
 
 function doContinue(){
-  api('/api/console/continue').then(refresh);
+  var btn=document.getElementById('btn-continue');
+  btn.disabled=true;
+  btn.textContent='...';
+  api('/api/console/continue').then(function(){
+    btn.disabled=false;
+    btn.textContent='Continue (next round)';
+    refresh();
+  });
 }
 
 function doEnd(){
+  dealing=false;
   api('/api/console/end').then(refresh);
 }
 
 // --- Review modal ---
 
 function openReview(){
-  if(!ST||!ST.hand||!ST.hand.slots) return;
+  if(!ST||!ST.zone_cards) return;
   corrections={};
-  var slots=ST.hand.slots.filter(function(sl){return sl.status==='active'});
-  if(!slots.length){alert('No cards to review');return}
+  var players=ST.active_players;
+  var hasCards=false;
   var h='';
-  slots.forEach(function(sl){
-    var val=sl.card.rank+suitSymbol(sl.card.suit);
-    var typeLabel=sl.card_type==='up'?'':'(down) ';
+  players.forEach(function(n){
+    var card=ST.zone_cards[n]||'';
+    if(!card) return;
+    hasCards=true;
     h+='<div class="review-card">'
-      +'<span class="review-player">'+typeLabel+'#'+sl.slot_number+'</span>'
-      +'<span class="review-value" id="rv-'+sl.slot_number+'" style="color:'+suitColor(sl.card.suit)+'">'+val+'</span>'
-      +'<button class="review-edit" onclick="editCard('+sl.slot_number
-        +',\\''+sl.card.rank+'\\',\\''+sl.card.suit+'\\')">Edit</button>'
+      +'<span class="review-player">'+n+'</span>'
+      +'<span class="review-value" id="rv-'+n+'">'+card+'</span>'
+      +'<button class="review-edit" onclick="editZoneCard(\\''+n+'\\',\\''+card+'\\')">Edit</button>'
       +'</div>';
   });
+  if(!hasCards){alert('No cards recognized yet');return}
   document.getElementById('review-list').innerHTML=h;
   document.getElementById('review-modal').style.display='';
 }
@@ -2084,27 +2184,19 @@ function closeReview(){
 }
 
 function submitCorrections(){
-  var list=[];
-  for(var slot in corrections){
-    list.push({slot:parseInt(slot),rank:corrections[slot].rank,suit:corrections[slot].suit});
-  }
-  if(list.length){
-    api('/api/console/correct',{corrections:list}).then(function(){
-      closeReview();refresh();
-    });
-  } else {
-    closeReview();
-  }
+  // For now corrections update zone_cards display only
+  // TODO: wire to game engine slots when scanner integration is complete
+  closeReview();
 }
 
 // --- Card picker ---
 
 var RANKS=['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
 var SUITS=[
-  {key:'spades',sym:'♠',color:'#e0e0e0'},
-  {key:'hearts',sym:'♥',color:'#e53935'},
-  {key:'diamonds',sym:'♦',color:'#e53935'},
-  {key:'clubs',sym:'♣',color:'#e0e0e0'}
+  {key:'spades',sym:'\\u2660',color:'#e0e0e0'},
+  {key:'hearts',sym:'\\u2665',color:'#e53935'},
+  {key:'diamonds',sym:'\\u2666',color:'#e53935'},
+  {key:'clubs',sym:'\\u2663',color:'#e0e0e0'}
 ];
 
 function buildPicker(){
@@ -2121,16 +2213,11 @@ function buildPicker(){
   sg.innerHTML=sh;
 }
 
-function editCard(slot,curRank,curSuit){
-  pickerSlot=slot;pickerRank=curRank;pickerSuit=curSuit;
-  document.getElementById('picker-slot').textContent=slot;
-  // Find player for this slot if possible
-  var player='';
-  if(ST&&ST.hand){ST.hand.slots.forEach(function(sl){if(sl.slot_number===slot)player=''});}
-  document.getElementById('picker-player').textContent='Slot '+slot;
+function editZoneCard(player,curCard){
+  pickerSlot=player;pickerRank=null;pickerSuit=null;
+  document.getElementById('picker-slot').textContent='';
+  document.getElementById('picker-player').textContent=player;
   buildPicker();
-  // Highlight current
-  highlightPicker();
   document.getElementById('card-picker').style.display='';
 }
 
@@ -2150,13 +2237,11 @@ function highlightPicker(){
 
 function confirmPick(){
   if(!pickerRank||!pickerSuit) return;
-  corrections[pickerSlot]={rank:pickerRank,suit:pickerSuit};
-  // Update review display
   var el=document.getElementById('rv-'+pickerSlot);
   if(el){
-    el.textContent=pickerRank+suitSymbol(pickerSuit);
+    var sym=suitSymbol(pickerSuit);
+    el.textContent=pickerRank+sym;
     el.style.color=suitColor(pickerSuit);
-    el.style.fontStyle='italic';
   }
   document.getElementById('card-picker').style.display='none';
 }
