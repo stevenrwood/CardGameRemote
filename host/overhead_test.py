@@ -583,17 +583,63 @@ class ZoneMonitor:
 def _console_watch_dealer(s, frame):
     """Watch the dealer's zone. When a card appears there, wait for settle then
     scan all active player zones in one batch. Dealer deals to themselves last,
-    so this guarantees all cards are placed before scanning."""
+    so this guarantees all cards are placed before scanning.
+
+    After scan, if any active players have no recognized card, watch their zones
+    and rescan when they move their cards."""
     phase = s.console_scan_phase
 
-    if phase == "scanned":
-        return  # waiting for Next Round to reset
+    if phase in ("idle", "confirmed"):
+        return
 
     ge = s.game_engine
     dealer_name = ge.get_dealer().name
-    if dealer_name not in s.console_active_players:
-        return  # dealer is sitting out? shouldn't happen but safe
 
+    # Handle missing-card watching: any active player with empty card
+    if phase == "watching_missing":
+        missing_zones = []
+        for z in s.cal.zones:
+            name = z["name"]
+            if name not in s.console_active_players:
+                continue
+            if s.monitor.zone_state.get(name) == "corrected":
+                continue
+            card = s.monitor.last_card.get(name, "")
+            if card and card != "No card":
+                continue
+            missing_zones.append(z)
+        # If any missing zone now has a card, trigger rescan of all missing
+        retry_crops = {}
+        for z in missing_zones:
+            crop = s.monitor.check_single(frame, z)
+            if crop is not None:
+                retry_crops[z["name"]] = crop.copy()
+                s.monitor.pending[z["name"]] = True
+        if retry_crops:
+            log.log(f"[CONSOLE] Movement detected in missing zones: {', '.join(retry_crops.keys())}")
+            s.console_scan_phase = "scanned"  # will transition to watching_missing again if still missing
+            Thread(target=_console_rescan_missing, args=(s, retry_crops), daemon=True).start()
+        return
+
+    if phase == "scanned":
+        # Initial batch scan completed — check if anyone is missing
+        missing = []
+        for name in s.console_active_players:
+            if s.monitor.zone_state.get(name) == "corrected":
+                continue
+            card = s.monitor.last_card.get(name, "")
+            if not card or card == "No card":
+                missing.append(name)
+        # Wait until pending is cleared (scan still running) before prompting
+        if missing and not any(s.monitor.pending.get(n) for n in s.console_active_players):
+            names = " and ".join(missing)
+            log.log(f"[CONSOLE] Missing cards: {names} — prompting to adjust")
+            speech.say(f"{names}, please adjust your card")
+            s.console_scan_phase = "watching_missing"
+        return
+
+    if dealer_name not in s.console_active_players:
+        return
     dealer_zone = next((z for z in s.cal.zones if z["name"] == dealer_name), None)
     if dealer_zone is None:
         return
@@ -609,7 +655,6 @@ def _console_watch_dealer(s, frame):
     if phase == "settling":
         if time.time() - s.console_settle_time < 2.0:
             return
-        # Settle elapsed — collect crops for all active zones and recognize
         log.log("[CONSOLE] Scanning all active zones")
         zone_crops = {}
         for z in s.cal.zones:
@@ -625,6 +670,11 @@ def _console_watch_dealer(s, frame):
             s.monitor.pending[name] = True
         s.console_scan_phase = "scanned"
         Thread(target=s.monitor._recognize_batch, args=(zone_crops,), daemon=True).start()
+
+
+def _console_rescan_missing(s, zone_crops):
+    """Rescan just the zones where cards moved. Reuses the batch pipeline."""
+    s.monitor._recognize_batch(zone_crops)
 
 
 # ---------------------------------------------------------------------------
@@ -2484,10 +2534,10 @@ function render(){
     // Button visibility driven by scan_phase
     var phase=ST.scan_phase||'idle';
     var done=(ST.total_up_rounds && ST.up_round>=ST.total_up_rounds);
-    if(phase==='scanned' && !done){
+    if((phase==='scanned'||phase==='watching_missing') && !done){
       confirmBtn.style.display='';
       confirmBtn.disabled=false;
-      confirmBtn.textContent='Confirm Cards';
+      confirmBtn.textContent=phase==='watching_missing'?'Confirm Cards (some missing)':'Confirm Cards';
       nextBtn.style.display='none';
     } else if(phase==='confirmed' && !done){
       confirmBtn.style.display='none';
