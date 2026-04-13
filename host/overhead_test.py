@@ -673,7 +673,7 @@ class AppState:
         self.console_last_round_cards = []  # cards from last upcard scan
         self.console_up_round = 0     # current up-card round number
         self.console_total_up_rounds = 0  # total up-card rounds in this game
-        self.console_scan_phase = "idle"  # "idle" | "watching" | "settling" | "scanned"
+        self.console_scan_phase = "idle"  # "idle" | "watching" | "settling" | "scanned" | "confirmed"
         self.console_settle_time = 0.0
 
 _state = None
@@ -1481,6 +1481,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "yolo_min_conf": s.monitor.yolo_min_conf,
                 "up_round": s.console_up_round,
                 "total_up_rounds": s.console_total_up_rounds,
+                "scan_phase": s.console_scan_phase,
             }))
 
         elif p == "/api/console/players":
@@ -1530,7 +1531,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     log.log(f"[CONSOLE] {result['wild_label']}")
                 self._r(200, "application/json", json.dumps(result))
 
-        elif p == "/api/console/continue":
+        elif p == "/api/console/confirm":
             ge = s.game_engine
             # Collect round cards in deal order (clockwise from dealer's left)
             dealer_idx = ge.dealer_index
@@ -1542,14 +1543,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 card = s.monitor.last_card.get(p2.name, "")
                 if card and card != "No card":
                     round_cards.append({"player": p2.name, "card": card})
-            # Check Follow the Queen wild cards using collected cards
+            # Check Follow the Queen wild cards — announce before betting
             _check_follow_the_queen_round(s, round_cards)
             # Save as last round
             if round_cards:
                 s.console_last_round_cards = round_cards
+            s.console_scan_phase = "confirmed"
+            log.log(f"[CONSOLE] Cards confirmed for up round {s.console_up_round + 1}")
+            self._r(200, "application/json", json.dumps({"ok": True}))
+
+        elif p == "/api/console/next_round":
+            ge = s.game_engine
             # Advance round counter
             s.console_up_round += 1
-            # Recapture baselines for next round and resume watching dealer
+            # Recapture baselines and resume watching dealer
             if s.cal.ok and s.latest_frame is not None:
                 s.monitor.capture_baselines(s.latest_frame)
                 for z in s.cal.zones:
@@ -2293,7 +2300,10 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
   </div>
 
   <!-- Action buttons -->
-  <button class="btn btn-continue" id="btn-continue" onclick="doContinue()">
+  <button class="btn btn-continue" id="btn-confirm" onclick="doConfirm()">
+    Confirm Cards
+  </button>
+  <button class="btn btn-continue" id="btn-next" onclick="doNextRound()" style="display:none">
     Next Round
   </button>
   <button class="btn btn-end" style="margin-top:8px" onclick="doEnd()">End Hand</button>
@@ -2440,7 +2450,8 @@ function render(){
   // Hand state
   var hs=document.getElementById('hand-status');
   var dealBtn=document.getElementById('btn-deal');
-  var contBtn=document.getElementById('btn-continue');
+  var confirmBtn=document.getElementById('btn-confirm');
+  var nextBtn=document.getElementById('btn-next');
 
   if(ge.game_name){
     hs.style.display='';
@@ -2455,14 +2466,30 @@ function render(){
     if(ge.wild_label){wb.style.display='';document.getElementById('hand-wild').textContent=ge.wild_label}
     else{wb.style.display='none'}
 
-    // Next Round — disable after all up rounds done
-    contBtn.style.display='';
-    if(ST.total_up_rounds && ST.up_round>=ST.total_up_rounds){
-      contBtn.disabled=true;
-      contBtn.textContent='All up rounds done';
+    // Button visibility driven by scan_phase
+    var phase=ST.scan_phase||'idle';
+    var done=(ST.total_up_rounds && ST.up_round>=ST.total_up_rounds);
+    if(phase==='scanned' && !done){
+      confirmBtn.style.display='';
+      confirmBtn.disabled=false;
+      confirmBtn.textContent='Confirm Cards';
+      nextBtn.style.display='none';
+    } else if(phase==='confirmed' && !done){
+      confirmBtn.style.display='none';
+      nextBtn.style.display='';
+      nextBtn.disabled=false;
+      nextBtn.textContent='Next Round';
+    } else if(done){
+      confirmBtn.style.display='none';
+      nextBtn.style.display='';
+      nextBtn.disabled=true;
+      nextBtn.textContent='All up rounds done';
     } else {
-      contBtn.disabled=false;
-      contBtn.textContent='Next Round';
+      // watching or settling — no action buttons yet
+      confirmBtn.style.display='';
+      confirmBtn.disabled=true;
+      confirmBtn.textContent=phase==='settling'?'Scanning...':'Waiting for cards...';
+      nextBtn.style.display='none';
     }
 
     // Zone header with round number
@@ -2546,15 +2573,16 @@ function doDeal(){
   api('/api/console/deal',{game:game}).then(refresh);
 }
 
-function doContinue(){
-  var btn=document.getElementById('btn-continue');
-  btn.disabled=true;
-  btn.textContent='...';
-  api('/api/console/continue').then(function(){
-    btn.disabled=false;
-    btn.textContent='Next Round';
-    refresh();
-  });
+function doConfirm(){
+  var btn=document.getElementById('btn-confirm');
+  btn.disabled=true;btn.textContent='...';
+  api('/api/console/confirm').then(refresh);
+}
+
+function doNextRound(){
+  var btn=document.getElementById('btn-next');
+  btn.disabled=true;btn.textContent='...';
+  api('/api/console/next_round').then(refresh);
 }
 
 function doEnd(){
