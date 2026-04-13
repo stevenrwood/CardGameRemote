@@ -562,6 +562,57 @@ class ZoneMonitor:
         (TRAINING_DIR / f"{ts}_{name}_{safe}.txt").write_text(result)
 
 # ---------------------------------------------------------------------------
+# Console scan trigger — watches dealer's zone, scans all zones when dealer dealt
+# ---------------------------------------------------------------------------
+
+def _console_watch_dealer(s, frame):
+    """Watch the dealer's zone. When a card appears there, wait for settle then
+    scan all active player zones in one batch. Dealer deals to themselves last,
+    so this guarantees all cards are placed before scanning."""
+    phase = s.console_scan_phase
+
+    if phase == "scanned":
+        return  # waiting for Next Round to reset
+
+    ge = s.game_engine
+    dealer_name = ge.get_dealer().name
+    if dealer_name not in s.console_active_players:
+        return  # dealer is sitting out? shouldn't happen but safe
+
+    dealer_zone = next((z for z in s.cal.zones if z["name"] == dealer_name), None)
+    if dealer_zone is None:
+        return
+
+    if phase == "watching":
+        crop = s.monitor.check_single(frame, dealer_zone)
+        if crop is not None:
+            log.log(f"[CONSOLE] Dealer card detected in {dealer_name}'s zone — 2s settle")
+            s.console_scan_phase = "settling"
+            s.console_settle_time = time.time()
+        return
+
+    if phase == "settling":
+        if time.time() - s.console_settle_time < 2.0:
+            return
+        # Settle elapsed — collect crops for all active zones and recognize
+        log.log("[CONSOLE] Scanning all active zones")
+        zone_crops = {}
+        for z in s.cal.zones:
+            name = z["name"]
+            if name not in s.console_active_players:
+                continue
+            if s.monitor.zone_state.get(name) == "corrected":
+                continue
+            crop = s.monitor._crop(frame, z)
+            if crop is None or crop.size == 0:
+                continue
+            zone_crops[name] = crop.copy()
+            s.monitor.pending[name] = True
+        s.console_scan_phase = "scanned"
+        Thread(target=s.monitor._recognize_batch, args=(zone_crops,), daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
 # Follow the Queen tracking for overhead camera
 # ---------------------------------------------------------------------------
 
@@ -622,6 +673,8 @@ class AppState:
         self.console_last_round_cards = []  # cards from last upcard scan
         self.console_up_round = 0     # current up-card round number
         self.console_total_up_rounds = 0  # total up-card rounds in this game
+        self.console_scan_phase = "idle"  # "idle" | "watching" | "settling" | "scanned"
+        self.console_settle_time = 0.0
 
 _state = None
 
@@ -1158,7 +1211,7 @@ def bg_loop():
             _state.latest_jpg = to_jpeg(disp)
 
             if _state.monitoring and _state.cal.ok:
-                _state.monitor.check_zones(frame)
+                _console_watch_dealer(_state, frame)
 
             # Data collection auto-cycle
             if _state.collect_mode:
@@ -1466,11 +1519,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     elif phase.type.value == "community":
                         up_rounds += 1
                 s.console_total_up_rounds = up_rounds
-                # Start zone monitoring for up card recognition
+                # Start watching dealer's zone for card placement
                 if s.cal.ok and s.latest_frame is not None:
                     s.monitor.capture_baselines(s.latest_frame)
                     s.monitoring = True
-                    log.log("[CONSOLE] Monitoring started, baselines captured")
+                    s.console_scan_phase = "watching"
+                    log.log("[CONSOLE] Watching dealer zone for first card")
                 log.log(f"[CONSOLE] New hand: {game_name}, dealer: {result['dealer']}")
                 if result.get("wild_label"):
                     log.log(f"[CONSOLE] {result['wild_label']}")
@@ -1495,7 +1549,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.console_last_round_cards = round_cards
             # Advance round counter
             s.console_up_round += 1
-            # Recapture baselines for next round
+            # Recapture baselines for next round and resume watching dealer
             if s.cal.ok and s.latest_frame is not None:
                 s.monitor.capture_baselines(s.latest_frame)
                 for z in s.cal.zones:
@@ -1503,7 +1557,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.monitor.last_card[z["name"]] = ""
                     s.monitor.recognition_details[z["name"]] = {}
                     s.monitor.recognition_crops[z["name"]] = None
-                log.log("[CONSOLE] Baselines recaptured for next round")
+                s.console_scan_phase = "watching"
+                log.log("[CONSOLE] Baselines recaptured, watching dealer zone")
             log.log(f"[CONSOLE] Next Round — up round {s.console_up_round}/{s.console_total_up_rounds}")
             self._r(200, "application/json", json.dumps({
                 "hand": ge.get_hand_state(),
@@ -1516,6 +1571,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             result = ge.end_hand()
             s.console_last_round_cards = []
             s.monitoring = False
+            s.console_scan_phase = "idle"
             # Reset all zone states
             for z in s.cal.zones:
                 s.monitor.zone_state[z["name"]] = "empty"
