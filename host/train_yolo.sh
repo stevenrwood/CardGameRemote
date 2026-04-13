@@ -3,17 +3,47 @@ set -e
 
 cd "$(dirname "$0")"
 
+# Parse args:
+#   --train            skip dataset prep, just train
+#   --prepare          just prep the dataset, don't train
+#   --max-per-class N  cap each class to N images (default: balance to min count)
+#   All other args forwarded to prepare_training.py
+
+PREP_ARGS=()
+SKIP_PREP=""
+PREP_ONLY=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --train)
+            SKIP_PREP=1
+            shift
+            ;;
+        --prepare)
+            PREP_ONLY=1
+            shift
+            ;;
+        --max-per-class)
+            PREP_ARGS+=("--max-per-class" "$2")
+            shift 2
+            ;;
+        *)
+            PREP_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
 pip3 install --quiet ultralytics opencv-python numpy
 
-if [[ "$1" != "--train" ]]; then
+if [[ -z "$SKIP_PREP" ]]; then
     echo ""
     echo "=== Preparing dataset ==="
     echo ""
-    python3 prepare_training.py
+    python3 prepare_training.py "${PREP_ARGS[@]}"
     echo ""
 fi
 
-if [[ "$1" == "--prepare" ]]; then
+if [[ -n "$PREP_ONLY" ]]; then
     echo "Done. Run with --train or no args to train."
     exit 0
 fi

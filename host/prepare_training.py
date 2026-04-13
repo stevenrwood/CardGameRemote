@@ -82,8 +82,14 @@ def scan_training_data():
     return pairs
 
 
-def prepare_dataset(pairs, val_split=0.2):
-    """Create YOLO dataset from image/label pairs."""
+def prepare_dataset(pairs, val_split=0.2, max_per_class=None):
+    """Create YOLO dataset from image/label pairs.
+
+    Args:
+        max_per_class: If None, cap all classes to the minimum count for
+            perfect balance (original behavior). If set, each class uses up to
+            that many images (under-represented classes keep all of theirs).
+    """
     # Filter to valid cards only
     valid = []
     skipped = 0
@@ -122,10 +128,15 @@ def prepare_dataset(pairs, val_split=0.2):
         cls = label_to_class(item[1], item[2])
         by_class.setdefault(cls, []).append(item)
 
-    # Cap each class to the minimum count for equal representation
+    # Determine per-class cap
     min_count = min(len(v) for v in by_class.values())
+    max_count = max(len(v) for v in by_class.values())
     print(f"\nMin images per class: {min_count}")
-    print(f"Capping all classes to {min_count} images")
+    print(f"Max images per class: {max_count}")
+    if max_per_class is None:
+        print(f"Capping all classes to min count ({min_count}) — perfect balance")
+    else:
+        print(f"Using max-per-class={max_per_class}; under-represented classes keep all")
 
     # Stratified split: for each class, shuffle and split 80/20
     train_set = []
@@ -133,7 +144,8 @@ def prepare_dataset(pairs, val_split=0.2):
     for cls in sorted(by_class.keys()):
         items = by_class[cls]
         random.shuffle(items)
-        items = items[:min_count]  # cap to equal count
+        cap = min_count if max_per_class is None else min(max_per_class, len(items))
+        items = items[:cap]
         split_idx = int(len(items) * (1 - val_split))
         train_set.extend(items[:split_idx])
         val_set.extend(items[split_idx:])
@@ -142,7 +154,6 @@ def prepare_dataset(pairs, val_split=0.2):
     random.shuffle(val_set)
 
     print(f"Train: {len(train_set)}, Val: {len(val_set)}")
-    print(f"Per class: {int(min_count * (1-val_split))} train, {min_count - int(min_count * (1-val_split))} val")
 
     # Create dataset directory structure
     if DATASET_DIR.exists():
@@ -236,12 +247,19 @@ def review_labels(pairs):
 
 
 if __name__ == "__main__":
-    import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Prepare YOLO training dataset from training_data/")
+    parser.add_argument("--review", action="store_true",
+                        help="Interactively review/correct labels before preparing")
+    parser.add_argument("--max-per-class", type=int, default=None,
+                        help="Cap each class to this many images (default: use min count for balance)")
+    args = parser.parse_args()
 
     pairs = scan_training_data()
 
-    if "--review" in sys.argv:
+    if args.review:
         review_labels(pairs)
-        pairs = scan_training_data()  # rescan after review
+        pairs = scan_training_data()
 
-    prepare_dataset(pairs)
+    prepare_dataset(pairs, max_per_class=args.max_per_class)
