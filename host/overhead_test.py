@@ -232,6 +232,7 @@ class ZoneMonitor:
         self.last_card = {}
         self.zone_state = {}
         self.pending = {}
+        self.recognition_details = {}  # name -> {yolo, yolo_conf, claude, final}
         self._yolo_model = None
         self._client = None
         self._load_yolo()
@@ -318,6 +319,7 @@ class ZoneMonitor:
 
     def _recognize(self, name, crop):
         t0 = time.time()
+        details = {"yolo": "", "yolo_conf": 0, "claude": "", "final": ""}
         try:
             result = None
 
@@ -328,6 +330,8 @@ class ZoneMonitor:
                 result, conf = self._recognize_yolo(crop)
                 yolo_ms = (time.time() - t_yolo) * 1000
                 log.log(f"[{name}] YOLO result: {result} ({conf:.0%}) in {yolo_ms:.0f}ms")
+                details["yolo"] = result
+                details["yolo_conf"] = round(conf * 100)
 
                 if result == "No card" or conf < 0.5:
                     yolo_result = result
@@ -337,6 +341,7 @@ class ZoneMonitor:
                         result = self._recognize_claude(crop)
                         claude_ms = (time.time() - t_claude) * 1000
                         log.log(f"[{name}] Claude result: {result} in {claude_ms:.0f}ms")
+                        details["claude"] = result
                     elif result == "No card":
                         result = None
             elif self.client:
@@ -345,6 +350,7 @@ class ZoneMonitor:
                 result = self._recognize_claude(crop)
                 claude_ms = (time.time() - t_claude) * 1000
                 log.log(f"[{name}] Claude result: {result} in {claude_ms:.0f}ms")
+                details["claude"] = result
             else:
                 self.zone_state[name] = "empty"
                 return
@@ -353,6 +359,7 @@ class ZoneMonitor:
             if result and result != "No card":
                 self.last_card[name] = result
                 self.zone_state[name] = "recognized"
+                details["final"] = result
                 log.log(f"[{name}] RECOGNIZED: {result} (total {total_ms:.0f}ms)")
                 self._save(name, crop, result)
                 speech.say(f"{name}, {result}")
@@ -364,6 +371,7 @@ class ZoneMonitor:
             log.log(f"[{name}] error: {e}")
             self.zone_state[name] = "empty"
         finally:
+            self.recognition_details[name] = details
             self.pending[name] = False
 
     def _recognize_yolo(self, crop):
@@ -1185,13 +1193,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/state":
             ge = s.game_engine
-            # Include zone-recognized cards
+            # Include zone-recognized cards with details
             zone_cards = {}
             for z in s.cal.zones:
                 name = z["name"]
                 card = s.monitor.last_card.get(name, "")
-                if card and card != "No card":
-                    zone_cards[name] = card
+                details = s.monitor.recognition_details.get(name, {})
+                zone_cards[name] = {
+                    "card": card if card and card != "No card" else "",
+                    "yolo": details.get("yolo", ""),
+                    "yolo_conf": details.get("yolo_conf", 0),
+                    "claude": details.get("claude", ""),
+                }
             self._r(200, "application/json", json.dumps({
                 "active_players": s.console_active_players,
                 "all_players": PLAYER_NAMES,
@@ -1280,18 +1293,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._r(200, "application/json", json.dumps({"dealer": ge.get_dealer().name}))
 
         elif p == "/api/console/correct":
+            # Batch corrections: [{player, rank, suit}, ...]
             corrections = data.get("corrections", [])
-            ge = s.game_engine
             for c in corrections:
-                slot_num = c.get("slot")
+                player = c.get("player", "")
                 rank = c.get("rank", "")
                 suit = c.get("suit", "")
-                for slot in ge.slots:
-                    if slot.slot_number == slot_num:
-                        old = f"{slot.rank}{slot.suit}"
-                        slot.rank = rank
-                        slot.suit = suit
-                        log.log(f"[CONSOLE] Corrected slot {slot_num}: {old} -> {rank}{suit}")
+                if player and rank and suit:
+                    RANK_TO_NAME = {"A": "Ace", "K": "King", "Q": "Queen", "J": "Jack"}
+                    SUIT_TO_NAME = {"spades": "Spades", "hearts": "Hearts",
+                                    "diamonds": "Diamonds", "clubs": "Clubs"}
+                    rank_name = RANK_TO_NAME.get(rank, rank)
+                    suit_name = SUIT_TO_NAME.get(suit, suit)
+                    new_card = f"{rank_name} of {suit_name}"
+                    old_card = s.monitor.last_card.get(player, "")
+                    s.monitor.last_card[player] = new_card
+                    s.monitor.recognition_details[player] = {
+                        "yolo": s.monitor.recognition_details.get(player, {}).get("yolo", ""),
+                        "yolo_conf": s.monitor.recognition_details.get(player, {}).get("yolo_conf", 0),
+                        "claude": s.monitor.recognition_details.get(player, {}).get("claude", ""),
+                        "final": new_card,
+                        "corrected": True,
+                    }
+                    log.log(f"[CONSOLE] Corrected {player}: {old_card} -> {new_card}")
             self._r(200, "application/json", '{"ok":true}')
 
         else:
@@ -1872,7 +1896,6 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
 .card-row{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
 .card-chip{padding:8px 12px;border-radius:8px;font-size:.95em;font-weight:600}
 .card-up{background:#1b5e20;color:#fff}
-.card-down{background:#333;color:#888}
 .status-box{background:#16213e;border-radius:10px;padding:12px;margin:8px 0}
 .status-label{font-size:.8em;color:#888;text-transform:uppercase;letter-spacing:1px}
 .status-value{font-size:1.15em;color:#4fc3f7;margin-top:2px}
@@ -1880,27 +1903,25 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
 .player-check label{flex:1;font-size:1em;padding-left:8px}
 .player-check input{width:22px;height:22px;accent-color:#4fc3f7}
 .section{margin-bottom:16px}
-.zone-row{display:flex;align-items:center;padding:6px 0;border-bottom:1px solid #222}
-.zone-name{width:80px;font-weight:600}
-.zone-card{flex:1;font-size:1.1em}
+.zone-row{display:flex;align-items:center;padding:10px 8px;margin:4px 0;border-radius:8px;
+  background:#16213e;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.zone-row:active{background:#1a3a6e}
+.zone-name{width:80px;font-weight:600;font-size:1.05em}
+.zone-card{flex:1;font-size:1.1em;color:#4caf50}
 .zone-empty{color:#555}
-#review-modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.85);
-  z-index:100;padding:20px;overflow-y:auto}
-#review-content{background:#16213e;border-radius:12px;padding:16px;max-width:400px;margin:0 auto}
-.review-card{display:flex;align-items:center;padding:10px 0;border-bottom:1px solid #333}
-.review-card:last-child{border:none}
-.review-player{font-weight:600;width:70px}
-.review-value{flex:1;font-size:1.1em;color:#4fc3f7;padding:0 8px}
-.review-edit{padding:6px 12px;background:#0f3460;color:#fff;border:none;border-radius:6px;font-size:.9em}
-#card-picker{display:none;position:fixed;bottom:0;left:0;right:0;background:#0d1117;
-  border-top:2px solid #4fc3f7;padding:12px;z-index:200}
-.rank-grid,.suit-grid{display:flex;flex-wrap:wrap;gap:4px;justify-content:center;margin:6px 0}
-.rank-btn,.suit-btn{padding:10px 0;border:2px solid #444;border-radius:8px;background:#16213e;
-  color:#e0e0e0;font-size:1em;font-weight:600;text-align:center}
-.rank-btn{width:42px}
-.suit-btn{width:70px;font-size:1.1em}
-.rank-btn.sel,.suit-btn.sel{border-color:#4fc3f7;background:#0f3460}
-.suit-red{color:#e53935}
+.zone-arrow{color:#555;font-size:1.2em}
+#correct-modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.9);
+  z-index:100;overflow-y:auto}
+#correct-content{background:#16213e;border-radius:12px;padding:16px;max-width:400px;
+  margin:20px auto;position:relative}
+#correct-img{width:100%;border-radius:8px;margin:8px 0;border:1px solid #333}
+.detail-row{display:flex;justify-content:space-between;padding:4px 0;font-size:.9em;
+  border-bottom:1px solid #222}
+.detail-label{color:#888}
+.detail-value{color:#e0e0e0;font-weight:600}
+.picker-row{display:flex;gap:8px;margin:8px 0;align-items:center}
+.picker-row label{width:50px;font-size:.9em;color:#888}
+.picker-row select{flex:1}
 </style></head><body>
 
 <h1 style="font-size:1.3em;text-align:center;padding:8px 0">Dealer Console</h1>
@@ -1940,8 +1961,8 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
     <div class="status-value" id="hand-wild">--</div>
   </div>
 
-  <!-- Zone recognized cards (live from camera) -->
-  <h2>Zones (camera)</h2>
+  <!-- Zone recognized cards (live) — tap to correct -->
+  <h2>Cards (tap to correct)</h2>
   <div id="zone-cards"></div>
 
   <!-- Last round cards -->
@@ -1954,46 +1975,52 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
   <button class="btn btn-continue" id="btn-continue" onclick="doContinue()" style="display:none">
     Continue (next round)
   </button>
-  <div style="display:flex;gap:8px;margin-top:8px">
-    <button class="btn btn-sm" style="flex:1;background:#0f3460;color:#fff" id="btn-review"
-      onclick="openReview()">Review</button>
-    <button class="btn btn-end btn-sm" style="flex:1" onclick="doEnd()">End Hand</button>
-  </div>
+  <button class="btn btn-end" style="margin-top:12px" onclick="doEnd()">End Hand</button>
 </div>
 
-<!-- Review modal -->
-<div id="review-modal" onclick="if(event.target===this)closeReview()">
-  <div id="review-content">
-    <h2 style="margin-bottom:10px">Review Cards</h2>
-    <div id="review-list"></div>
-    <div style="margin-top:12px;display:flex;gap:8px">
-      <button class="btn btn-sm" style="flex:1;background:#1b5e20;color:#fff" onclick="submitCorrections()">
-        Save Corrections</button>
-      <button class="btn btn-sm" style="flex:1;background:#333;color:#ccc" onclick="closeReview()">
+<!-- Correction modal -->
+<div id="correct-modal" onclick="if(event.target===this)closeCorrect()">
+  <div id="correct-content">
+    <h2 id="correct-title" style="margin-bottom:8px">--</h2>
+    <img id="correct-img" src="">
+    <div id="correct-details"></div>
+    <div class="picker-row">
+      <label>Rank</label>
+      <select id="correct-rank">
+        <option value="">--</option>
+        <option value="A">Ace</option>
+        <option value="2">2</option><option value="3">3</option>
+        <option value="4">4</option><option value="5">5</option>
+        <option value="6">6</option><option value="7">7</option>
+        <option value="8">8</option><option value="9">9</option>
+        <option value="10">10</option>
+        <option value="J">Jack</option><option value="Q">Queen</option>
+        <option value="K">King</option>
+      </select>
+    </div>
+    <div class="picker-row">
+      <label>Suit</label>
+      <select id="correct-suit">
+        <option value="">--</option>
+        <option value="clubs">Clubs</option>
+        <option value="diamonds">Diamonds</option>
+        <option value="hearts">Hearts</option>
+        <option value="spades">Spades</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-sm" style="flex:1;background:#1b5e20;color:#fff" onclick="saveCorrection()">
+        Save</button>
+      <button class="btn btn-sm" style="flex:1;background:#333;color:#ccc" onclick="closeCorrect()">
         Cancel</button>
     </div>
   </div>
 </div>
 
-<!-- Card value picker (slides up from bottom) -->
-<div id="card-picker">
-  <div style="text-align:center;font-size:.9em;color:#888;margin-bottom:4px">
-    Pick value for <span id="picker-player" style="color:#4fc3f7;font-weight:600"></span>
-    (slot <span id="picker-slot"></span>)
-  </div>
-  <div class="rank-grid" id="rank-grid"></div>
-  <div class="suit-grid" id="suit-grid"></div>
-  <div style="text-align:center;margin-top:6px">
-    <button class="btn btn-sm" style="background:#1b5e20;color:#fff" onclick="confirmPick()">OK</button>
-    <button class="btn btn-sm" style="background:#333;color:#ccc" onclick="cancelPick()">Cancel</button>
-  </div>
-</div>
-
 <script>
 var ST=null;
-var corrections={};
-var pickerSlot=null, pickerRank=null, pickerSuit=null;
-var dealing=false; // debounce flag
+var dealing=false;
+var correctPlayer=null;
 
 function api(path,data){
   return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -2064,16 +2091,20 @@ function render(){
     // Continue button visible during betting
     contBtn.style.display=(ge.state==='betting')?'':'none';
 
-    // Zone cards (live from camera)
+    // Zone cards (live from camera) — tappable
     var zc=document.getElementById('zone-cards');
     var zh='';
     ST.active_players.forEach(function(n){
-      var card=ST.zone_cards[n]||'';
+      var zi=ST.zone_cards[n]||{};
+      var card=zi.card||'';
       if(card){
-        zh+='<div class="zone-row"><span class="zone-name">'+n+'</span>'
-          +'<span class="zone-card" style="color:#4caf50">'+card+'</span></div>';
+        zh+='<div class="zone-row" onclick="openCorrect(\\''+n+'\\')">'
+          +'<span class="zone-name">'+n+'</span>'
+          +'<span class="zone-card">'+card+'</span>'
+          +'<span class="zone-arrow">&#9656;</span></div>';
       } else {
-        zh+='<div class="zone-row"><span class="zone-name">'+n+'</span>'
+        zh+='<div class="zone-row">'
+          +'<span class="zone-name">'+n+'</span>'
           +'<span class="zone-card zone-empty">--</span></div>';
       }
     });
@@ -2102,14 +2133,6 @@ function render(){
   }
 }
 
-function suitSymbol(s){
-  var m={spades:'\\u2660',hearts:'\\u2665',diamonds:'\\u2666',clubs:'\\u2663'};
-  return m[s]||m[s.toLowerCase()]||s;
-}
-function suitColor(s){
-  return (s==='hearts'||s==='diamonds')?'#e53935':'#e0e0e0';
-}
-
 function togglePlayers(){
   var el=document.getElementById('players-list');
   el.style.display=el.style.display==='none'?'':'none';
@@ -2129,7 +2152,7 @@ function setDealer(){
 }
 
 function doDeal(){
-  if(dealing) return; // debounce
+  if(dealing) return;
   var game=document.getElementById('game-select').value;
   if(!game){alert('Pick a game first');return}
   dealing=true;
@@ -2155,99 +2178,45 @@ function doEnd(){
   api('/api/console/end').then(refresh);
 }
 
-// --- Review modal ---
+// --- Correction popup ---
 
-function openReview(){
-  if(!ST||!ST.zone_cards) return;
-  corrections={};
-  var players=ST.active_players;
-  var hasCards=false;
-  var h='';
-  players.forEach(function(n){
-    var card=ST.zone_cards[n]||'';
-    if(!card) return;
-    hasCards=true;
-    h+='<div class="review-card">'
-      +'<span class="review-player">'+n+'</span>'
-      +'<span class="review-value" id="rv-'+n+'">'+card+'</span>'
-      +'<button class="review-edit" onclick="editZoneCard(\\''+n+'\\',\\''+card+'\\')">Edit</button>'
-      +'</div>';
-  });
-  if(!hasCards){alert('No cards recognized yet');return}
-  document.getElementById('review-list').innerHTML=h;
-  document.getElementById('review-modal').style.display='';
-}
+function openCorrect(player){
+  correctPlayer=player;
+  var zi=ST.zone_cards[player]||{};
+  document.getElementById('correct-title').textContent=player;
+  document.getElementById('correct-img').src='/zone/'+player+'?'+Date.now();
 
-function closeReview(){
-  document.getElementById('review-modal').style.display='none';
-  document.getElementById('card-picker').style.display='none';
-}
-
-function submitCorrections(){
-  // For now corrections update zone_cards display only
-  // TODO: wire to game engine slots when scanner integration is complete
-  closeReview();
-}
-
-// --- Card picker ---
-
-var RANKS=['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
-var SUITS=[
-  {key:'spades',sym:'\\u2660',color:'#e0e0e0'},
-  {key:'hearts',sym:'\\u2665',color:'#e53935'},
-  {key:'diamonds',sym:'\\u2666',color:'#e53935'},
-  {key:'clubs',sym:'\\u2663',color:'#e0e0e0'}
-];
-
-function buildPicker(){
-  var rg=document.getElementById('rank-grid');
-  var sg=document.getElementById('suit-grid');
-  var rh='';
-  RANKS.forEach(function(r){rh+='<button class="rank-btn" onclick="pickRank(this,\\''+r+'\\')">'+r+'</button>'});
-  rg.innerHTML=rh;
-  var sh='';
-  SUITS.forEach(function(s){
-    var cls=s.color==='#e53935'?'suit-btn suit-red':'suit-btn';
-    sh+='<button class="'+cls+'" onclick="pickSuit(this,\\''+s.key+'\\')">'+s.sym+'</button>';
-  });
-  sg.innerHTML=sh;
-}
-
-function editZoneCard(player,curCard){
-  pickerSlot=player;pickerRank=null;pickerSuit=null;
-  document.getElementById('picker-slot').textContent='';
-  document.getElementById('picker-player').textContent=player;
-  buildPicker();
-  document.getElementById('card-picker').style.display='';
-}
-
-function pickRank(el,r){pickerRank=r;highlightPicker()}
-function pickSuit(el,s){pickerSuit=s;highlightPicker()}
-
-function highlightPicker(){
-  document.querySelectorAll('.rank-btn').forEach(function(b){
-    b.classList.toggle('sel',b.textContent===pickerRank);
-  });
-  var suitKeys=SUITS.map(function(s){return s.key});
-  var suitBtns=document.querySelectorAll('.suit-btn');
-  suitBtns.forEach(function(b,i){
-    b.classList.toggle('sel',suitKeys[i]===pickerSuit);
-  });
-}
-
-function confirmPick(){
-  if(!pickerRank||!pickerSuit) return;
-  var el=document.getElementById('rv-'+pickerSlot);
-  if(el){
-    var sym=suitSymbol(pickerSuit);
-    el.textContent=pickerRank+sym;
-    el.style.color=suitColor(pickerSuit);
+  // Details
+  var dh='';
+  dh+='<div class="detail-row"><span class="detail-label">Recognized</span>'
+    +'<span class="detail-value">'+( zi.card||'--')+'</span></div>';
+  dh+='<div class="detail-row"><span class="detail-label">YOLO</span>'
+    +'<span class="detail-value">'+(zi.yolo||'--')+' ('+( zi.yolo_conf||0)+'%)</span></div>';
+  if(zi.claude){
+    dh+='<div class="detail-row"><span class="detail-label">Claude AI</span>'
+      +'<span class="detail-value">'+zi.claude+'</span></div>';
   }
-  document.getElementById('card-picker').style.display='none';
+  document.getElementById('correct-details').innerHTML=dh;
+
+  // Reset pickers
+  document.getElementById('correct-rank').value='';
+  document.getElementById('correct-suit').value='';
+  document.getElementById('correct-modal').style.display='';
 }
 
-function cancelPick(){
-  document.getElementById('card-picker').style.display='none';
+function closeCorrect(){
+  document.getElementById('correct-modal').style.display='none';
+  correctPlayer=null;
+}
+
+function saveCorrection(){
+  var rank=document.getElementById('correct-rank').value;
+  var suit=document.getElementById('correct-suit').value;
+  if(!rank||!suit){alert('Pick both rank and suit');return}
+  api('/api/console/correct',{corrections:[{player:correctPlayer,rank:rank,suit:suit}]}).then(function(){
+    closeCorrect();
+    refresh();
+  });
 }
 
 setInterval(refresh,3000);
