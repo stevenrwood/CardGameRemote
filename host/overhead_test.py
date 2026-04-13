@@ -317,7 +317,7 @@ class ZoneMonitor:
                 yolo_ms = (time.time() - t_yolo) * 1000
                 log.log(f"[{name}] YOLO result: {result} ({conf:.0%}) in {yolo_ms:.0f}ms")
 
-                if result == "No card" or conf < 0.4:
+                if result == "No card" or conf < 0.5:
                     yolo_result = result
                     if self.client:
                         log.log(f"[{name}] YOLO low confidence, calling Claude API...")
@@ -1615,21 +1615,22 @@ function refresh(){
   }).catch(function(){});
   setTimeout(refresh,2000);
 }
-function copyLog(){
+function saveLog(){
   var text=document.getElementById('log').textContent;
-  var ta=document.createElement('textarea');
-  ta.value=text;ta.style.position='fixed';ta.style.left='-9999px';
-  document.body.appendChild(ta);ta.select();
-  document.execCommand('copy');
-  document.body.removeChild(ta);
-  var btn=document.getElementById('copybtn');
-  btn.textContent='Copied!';
-  setTimeout(function(){btn.textContent='Copy Log'},2000);
+  var blob=new Blob([text],{type:'text/plain'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='log.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  var btn=document.getElementById('savebtn');
+  btn.textContent='Saved!';
+  setTimeout(function(){btn.textContent='Save Log'},2000);
 }
 refresh();
 </script></head><body>
 <div id="toolbar">
-  <button id="copybtn" onclick="copyLog()">Copy Log</button>
+  <button id="savebtn" onclick="saveLog()">Save Log</button>
   <span id="status">Auto-refreshing every 2s</span>
 </div>
 <pre id="log">Loading...</pre>
