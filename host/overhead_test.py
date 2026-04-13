@@ -76,10 +76,14 @@ speech = SpeechQueue()
 # Log buffer
 # ---------------------------------------------------------------------------
 
+LOG_FILE = Path.home() / "Downloads" / "log.txt"
+
 class LogBuffer:
-    def __init__(self, maxlines=200):
+    def __init__(self, maxlines=500):
         self._lines = []
         self._lock = Lock()
+        # Clear log file on startup
+        LOG_FILE.write_text("")
 
     def log(self, msg):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -87,7 +91,13 @@ class LogBuffer:
         print(f"  {msg}")
         with self._lock:
             self._lines.append(line)
-            self._lines = self._lines[-200:]
+            self._lines = self._lines[-500:]
+        # Append to file
+        try:
+            with open(LOG_FILE, "a") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
 
     def get(self, n=50):
         with self._lock:
@@ -1232,7 +1242,7 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
 <div id="toolbar">
   <button class="btn-blue" onclick="location.href='/calibrate'">Calibrate</button>
   <button class="btn-green" id="btn-monitor" onclick="toggleMonitor()">Start Monitor</button>
-  <button class="btn-blue" onclick="startTest()">Test Recognition</button>
+  <button class="btn-blue" onclick="ensureLogWindow();startTest()">Test Recognition</button>
   <button class="btn-blue" id="btn-deal" onclick="toggleDeal()">Test Dealing</button>
   <button class="btn-blue" onclick="resetBaselines()">Reset Baselines</button>
   <button class="btn-blue" onclick="saveSnapshot()">Snapshot</button>
@@ -1326,6 +1336,7 @@ function api(path, data){{
 }}
 
 function toggleMonitor(){{
+  if(!monitoring) ensureLogWindow();
   if(monitoring) api('/api/monitor/stop').then(update);
   else api('/api/monitor/start').then(update);
 }}
@@ -1339,13 +1350,13 @@ function testStop(){{ api('/api/test/stop').then(update); }}
 function toggleDeal(){{
   fetch('/api/state').then(function(r){{return r.json()}}).then(function(d){{
     if(d.deal_mode) api('/api/deal/stop').then(update);
-    else api('/api/deal/start').then(function(){{
+    else {{ ensureLogWindow(); api('/api/deal/start').then(function(){{
       update();
       setTimeout(function(){{
         var inp=document.getElementById('deal-input');
         if(inp) inp.focus();
       }}, 300);
-    }});
+    }}); }}
   }});
 }}
 function clearDeal(){{
@@ -1390,7 +1401,7 @@ function saveSnapshot(){{ api('/api/snapshot/save'); }}
 function toggleCollect(){{
   fetch('/api/state').then(function(r){{return r.json()}}).then(function(d){{
     if(d.collect_mode) api('/api/collect/stop').then(update);
-    else api('/api/collect/start').then(update);
+    else {{ ensureLogWindow(); api('/api/collect/start').then(update); }}
   }});
 }}
 function collectGo(){{
@@ -1405,8 +1416,16 @@ function collectResume(){{
 function collectRedo(){{
   api('/api/collect/redo').then(update);
 }}
+var _logWin=null;
 function openLogWindow(){{
-  window.open('/logview','_logview','width=800,height=400,scrollbars=yes');
+  if(!_logWin || _logWin.closed)
+    _logWin=window.open('/logview','_logview','width=800,height=400,scrollbars=yes');
+  else
+    _logWin.focus();
+}}
+function ensureLogWindow(){{
+  if(!_logWin || _logWin.closed)
+    _logWin=window.open('/logview','_logview','width=800,height=400,scrollbars=yes');
 }}
 
 function update(){{
@@ -1660,16 +1679,17 @@ function refresh(){
   setTimeout(refresh,2000);
 }
 function saveLog(){
-  var text=document.getElementById('log').textContent;
-  var blob=new Blob([text],{type:'text/plain'});
-  var a=document.createElement('a');
-  a.href=URL.createObjectURL(blob);
-  a.download='log.txt';
-  a.click();
-  URL.revokeObjectURL(a.href);
-  var btn=document.getElementById('savebtn');
-  btn.textContent='Saved!';
-  setTimeout(function(){btn.textContent='Save Log'},2000);
+  fetch('/log').then(function(r){return r.text()}).then(function(t){
+    var blob=new Blob([t],{type:'text/plain'});
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='log.txt';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    var btn=document.getElementById('savebtn');
+    btn.textContent='Saved!';
+    setTimeout(function(){btn.textContent='Save Log'},2000);
+  });
 }
 refresh();
 </script></head><body>
