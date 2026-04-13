@@ -308,29 +308,31 @@ class ZoneMonitor:
         t0 = time.time()
         try:
             result = None
-            method = ""
 
             # Try YOLO first
             if self._yolo_model is not None:
+                log.log(f"[{name}] YOLO inference started")
                 t_yolo = time.time()
                 result, conf = self._recognize_yolo(crop)
                 yolo_ms = (time.time() - t_yolo) * 1000
-                method = f"YOLO {conf:.0%} ({yolo_ms:.0f}ms)"
+                log.log(f"[{name}] YOLO result: {result} ({conf:.0%}) in {yolo_ms:.0f}ms")
+
                 if result == "No card" or conf < 0.4:
                     yolo_result = result
-                    yolo_conf = conf
                     if self.client:
+                        log.log(f"[{name}] YOLO low confidence, calling Claude API...")
                         t_claude = time.time()
                         result = self._recognize_claude(crop)
                         claude_ms = (time.time() - t_claude) * 1000
-                        method = f"Claude ({claude_ms:.0f}ms) [YOLO was {yolo_result} {yolo_conf:.0%} ({yolo_ms:.0f}ms)]"
+                        log.log(f"[{name}] Claude result: {result} in {claude_ms:.0f}ms")
                     elif result == "No card":
                         result = None
             elif self.client:
+                log.log(f"[{name}] No YOLO model, calling Claude API...")
                 t_claude = time.time()
                 result = self._recognize_claude(crop)
                 claude_ms = (time.time() - t_claude) * 1000
-                method = f"Claude ({claude_ms:.0f}ms)"
+                log.log(f"[{name}] Claude result: {result} in {claude_ms:.0f}ms")
             else:
                 self.zone_state[name] = "empty"
                 return
@@ -339,12 +341,11 @@ class ZoneMonitor:
             if result and result != "No card":
                 self.last_card[name] = result
                 self.zone_state[name] = "recognized"
-                log.log(f"{name}: {result}  (total {total_ms:.0f}ms) [{method}]")
+                log.log(f"[{name}] RECOGNIZED: {result} (total {total_ms:.0f}ms)")
                 self._save(name, crop, result)
-                if "no card" not in result.lower():
-                    speech.say(f"{name}, {result}")
+                speech.say(f"{name}, {result}")
             else:
-                log.log(f"{name}: No card  (total {total_ms:.0f}ms) [{method}]")
+                log.log(f"[{name}] No card (total {total_ms:.0f}ms)")
                 self.zone_state[name] = "empty"
 
         except Exception as e:
