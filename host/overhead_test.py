@@ -2096,6 +2096,44 @@ function refresh(){
   }).catch(function(){});
 }
 
+var zoneBuilt=false;
+
+function buildZoneRows(){
+  // Build zone rows once with stable event listeners
+  var zc=document.getElementById('zone-cards');
+  zc.innerHTML='';
+  ST.all_players.forEach(function(n){
+    var div=document.createElement('div');
+    div.className='zone-row';
+    div.id='zr-'+n;
+    var nameSpan=document.createElement('span');
+    nameSpan.className='zone-name';
+    nameSpan.textContent=n;
+    var cardSpan=document.createElement('span');
+    cardSpan.className='zone-card zone-empty';
+    cardSpan.id='zc-'+n;
+    cardSpan.textContent='--';
+    var arrow=document.createElement('span');
+    arrow.className='zone-arrow';
+    arrow.id='za-'+n;
+    arrow.textContent='\\u25b8';
+    arrow.style.display='none';
+    div.appendChild(nameSpan);
+    div.appendChild(cardSpan);
+    div.appendChild(arrow);
+    div.addEventListener('click',(function(name){return function(){
+      var zi=ST.zone_cards[name]||{};
+      if(zi.card){
+        dbg('TAP: '+name);
+        openCorrect(name);
+      }
+    }})(n));
+    zc.appendChild(div);
+  });
+  zoneBuilt=true;
+  dbg('zones built: '+ST.all_players.length+' rows');
+}
+
 function render(){
   if(!ST) return;
   var ge=ST.hand;
@@ -2119,7 +2157,7 @@ function render(){
   }
   dsel.value=ge.dealer;
 
-  // Players checklist
+  // Players checklist (build once)
   var pl=document.getElementById('players-list');
   if(!pl.dataset.built){
     var h='';
@@ -2131,6 +2169,9 @@ function render(){
     pl.innerHTML=h;
     pl.dataset.built='1';
   }
+
+  // Zone rows (build once)
+  if(!zoneBuilt) buildZoneRows();
 
   // Hand state
   var hs=document.getElementById('hand-status');
@@ -2153,38 +2194,23 @@ function render(){
     // Next Round always visible during hand
     contBtn.style.display='';
 
-    // Zone cards header with round number
+    // Zone header
     var zh_title='Cards dealt';
     if(ge.deal_round) zh_title='Cards dealt in round '+ge.deal_round+' (touch to correct)';
     document.getElementById('zone-header').textContent=zh_title;
 
-    // Zone cards (live from camera) — tappable
-    var zc=document.getElementById('zone-cards');
-    zc.innerHTML='';
-    var tapCount=0;
+    // Update zone card text (no rebuild — listeners survive)
     ST.active_players.forEach(function(n){
       var zi=ST.zone_cards[n]||{};
       var card=zi.card||'';
-      var div=document.createElement('div');
-      div.className='zone-row';
-      if(card){
-        div.innerHTML='<span class="zone-name">'+n+'</span>'
-          +'<span class="zone-card">'+card+'</span>'
-          +'<span class="zone-arrow">&#9656;</span>';
-        var handler=(function(name){return function(e){
-          dbg('TAP: '+name+' event='+e.type);
-          openCorrect(name);
-        }})(n);
-        div.addEventListener('click',handler);
-        div.addEventListener('touchend',handler);
-        tapCount++;
-      } else {
-        div.innerHTML='<span class="zone-name">'+n+'</span>'
-          +'<span class="zone-card zone-empty">--</span>';
+      var cs=document.getElementById('zc-'+n);
+      var ar=document.getElementById('za-'+n);
+      if(cs){
+        cs.textContent=card||'--';
+        cs.className=card?'zone-card':'zone-card zone-empty';
       }
-      zc.appendChild(div);
+      if(ar) ar.style.display=card?'':'none';
     });
-    dbg('render: '+tapCount+' tappable zones');
 
     // Last round cards
     var lrs=document.getElementById('last-round-section');
