@@ -295,8 +295,34 @@ The remote player accesses it via Teams screen sharing. No app to install.
   cards. Shared to remote player via Teams screen share. Face-down so only the
   remote player can see it through the screen share.
 - **Scanner box:** Next to Neo, card trays accessible to dealer.
-- **Dealer's phone:** Shows `/host` dealer control panel on same WiFi.
-- **Overhead camera (Brio):** Mounted on chandelier, connected to Neo via USB.
+- **Dealer's phone:** Shows `/console` dealer control panel on same WiFi.
+- **Overhead camera (Brio):** Mounted on chandelier, connected via Thunderbolt hub.
+
+### USB-C / Thunderbolt Cabling
+
+Neo has two USB-C ports. The main port is Thunderbolt (USB 3.2). The second
+port is USB 2.0 only. The Brio requires USB 3.2 for 4K resolution and the
+Ananta external monitor requires Thunderbolt for DisplayPort Alt Mode. Both
+need the main port — solved with a Thunderbolt hub.
+
+**Amazon Basics Thunderbolt 4 Hub** (ordered April 2026, $145):
+- 1 upstream Thunderbolt port, 3 downstream Thunderbolt ports
+- Includes 100W (20V/5A) power brick
+
+```
+100W PD Supply ──→ Ananta 17" display PD input (powers display)
+
+Amazon Basics Thunderbolt Hub:
+  Hub power brick ──→ Hub (powers hub + PD charges Neo)
+  Hub upstream    ──→ Neo main USB-C port (Thunderbolt)
+  Hub downstream 1 ──→ Brio 4K camera (USB 3.2 → 4K resolution)
+  Hub downstream 2 ──→ Ananta Thunderbolt port (display signal)
+  Hub downstream 3    (spare)
+
+Neo second USB-C port: unused
+```
+
+This gives Neo power, 4K camera, and external display all through one port.
 
 ---
 
@@ -462,9 +488,10 @@ These are handled externally, not by our system:
 | USB-C panel mount | $5 |
 | 3D printing filament (PLA) | $10 |
 | 1/4" plywood (base) | $5 |
+| Amazon Basics Thunderbolt 4 Hub | $145 |
 | Misc (wires, connectors, screws) | $10 |
-| **Total (excl. laptop + Brio)** | **~$145-180** |
-| **Total (incl. Brio)** | **~$275-310** |
+| **Total (excl. laptop + Brio)** | **~$290-325** |
+| **Total (incl. Brio)** | **~$420-455** |
 
 ---
 
@@ -481,3 +508,4 @@ These are handled externally, not by our system:
 8. **Verbal betting** — no bet tracking in software, keeps it simple
 9. **Web-based apps** — one server, two browser views; no Windows app to install
 10. **Teams screen share** — remote player accesses Neo screen directly, no VPN needed
+11. **Thunderbolt hub** — Neo's second USB-C port is USB 2.0 only, can't drive Brio at 4K or external display. Hub multiplexes everything through the single Thunderbolt port: 4K camera, external monitor (DisplayPort Alt Mode), and PD power to Neo
