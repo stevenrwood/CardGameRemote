@@ -228,6 +228,7 @@ def to_jpeg(frame, q=85):
 class ZoneMonitor:
     def __init__(self, threshold):
         self.threshold = threshold
+        self.yolo_min_conf = 0.5  # below this, fall back to Claude API
         self.baselines = {}
         self.last_card = {}
         self.zone_state = {}
@@ -334,7 +335,7 @@ class ZoneMonitor:
                 details["yolo"] = result
                 details["yolo_conf"] = round(conf * 100)
 
-                if result == "No card" or conf < 0.5:
+                if result == "No card" or conf < self.yolo_min_conf:
                     yolo_result = result
                     if self.client:
                         log.log(f"[{name}] YOLO low confidence, calling Claude API...")
@@ -1257,6 +1258,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "hand": ge.get_hand_state(),
                 "last_round_cards": s.console_last_round_cards,
                 "zone_cards": zone_cards,
+                "yolo_min_conf": s.monitor.yolo_min_conf,
             }))
 
         elif p == "/api/console/players":
@@ -1370,6 +1372,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         log.log(f"[CONSOLE] Saved correction to training_data: {new_card}")
                     log.log(f"[CONSOLE] Corrected {player}: {old_card} -> {new_card}")
             self._r(200, "application/json", '{"ok":true}')
+
+        elif p == "/api/console/yolo_conf":
+            val = data.get("value")
+            if val is not None:
+                s.monitor.yolo_min_conf = max(0.0, min(1.0, float(val)))
+                log.log(f"[CONSOLE] YOLO min confidence: {s.monitor.yolo_min_conf:.0%}")
+            self._r(200, "application/json", json.dumps({"yolo_min_conf": s.monitor.yolo_min_conf}))
 
         else:
             self._r(404,"text/plain","Not found")
@@ -1985,6 +1994,18 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
   <div id="players-list" style="display:none"></div>
 </div>
 
+<!-- YOLO confidence slider -->
+<div class="section">
+  <div style="display:flex;align-items:center;gap:8px">
+    <span style="font-size:.85em;color:#888;white-space:nowrap">YOLO min</span>
+    <input type="range" id="yolo-slider" min="0" max="100" value="50"
+      style="flex:1;accent-color:#4fc3f7" oninput="updateYoloLabel()"
+      onchange="setYoloConf()">
+    <span id="yolo-val" style="font-size:.9em;color:#4fc3f7;width:36px;text-align:right">50%</span>
+  </div>
+  <div style="font-size:.75em;color:#555;margin-top:2px">Below this confidence, falls back to Claude AI</div>
+</div>
+
 <!-- Game + Dealer -->
 <div class="section">
   <h2>Game</h2>
@@ -2154,6 +2175,10 @@ function render(){
       var o=document.createElement('option');o.value=n;o.textContent=n;
       dsel.appendChild(o);
     });
+    // Sync YOLO slider from server
+    var pct=Math.round((ST.yolo_min_conf||0.5)*100);
+    document.getElementById('yolo-slider').value=pct;
+    document.getElementById('yolo-val').textContent=pct+'%';
   }
   dsel.value=ge.dealer;
 
@@ -2251,6 +2276,14 @@ function updatePlayers(){
 function setDealer(){
   var name=document.getElementById('dealer-select').value;
   api('/api/console/set_dealer',{dealer:name}).then(refresh);
+}
+
+function updateYoloLabel(){
+  document.getElementById('yolo-val').textContent=document.getElementById('yolo-slider').value+'%';
+}
+function setYoloConf(){
+  var v=parseInt(document.getElementById('yolo-slider').value)/100;
+  api('/api/console/yolo_conf',{value:v});
 }
 
 function doDeal(){
