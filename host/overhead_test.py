@@ -372,7 +372,9 @@ class ZoneMonitor:
                 self.zone_state[name] = "empty"
 
         except Exception as e:
+            import traceback
             log.log(f"[{name}] error: {e}")
+            log.log(f"[{name}] traceback: {traceback.format_exc().splitlines()[-2]}")
             self.zone_state[name] = "empty"
         finally:
             self.recognition_details[name] = details
@@ -2316,28 +2318,29 @@ function doEnd(){
 // --- Correction popup ---
 
 function openCorrect(player){
-  dbg('openCorrect called: '+player);
-  correctPlayer=player;
-  var zi=ST.zone_cards[player]||{};
-  document.getElementById('correct-title').textContent=player;
-  document.getElementById('correct-img').src='/zone_snap/'+player+'?'+Date.now();
-
-  // Details
-  var dh='';
-  dh+='<div class="detail-row"><span class="detail-label">Recognized</span>'
-    +'<span class="detail-value">'+( zi.card||'--')+'</span></div>';
-  dh+='<div class="detail-row"><span class="detail-label">YOLO</span>'
-    +'<span class="detail-value">'+(zi.yolo||'--')+' ('+( zi.yolo_conf||0)+'%)</span></div>';
-  if(zi.claude){
-    dh+='<div class="detail-row"><span class="detail-label">Claude AI</span>'
-      +'<span class="detail-value">'+zi.claude+'</span></div>';
+  try{
+    dbg('openCorrect: '+player);
+    correctPlayer=player;
+    var zi=ST.zone_cards[player]||{};
+    document.getElementById('correct-title').textContent=player;
+    document.getElementById('correct-img').src='/zone_snap/'+player+'?'+Date.now();
+    var dh='<div class="detail-row"><span class="detail-label">Recognized</span>'
+      +'<span class="detail-value">'+(zi.card||'--')+'</span></div>'
+      +'<div class="detail-row"><span class="detail-label">YOLO</span>'
+      +'<span class="detail-value">'+(zi.yolo||'--')+' ('+(zi.yolo_conf||0)+'%)</span></div>';
+    if(zi.claude){
+      dh+='<div class="detail-row"><span class="detail-label">Claude AI</span>'
+        +'<span class="detail-value">'+zi.claude+'</span></div>';
+    }
+    document.getElementById('correct-details').innerHTML=dh;
+    document.getElementById('correct-rank').value='';
+    document.getElementById('correct-suit').value='';
+    var modal=document.getElementById('correct-modal');
+    modal.style.display='block';
+    dbg('modal display set to block');
+  }catch(err){
+    dbg('openCorrect ERROR: '+err.message);
   }
-  document.getElementById('correct-details').innerHTML=dh;
-
-  // Reset pickers
-  document.getElementById('correct-rank').value='';
-  document.getElementById('correct-suit').value='';
-  document.getElementById('correct-modal').style.display='';
 }
 
 function closeCorrect(){
