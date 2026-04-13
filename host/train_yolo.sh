@@ -22,10 +22,19 @@ echo ""
 echo "=== Training YOLO model ==="
 echo ""
 
+# Pick base model. Default is yolov8s (small, ~22MB, 4x the params of current nano).
+# To fine-tune from existing trained model: BASE_MODEL=models/card_detector.pt
+# To stay with nano: BASE_MODEL=yolov8n.pt
+# For bigger: BASE_MODEL=yolov8m.pt (medium, ~52MB)
+BASE_MODEL="${BASE_MODEL:-yolov8s.pt}"
+echo "Base model: $BASE_MODEL"
+
 python3 -c "
+import os
 from ultralytics import YOLO
 
-model = YOLO('yolov8n.pt')
+base = os.environ.get('BASE_MODEL', 'yolov8s.pt')
+model = YOLO(base)
 results = model.train(
     data='yolo_dataset/data.yaml',
     epochs=100,
