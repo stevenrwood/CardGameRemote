@@ -364,6 +364,8 @@ class ZoneMonitor:
                 log.log(f"[{name}] RECOGNIZED: {result} (total {total_ms:.0f}ms)")
                 self._save(name, crop, result)
                 speech.say(f"{name}, {result}")
+                # Follow the Queen wild card tracking
+                _check_follow_the_queen(result)
             else:
                 log.log(f"[{name}] No card (total {total_ms:.0f}ms)")
                 self.zone_state[name] = "empty"
@@ -411,6 +413,37 @@ class ZoneMonitor:
         safe = result.replace(" ","_").replace("/","-")[:30]
         cv2.imwrite(str(TRAINING_DIR / f"{ts}_{name}_{safe}.jpg"), crop)
         (TRAINING_DIR / f"{ts}_{name}_{safe}.txt").write_text(result)
+
+# ---------------------------------------------------------------------------
+# Follow the Queen tracking for overhead camera
+# ---------------------------------------------------------------------------
+
+def _check_follow_the_queen(result):
+    """Track wild cards for Follow the Queen when up cards are recognized."""
+    if not _state or not _state.game_engine.current_game:
+        return
+    ge = _state.game_engine
+    if ge.current_game.dynamic_wild != "follow_the_queen":
+        return
+
+    # Parse rank from "Rank of Suit"
+    parts = result.split(" of ")
+    if len(parts) != 2:
+        return
+    rank = parts[0]  # e.g. "Queen", "4", "King"
+
+    # Map full name to short rank for wild tracking
+    rank_short = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}.get(rank, rank)
+
+    if ge.last_up_was_queen:
+        # This card follows a Queen — its rank becomes wild
+        ge.wild_ranks = ["Q", rank_short]
+        ge.wild_label = f"{rank}s are wild (follows Queen)"
+        log.log(f"[WILD] {ge.wild_label}")
+        speech.say(f"{rank}s are now wild")
+
+    ge.last_up_was_queen = (rank_short == "Q")
+
 
 # ---------------------------------------------------------------------------
 # App state
@@ -1992,10 +2025,10 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
   </div>
 
   <!-- Action buttons -->
-  <button class="btn btn-continue" id="btn-continue" onclick="doContinue()" style="display:none">
-    Continue (next round)
+  <button class="btn btn-continue" id="btn-continue" onclick="doContinue()">
+    Next Round
   </button>
-  <button class="btn btn-end" style="margin-top:12px" onclick="doEnd()">End Hand</button>
+  <button class="btn btn-end" style="margin-top:8px" onclick="doEnd()">End Hand</button>
 </div>
 
 <!-- Correction modal -->
@@ -2108,8 +2141,8 @@ function render(){
     if(ge.wild_label){wb.style.display='';document.getElementById('hand-wild').textContent=ge.wild_label}
     else{wb.style.display='none'}
 
-    // Continue button visible during betting
-    contBtn.style.display=(ge.state==='betting')?'':'none';
+    // Next Round always visible during hand
+    contBtn.style.display='';
 
     // Zone cards header with round number
     var zh_title='Cards dealt';
@@ -2193,7 +2226,7 @@ function doContinue(){
   btn.textContent='...';
   api('/api/console/continue').then(function(){
     btn.disabled=false;
-    btn.textContent='Continue (next round)';
+    btn.textContent='Next Round';
     refresh();
   });
 }
