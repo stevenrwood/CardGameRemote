@@ -421,32 +421,20 @@ class ZoneMonitor:
 # Follow the Queen tracking for overhead camera
 # ---------------------------------------------------------------------------
 
-def _check_follow_the_queen_round(s):
-    """Check all zone cards for Follow the Queen at end of round.
+def _check_follow_the_queen_round(s, round_cards):
+    """Check cards for Follow the Queen wild at end of round.
 
-    Processes cards in deal order (clockwise from dealer's left).
-    Also checks if previous round's last card was a Queen (stored in
-    game engine's last_up_was_queen flag).
+    Args:
+        round_cards: list of {"player": name, "card": "Rank of Suit"} in deal order
     """
     ge = s.game_engine
     if not ge.current_game or ge.current_game.dynamic_wild != "follow_the_queen":
         return
 
-    # Build deal order: clockwise from dealer's left
-    dealer_idx = ge.dealer_index
-    order = []
-    for i in range(1, len(ge.players) + 1):
-        p = ge.players[(dealer_idx + i) % len(ge.players)]
-        if p.name in s.console_active_players:
-            order.append(p.name)
-
     RANK_SHORT = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}
 
-    for name in order:
-        zi = s.monitor.last_card.get(name, "")
-        if not zi or zi == "No card":
-            continue
-        parts = zi.split(" of ")
+    for c in round_cards:
+        parts = c["card"].split(" of ")
         if len(parts) != 2:
             continue
         rank = parts[0]
@@ -454,7 +442,6 @@ def _check_follow_the_queen_round(s):
 
         if ge.last_up_was_queen:
             ge.wild_ranks = ["Q", rank_short]
-            # Use apostrophe for number ranks (say "2's" not "2s")
             plural = f"{rank}'s" if rank.isdigit() else f"{rank}s"
             ge.wild_label = f"Queens and {plural} are wild"
             log.log(f"[WILD] {ge.wild_label}")
@@ -462,8 +449,9 @@ def _check_follow_the_queen_round(s):
 
         ge.last_up_was_queen = (rank_short == "Q")
 
-    # If the last card this round was a Queen, flag it for next round
-    # (already handled by the loop above setting last_up_was_queen)
+    # Always announce current wild state at end of round if non-default
+    if ge.wild_label and ge.wild_label != "Queens wild":
+        log.log(f"[WILD] Current: {ge.wild_label}")
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +476,8 @@ class AppState:
         self.game_engine = GameEngine()
         self.console_active_players = list(PLAYER_NAMES)  # who's playing tonight
         self.console_last_round_cards = []  # cards from last upcard scan
+        self.console_up_round = 0     # current up-card round number
+        self.console_total_up_rounds = 0  # total up-card rounds in this game
 
 _state = None
 
@@ -1279,6 +1269,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "last_round_cards": s.console_last_round_cards,
                 "zone_cards": zone_cards,
                 "yolo_min_conf": s.monitor.yolo_min_conf,
+                "up_round": s.console_up_round,
+                "total_up_rounds": s.console_total_up_rounds,
             }))
 
         elif p == "/api/console/players":
@@ -1307,6 +1299,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 result = ge.new_hand(game_name)
                 s.console_last_round_cards = []
+                # Count total up-card rounds from template
+                s.console_up_round = 0
+                template = ge.templates[game_name]
+                up_rounds = 0
+                for phase in template.phases:
+                    if phase.type.value == "deal" and "up" in phase.pattern:
+                        up_rounds += 1
+                    elif phase.type.value == "community":
+                        up_rounds += 1
+                s.console_total_up_rounds = up_rounds
                 # Start zone monitoring for up card recognition
                 if s.cal.ok and s.latest_frame is not None:
                     s.monitor.capture_baselines(s.latest_frame)
@@ -1319,30 +1321,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/continue":
             ge = s.game_engine
-            # Check Follow the Queen wild cards BEFORE clearing zones
-            _check_follow_the_queen_round(s)
-            # Save current zone cards as last round before advancing
+            # Collect round cards in deal order (clockwise from dealer's left)
+            dealer_idx = ge.dealer_index
             round_cards = []
-            for z in s.cal.zones:
-                name = z["name"]
-                card = s.monitor.last_card.get(name, "")
+            for i in range(1, len(ge.players) + 1):
+                p2 = ge.players[(dealer_idx + i) % len(ge.players)]
+                if p2.name not in s.console_active_players:
+                    continue
+                card = s.monitor.last_card.get(p2.name, "")
                 if card and card != "No card":
-                    round_cards.append({"player": name, "card": card})
+                    round_cards.append({"player": p2.name, "card": card})
+            # Check Follow the Queen wild cards using collected cards
+            _check_follow_the_queen_round(s, round_cards)
+            # Save as last round
             if round_cards:
                 s.console_last_round_cards = round_cards
+            # Advance round counter
+            s.console_up_round += 1
             # Recapture baselines for next round
             if s.cal.ok and s.latest_frame is not None:
                 s.monitor.capture_baselines(s.latest_frame)
-                # Reset zone states and recognition details
                 for z in s.cal.zones:
                     s.monitor.zone_state[z["name"]] = "empty"
                     s.monitor.last_card[z["name"]] = ""
                     s.monitor.recognition_details[z["name"]] = {}
                     s.monitor.recognition_crops[z["name"]] = None
                 log.log("[CONSOLE] Baselines recaptured for next round")
-            msgs = ge.continue_after_betting()
-            log.log(f"[CONSOLE] Continue — {ge._describe_current_phase()}")
-            self._r(200, "application/json", json.dumps({"messages": msgs, "hand": ge.get_hand_state()}))
+            log.log(f"[CONSOLE] Next Round — up round {s.console_up_round}/{s.console_total_up_rounds}")
+            self._r(200, "application/json", json.dumps({
+                "hand": ge.get_hand_state(),
+                "up_round": s.console_up_round,
+                "total_up_rounds": s.console_total_up_rounds,
+            }))
 
         elif p == "/api/console/end":
             ge = s.game_engine
@@ -2230,12 +2240,21 @@ function render(){
     if(ge.wild_label){wb.style.display='';document.getElementById('hand-wild').textContent=ge.wild_label}
     else{wb.style.display='none'}
 
-    // Next Round always visible during hand
+    // Next Round — disable after all up rounds done
     contBtn.style.display='';
+    if(ST.total_up_rounds && ST.up_round>=ST.total_up_rounds){
+      contBtn.disabled=true;
+      contBtn.textContent='All up rounds done';
+    } else {
+      contBtn.disabled=false;
+      contBtn.textContent='Next Round';
+    }
 
-    // Zone header
-    var zh_title='Cards dealt';
-    if(ge.deal_round) zh_title='Cards dealt in round '+ge.deal_round+' (touch to correct)';
+    // Zone header with round number
+    var roundNum=ST.up_round+1;
+    var zh_title='Cards dealt in round '+roundNum;
+    if(ST.total_up_rounds) zh_title+=' of '+ST.total_up_rounds;
+    zh_title+=' (touch to correct)';
     document.getElementById('zone-header').textContent=zh_title;
 
     // Update zone card text (no rebuild — listeners survive)
