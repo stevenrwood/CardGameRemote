@@ -610,10 +610,9 @@ def _deal_check_dealer_zone(s):
 
     crop = s.monitor.check_single(frame, dealer_zone)
     if crop is not None:
-        log.log(f"[DEAL] Card detected in {dealer_name}'s zone — scanning all zones")
-        dm["phase"] = "scanning"
-        dm["announced_this_round"] = set()
-        _deal_scan_all_zones(s)
+        log.log(f"[DEAL] Card detected in {dealer_name}'s zone — waiting 2s for all cards to settle")
+        dm["phase"] = "settling"
+        dm["settle_time"] = time.time()
 
 
 def _deal_retry_missing(s):
@@ -998,6 +997,12 @@ def bg_loop():
             if dm and _state.cal.ok:
                 if dm["phase"] == "dealing":
                     _deal_check_dealer_zone(_state)
+                elif dm["phase"] == "settling":
+                    if time.time() - dm.get("settle_time", 0) >= 2:
+                        log.log("[DEAL] Scanning all zones")
+                        dm["phase"] = "scanning"
+                        dm["announced_this_round"] = set()
+                        _deal_scan_all_zones(_state)
                 elif dm["phase"] == "retry_missing":
                     _deal_retry_missing(_state)
                 elif dm["phase"] == "waiting_to_clear":
