@@ -365,8 +365,6 @@ class ZoneMonitor:
                 log.log(f"[{name}] RECOGNIZED: {result} (total {total_ms:.0f}ms)")
                 self._save(name, crop, result)
                 speech.say(f"{name}, {result}")
-                # Follow the Queen wild card tracking
-                _check_follow_the_queen(result)
             else:
                 log.log(f"[{name}] No card (total {total_ms:.0f}ms)")
                 self.zone_state[name] = "empty"
@@ -421,31 +419,47 @@ class ZoneMonitor:
 # Follow the Queen tracking for overhead camera
 # ---------------------------------------------------------------------------
 
-def _check_follow_the_queen(result):
-    """Track wild cards for Follow the Queen when up cards are recognized."""
-    if not _state or not _state.game_engine.current_game:
+def _check_follow_the_queen_round(s):
+    """Check all zone cards for Follow the Queen at end of round.
+
+    Processes cards in deal order (clockwise from dealer's left).
+    Also checks if previous round's last card was a Queen (stored in
+    game engine's last_up_was_queen flag).
+    """
+    ge = s.game_engine
+    if not ge.current_game or ge.current_game.dynamic_wild != "follow_the_queen":
         return
-    ge = _state.game_engine
-    if ge.current_game.dynamic_wild != "follow_the_queen":
-        return
 
-    # Parse rank from "Rank of Suit"
-    parts = result.split(" of ")
-    if len(parts) != 2:
-        return
-    rank = parts[0]  # e.g. "Queen", "4", "King"
+    # Build deal order: clockwise from dealer's left
+    dealer_idx = ge.dealer_index
+    order = []
+    for i in range(1, len(ge.players) + 1):
+        p = ge.players[(dealer_idx + i) % len(ge.players)]
+        if p.name in s.console_active_players:
+            order.append(p.name)
 
-    # Map full name to short rank for wild tracking
-    rank_short = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}.get(rank, rank)
+    RANK_SHORT = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}
 
-    if ge.last_up_was_queen:
-        # This card follows a Queen — its rank becomes wild
-        ge.wild_ranks = ["Q", rank_short]
-        ge.wild_label = f"Queens and {rank}s are wild"
-        log.log(f"[WILD] {ge.wild_label}")
-        speech.say(f"{rank}s are now wild")
+    for name in order:
+        zi = s.monitor.last_card.get(name, "")
+        if not zi or zi == "No card":
+            continue
+        parts = zi.split(" of ")
+        if len(parts) != 2:
+            continue
+        rank = parts[0]
+        rank_short = RANK_SHORT.get(rank, rank)
 
-    ge.last_up_was_queen = (rank_short == "Q")
+        if ge.last_up_was_queen:
+            ge.wild_ranks = ["Q", rank_short]
+            ge.wild_label = f"Queens and {rank}s are wild"
+            log.log(f"[WILD] {ge.wild_label}")
+            speech.say(f"Queens and {rank}s are now wild")
+
+        ge.last_up_was_queen = (rank_short == "Q")
+
+    # If the last card this round was a Queen, flag it for next round
+    # (already handled by the loop above setting last_up_was_queen)
 
 
 # ---------------------------------------------------------------------------
@@ -1301,6 +1315,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/continue":
             ge = s.game_engine
+            # Check Follow the Queen wild cards BEFORE clearing zones
+            _check_follow_the_queen_round(s)
             # Save current zone cards as last round before advancing
             round_cards = []
             for z in s.cal.zones:
@@ -1975,10 +1991,10 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
 .zone-empty{color:#555}
 .zone-arrow{color:#555;font-size:1.2em}
 #correct-modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.9);
-  z-index:100;overflow-y:auto}
-#correct-content{background:#16213e;border-radius:12px;padding:16px;max-width:400px;
-  margin:20px auto;position:relative}
-#correct-img{width:100%;border-radius:8px;margin:8px 0;border:1px solid #333}
+  z-index:100;overflow-y:auto;padding:12px}
+#correct-content{background:#16213e;border-radius:12px;padding:12px;max-width:400px;
+  margin:0 auto}
+#correct-img{width:50%;border-radius:8px;margin:6px auto;display:block;border:1px solid #333}
 .detail-row{display:flex;justify-content:space-between;padding:4px 0;font-size:.9em;
   border-bottom:1px solid #222}
 .detail-label{color:#888}
@@ -2053,7 +2069,6 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
   </button>
   <button class="btn btn-end" style="margin-top:8px" onclick="doEnd()">End Hand</button>
 </div>
-<pre id="dbg" style="font-size:.7em;color:#555;margin-top:20px;max-height:150px;overflow:auto"></pre>
 
 <!-- Correction modal -->
 <div id="correct-modal" onclick="if(event.target===this)closeCorrect()">
@@ -2098,14 +2113,7 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
 var ST=null;
 var dealing=false;
 var correctPlayer=null;
-var dbgLines=[];
-function dbg(msg){
-  dbgLines.push(new Date().toLocaleTimeString()+' '+msg);
-  if(dbgLines.length>30)dbgLines.shift();
-  var el=document.getElementById('dbg');
-  if(el)el.textContent=dbgLines.join('\\n');
-}
-window.onerror=function(m,s,l){dbg('ERR: '+m+' line:'+l)};
+function dbg(msg){}
 
 function api(path,data){
   return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -2317,9 +2325,20 @@ function doEnd(){
 
 // --- Correction popup ---
 
+var RANK_MAP={'Ace':'A','King':'K','Queen':'Q','Jack':'J',
+  '2':'2','3':'3','4':'4','5':'5','6':'6','7':'7','8':'8','9':'9','10':'10'};
+var SUIT_MAP={'Clubs':'clubs','Diamonds':'diamonds','Hearts':'hearts','Spades':'spades'};
+
+function parseCard(card){
+  // Parse "King of Clubs" -> {rank:'K', suit:'clubs'}
+  if(!card) return {rank:'',suit:''};
+  var m=card.match(/^(.+) of (.+)$/);
+  if(!m) return {rank:'',suit:''};
+  return {rank:RANK_MAP[m[1]]||'', suit:SUIT_MAP[m[2]]||''};
+}
+
 function openCorrect(player){
   try{
-    dbg('openCorrect: '+player);
     correctPlayer=player;
     var zi=ST.zone_cards[player]||{};
     document.getElementById('correct-title').textContent=player;
@@ -2333,11 +2352,11 @@ function openCorrect(player){
         +'<span class="detail-value">'+zi.claude+'</span></div>';
     }
     document.getElementById('correct-details').innerHTML=dh;
-    document.getElementById('correct-rank').value='';
-    document.getElementById('correct-suit').value='';
-    var modal=document.getElementById('correct-modal');
-    modal.style.display='block';
-    dbg('modal display set to block');
+    // Prepopulate rank/suit from recognized card
+    var parsed=parseCard(zi.card);
+    document.getElementById('correct-rank').value=parsed.rank;
+    document.getElementById('correct-suit').value=parsed.suit;
+    document.getElementById('correct-modal').style.display='block';
   }catch(err){
     dbg('openCorrect ERROR: '+err.message);
   }
