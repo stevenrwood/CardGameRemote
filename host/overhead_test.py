@@ -891,6 +891,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "/api/state": self._api_state,
             "/api/log": lambda s: self._r(200,"application/json",json.dumps({"lines":log.get(100)})),
             "/log": lambda s: self._r(200,"text/plain","\n".join(log.get(200))),
+            "/logview": self._serve_logview,
             "/calibration": lambda s: self._r(200,"application/json",CALIBRATION_FILE.read_text()) if CALIBRATION_FILE.exists() else self._r(404,"text/plain","none"),
             "/training": self._training_list,
         }
@@ -1180,14 +1181,10 @@ pre{{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:
     <img id="tableimg" src="/snapshot/cropped" style="width:100%;cursor:pointer"
          onclick="this.src='/snapshot/cropped?'+Date.now()">
     <div style="margin-top:8px">
-      <h3 style="display:inline">Log</h3>
-      <button class="btn-off" style="float:right;padding:3px 8px;font-size:.75em" onclick="copyLog()">Copy Log</button>
+      <button class="btn-off" style="padding:3px 8px;font-size:.75em" onclick="openLogWindow()">Open Log Window</button>
+      <button class="btn-off" style="padding:3px 8px;font-size:.75em" onclick="copyLog()">Copy Log</button>
+      <a href="/training" style="color:#4fc3f7;font-size:.8em;margin-left:8px">Training data</a>
     </div>
-    <pre id="logpre" style="max-height:300px"></pre>
-    <p style="margin-top:4px;font-size:.8em">
-      <a href="/log" style="color:#4fc3f7">Full log</a> |
-      <a href="/training" style="color:#4fc3f7">Training data</a>
-    </p>
   </div>
   <div id="right">
     <h3>Zones</h3>
@@ -1285,6 +1282,9 @@ function collectRedo(){{
 }}
 function copyLog(){{
   window.open('/log','_blank');
+}}
+function openLogWindow(){{
+  window.open('/logview','_logview','width=800,height=400,scrollbars=yes');
 }}
 
 function update(){{
@@ -1453,12 +1453,6 @@ function update(){{
     }}
   }}).catch(function(){{}});
 
-  // Log
-  fetch('/api/log').then(function(r){{return r.json()}}).then(function(d){{
-    var pre=document.getElementById('logpre');
-    pre.innerHTML=d.lines.slice(-30).join('<br>');
-    pre.scrollTop=pre.scrollHeight;
-  }}).catch(function(){{}});
 }}
 
 setInterval(update, 2000);
@@ -1521,6 +1515,28 @@ c.onclick=function(e){{
 }};
 c.onmousemove=function(e){{if(!pc)return;var p=xy(e);pc[2]=Math.round(Math.sqrt(Math.pow(p[0]-pc[0],2)+Math.pow(p[1]-pc[1],2)));draw()}};
 </script></body></html>""")
+
+    def _serve_logview(self, s):
+        self._r(200, "text/html", """<!DOCTYPE html>
+<html><head><title>Log</title>
+<style>
+body{font-family:monospace;background:#0d1117;color:#e0e0e0;padding:12px;margin:0}
+pre{white-space:pre-wrap;font-size:0.85em;line-height:1.4}
+</style>
+<script>
+function refresh(){
+  fetch('/api/log').then(function(r){return r.json()}).then(function(d){
+    var pre=document.getElementById('log');
+    var atBottom=pre.scrollHeight-pre.scrollTop-pre.clientHeight<50;
+    pre.innerHTML=d.lines.join('\\n');
+    if(atBottom) pre.scrollTop=pre.scrollHeight;
+  }).catch(function(){});
+  setTimeout(refresh,2000);
+}
+refresh();
+</script></head><body>
+<pre id="log">Loading...</pre>
+</body></html>""")
 
     def _zone_img(self, s, name):
         if not s.latest_frame is not None:
