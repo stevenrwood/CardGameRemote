@@ -236,6 +236,7 @@ class ZoneMonitor:
         self.recognition_details = {}  # name -> {yolo, yolo_conf, claude, final}
         self.recognition_crops = {}   # name -> crop (numpy array) at time of recognition
         self._yolo_model = None
+        self._yolo_lock = Lock()  # YOLO model is not thread-safe
         self._client = None
         self._load_yolo()
 
@@ -380,7 +381,8 @@ class ZoneMonitor:
             self.pending[name] = False
 
     def _recognize_yolo(self, crop):
-        results = self._yolo_model.predict(crop, conf=0.2, verbose=False)
+        with self._yolo_lock:
+            results = self._yolo_model.predict(crop, conf=0.2, verbose=False)
         if results and len(results[0].boxes) > 0:
             box = results[0].boxes[0]
             cls_idx = int(box.cls[0])
@@ -452,9 +454,11 @@ def _check_follow_the_queen_round(s):
 
         if ge.last_up_was_queen:
             ge.wild_ranks = ["Q", rank_short]
-            ge.wild_label = f"Queens and {rank}s are wild"
+            # Use apostrophe for number ranks (say "2's" not "2s")
+            plural = f"{rank}'s" if rank.isdigit() else f"{rank}s"
+            ge.wild_label = f"Queens and {plural} are wild"
             log.log(f"[WILD] {ge.wild_label}")
-            speech.say(f"Queens and {rank}s are now wild")
+            speech.say(f"Queens and {plural} are now wild")
 
         ge.last_up_was_queen = (rank_short == "Q")
 

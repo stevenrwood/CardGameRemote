@@ -242,7 +242,8 @@ class GameEngine:
                 if self.last_up_was_queen:
                     # This card's rank becomes the new wild
                     self.wild_ranks = ["Q", rank]
-                    self.wild_label = f"{rank}s are wild (follows Queen)"
+                    plural = f"{rank}'s" if rank.isdigit() else f"{rank}s"
+                    self.wild_label = f"Queens and {plural} are wild"
                     messages.append({
                         "type": "wild_card_update",
                         "wild_ranks": self.wild_ranks,
