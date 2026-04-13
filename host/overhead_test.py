@@ -393,11 +393,26 @@ class ZoneMonitor:
             "Reply with one line per image: 'Name: Rank of Suit' (e.g. 'Steve: 4 of Clubs'). "
             "If unclear or no card visible, reply 'Name: No card'."})
 
+        # Retry with exponential backoff on 529 overloaded / 500 errors
         t0 = time.time()
+        resp = None
+        last_err = None
+        for attempt in range(3):
+            try:
+                resp = self.client.messages.create(
+                    model=CLAUDE_MODEL, max_tokens=200,
+                    messages=[{"role": "user", "content": content}])
+                break
+            except Exception as e:
+                last_err = e
+                err_str = str(e)
+                is_transient = "529" in err_str or "overloaded" in err_str.lower() or "500" in err_str
+                if not is_transient or attempt == 2:
+                    raise
+                delay = 2 ** attempt  # 1s, 2s, 4s
+                log.log(f"[CLAUDE] Transient error (attempt {attempt+1}/3), retrying in {delay}s: {err_str[:80]}")
+                time.sleep(delay)
         try:
-            resp = self.client.messages.create(
-                model=CLAUDE_MODEL, max_tokens=200,
-                messages=[{"role": "user", "content": content}])
             claude_ms = (time.time() - t0) * 1000
             raw = resp.content[0].text.strip()
             log.log(f"[CLAUDE] Response in {claude_ms:.0f}ms: {raw}")
