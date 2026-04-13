@@ -555,8 +555,6 @@ def _deal_scan_all_zones(s):
                 "card": result,
                 "round": dm["round_idx"] + 1,
             })
-            # Update baseline so next round detects change
-            s.monitor.baselines[player] = crop.copy()
             s.monitor.zone_state[player] = "empty"
             s.monitor.last_card[player] = ""
         else:
@@ -574,8 +572,11 @@ def _deal_scan_all_zones(s):
         dm["phase"] = "retry_missing"
         dm["retry_time"] = time.time()
     else:
-        # All recognized — wait for players to clear zones
+        # All recognized — recapture baselines WITH cards, then wait for removal
         log.log(f"[DEAL] Round {dm['round_idx']+1} complete — all {len(order)} cards recognized")
+        # Capture baselines with cards present — clearing = change from this
+        if s.latest_frame is not None:
+            s.monitor.capture_baselines(s.latest_frame)
         speech.say("Clear zones")
         dm["phase"] = "waiting_to_clear"
         log.log("[DEAL] Waiting for all zones to be cleared")
@@ -641,7 +642,9 @@ def _deal_check_zones_clear(s):
         if baseline is None or crop.shape != baseline.shape:
             continue
         diff = float(np.mean(cv2.absdiff(crop, baseline)))
-        if diff > s.monitor.threshold:
+        # Baseline was captured WITH cards — if diff is LOW, card is still there
+        # If diff is HIGH, card was removed (zone changed)
+        if diff < s.monitor.threshold:
             still_occupied.append(player)
 
     if not still_occupied:
