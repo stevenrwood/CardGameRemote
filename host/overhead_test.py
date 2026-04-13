@@ -1071,12 +1071,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._r(404,"text/plain","Not found")
 
     def _r(self, code, ct, body):
-        self.send_response(code)
-        self.send_header("Content-Type", ct)
-        if ct == "image/jpeg":
-            self.send_header("Cache-Control","no-store,no-cache,max-age=0")
-        self.end_headers()
-        self.wfile.write(body.encode() if isinstance(body,str) else body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ct)
+            if ct == "image/jpeg":
+                self.send_header("Cache-Control","no-store,no-cache,max-age=0")
+            self.end_headers()
+            self.wfile.write(body.encode() if isinstance(body,str) else body)
+        except (ConnectionResetError, BrokenPipeError):
+            pass
 
     def _jpeg(self, frame):
         if frame is None: return self._r(503,"text/plain","No frame")
