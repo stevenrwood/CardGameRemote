@@ -317,12 +317,21 @@ Amazon Basics Thunderbolt Hub:
   Hub upstream    ──→ Neo main USB-C port (Thunderbolt)
   Hub downstream 1 ──→ Brio 4K camera (USB 3.2 → 4K resolution)
   Hub downstream 2 ──→ Ananta Thunderbolt port (display signal)
-  Hub downstream 3    (spare)
+  Hub downstream 3 ──→ Logitech C920x (Teams camera, wide-FOV room view)
 
 Neo second USB-C port: unused
 ```
 
-This gives Neo power, 4K camera, and external display all through one port.
+This gives Neo power, 4K camera for card scanning, external display, and
+a Teams-facing webcam all through one port.
+
+### Teams camera
+
+The Logitech C920x on the hub replaces Neo's built-in webcam as the
+Teams video source. Wider field of view so the remote player can see
+all of the other players around the table, not just whoever is opposite
+the laptop. Also what any card held up for manual verification gets
+shown through — the 920x is framed to cover the full table.
 
 ---
 
@@ -489,9 +498,10 @@ These are handled externally, not by our system:
 | 3D printing filament (PLA) | $10 |
 | 1/4" plywood (base) | $5 |
 | Amazon Basics Thunderbolt 4 Hub | $145 |
+| Logitech C920x webcam (Teams room view) | $70 |
 | Misc (wires, connectors, screws) | $10 |
-| **Total (excl. laptop + Brio)** | **~$290-325** |
-| **Total (incl. Brio)** | **~$420-455** |
+| **Total (excl. laptop + Brio)** | **~$360-395** |
+| **Total (incl. Brio)** | **~$490-525** |
 
 ---
 
@@ -509,3 +519,4 @@ These are handled externally, not by our system:
 9. **Web-based apps** — one server, two browser views; no Windows app to install
 10. **Teams screen share** — remote player accesses Neo screen directly, no VPN needed
 11. **Thunderbolt hub** — Neo's second USB-C port is USB 2.0 only, can't drive Brio at 4K or external display. Hub multiplexes everything through the single Thunderbolt port: 4K camera, external monitor (DisplayPort Alt Mode), and PD power to Neo
+12. **Logitech C920x as Teams camera** — Neo's built-in webcam has a narrow FOV and only sees whoever is opposite the laptop. The C920x on the hub's third downstream port gives the remote player a wide view of the whole table (and is what any card held up for manual verification is shown through)
