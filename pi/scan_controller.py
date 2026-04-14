@@ -601,8 +601,8 @@ input[type=number]{padding:8px;background:#0f3460;color:#fff;border:1px solid #3
   <div class="countdown" id="countdown">—</div>
 </div>
 <div class="next">
-  <div class="line">Next slot for this card: <b id="next-slot">—</b></div>
-  <div class="line">Next card (after this one): <b id="next-card">—</b></div>
+  <div class="line">Next card in this slot: <b id="next-slot">—</b></div>
+  <div class="line">After this slot: <b id="next-card">—</b></div>
 </div>
 <div class="matrix">
   <table class="matrix-table" id="matrix"></table>
@@ -614,12 +614,13 @@ var SUITS = ["clubs","diamonds","hearts","spades"];
 var SUIT_SYM = {clubs:"♣",diamonds:"♦",hearts:"♥",spades:"♠"};
 var SLOTS = [1,2,3,4,5,6,7];
 
-// ORDER: for each card (2C,2D,2H,2S,3C,...,AS), iterate all 7 slots.
-// So the user holds one card and moves it through all slots before swapping.
+// ORDER is slot-major: finish all 52 cards in slot 1, auto-pause, then
+// slot 2's 52, pause, ... through slot 7. Within a slot the card order is
+// 2C,2D,2H,2S,3C,... (matches YOLO training).
 var ORDER = [];
-RANKS.forEach(function(r){
-  SUITS.forEach(function(s){
-    SLOTS.forEach(function(slot){
+SLOTS.forEach(function(slot){
+  RANKS.forEach(function(r){
+    SUITS.forEach(function(s){
       ORDER.push({rank:r, suit:s, slot:slot});
     });
   });
@@ -692,23 +693,22 @@ function updateDisplay() {
   cur.textContent = step.rank + ' ' + SUIT_SYM[step.suit];
   cur.className = 'card ' + (isRed(step.suit)?'red':'black');
   document.getElementById('current-slot').textContent = 'slot ' + step.slot;
-  // next slot for this card (same rank+suit)
+  // next card (in same slot) — slot-major ordering
   var nxt = ORDER[idx+1];
-  var nextSlotEl = document.getElementById('next-slot');
-  if (nxt && nxt.rank===step.rank && nxt.suit===step.suit) {
-    nextSlotEl.textContent = 'slot ' + nxt.slot;
+  var nextCardInSlotEl = document.getElementById('next-slot');
+  if (nxt && nxt.slot === step.slot) {
+    nextCardInSlotEl.textContent = describeStep(nxt) + ' (slot ' + nxt.slot + ')';
   } else {
-    nextSlotEl.textContent = '— (this is last slot for this card)';
+    nextCardInSlotEl.textContent = '— (last card in slot ' + step.slot + ')';
   }
-  // next card = first step with a different (rank,suit)
-  var nextCard = null;
+  // next slot = first step whose slot differs from current
+  var nextSlot = null;
   for (var i = idx+1; i < ORDER.length; i++) {
-    if (ORDER[i].rank !== step.rank || ORDER[i].suit !== step.suit) {
-      nextCard = ORDER[i]; break;
-    }
+    if (ORDER[i].slot !== step.slot) { nextSlot = ORDER[i]; break; }
   }
   var ncEl = document.getElementById('next-card');
-  ncEl.textContent = nextCard ? describeStep(nextCard) : '— (training complete)';
+  ncEl.textContent = nextSlot ? ('slot ' + nextSlot.slot + ' starting with ' + describeStep(nextSlot))
+                              : '— (training complete)';
   renderMatrix();
 }
 
@@ -749,6 +749,11 @@ function togglePause() {
   if (!running) return;
   paused = !paused;
   document.getElementById('pause').textContent = paused ? 'Resume' : 'Pause';
+  // If we were paused at a slot boundary (no active ticker), kick off the
+  // next slot's countdown on resume.
+  if (!paused && !ticker) {
+    beginCountdown();
+  }
 }
 
 function skipCurrent() {
@@ -759,16 +764,10 @@ function skipCurrent() {
 
 function beginCountdown() {
   if (idx >= ORDER.length) { stop(); setCountdown('✓ Done'); return; }
-  var prev = idx > 0 ? ORDER[idx-1] : null;
-  var cur = ORDER[idx];
-  var swappingCard = !prev || prev.rank !== cur.rank || prev.suit !== cur.suit;
   var secs;
   if (firstStep) {
     secs = FIRST_DELAY_S;
     firstStep = false;
-  } else if (swappingCard) {
-    // extra time when user needs to grab a new card from the deck
-    secs = Math.max(8, parseInt(document.getElementById('delay').value, 10) || 5);
   } else {
     secs = Math.max(1, parseInt(document.getElementById('delay').value, 10) || 5);
   }
@@ -812,9 +811,18 @@ function fireCapture() {
 }
 
 function advance() {
+  var prev = ORDER[idx];
   idx++;
   if (idx >= ORDER.length) { stop(); setCountdown('✓ Done'); updateDisplay(); return; }
+  var cur = ORDER[idx];
   updateDisplay();
+  // Auto-pause at slot boundaries (every 52 captures)
+  if (prev && cur && prev.slot !== cur.slot) {
+    paused = true;
+    document.getElementById('pause').textContent = 'Resume';
+    setCountdown('⏸ slot ' + prev.slot + ' done — press Resume for slot ' + cur.slot);
+    return;
+  }
   beginCountdown();
 }
 
