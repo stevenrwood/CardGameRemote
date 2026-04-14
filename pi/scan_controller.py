@@ -612,6 +612,8 @@ var paused = false;
 var ticker = null;       // setInterval handle
 var remainingMs = 0;
 var flashing = false;    // true during capture network call
+var firstCard = true;    // give extra time before the very first capture
+var FIRST_DELAY_S = 30;
 
 function cardCode(c) { return c.rank + c.suit[0]; }
 function isRed(s) { return s === "hearts" || s === "diamonds"; }
@@ -687,6 +689,7 @@ function start() {
   // jump to first untrained card
   var first = status_.findIndex(function(c){return !c.trained;});
   if (first >= 0) idx = first;
+  firstCard = true;
   updateDisplay();
   renderGrid();
   beginCountdown();
@@ -718,7 +721,13 @@ function skipCurrent() {
 
 function beginCountdown() {
   if (idx >= ORDER.length) { stop(); setCountdown('✓ Done'); return; }
-  var secs = Math.max(1, parseInt(document.getElementById('delay').value, 10) || 5);
+  var secs;
+  if (firstCard) {
+    secs = FIRST_DELAY_S;
+    firstCard = false;
+  } else {
+    secs = Math.max(1, parseInt(document.getElementById('delay').value, 10) || 5);
+  }
   remainingMs = secs * 1000;
   setCountdown(secs.toString());
   if (ticker) clearInterval(ticker);
