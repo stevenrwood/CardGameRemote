@@ -797,18 +797,34 @@ def _build_table_state(s):
     """
     ge = s.game_engine
     current_game = ge.current_game.name if ge.current_game else None
+
+    # Accumulate up-card history by player from console_hand_cards (populated
+    # when the dealer confirms each up-card round). Fall back to the latest
+    # zone scan for any player missing from history — useful between rounds
+    # before the dealer has hit Confirm.
+    up_by_player = {}
+    for entry in s.console_hand_cards:
+        name = entry.get("player")
+        parsed = _parse_card_any(entry.get("card", ""))
+        if name and parsed:
+            up_by_player.setdefault(name, []).append(
+                {"rank": parsed["rank"], "suit": parsed["suit"], "round": entry.get("round")}
+            )
+
     players = []
     for p in ge.players:
-        zone_card_txt = s.monitor.last_card.get(p.name, "") if s.monitor else ""
-        details = s.monitor.recognition_details.get(p.name, {}) if s.monitor else {}
-        parsed = _parse_card_any(zone_card_txt)
-        up_cards = []
-        if parsed:
-            entry = {"rank": parsed["rank"], "suit": parsed["suit"]}
-            conf = details.get("yolo_conf")
-            if conf is not None:
-                entry["confidence"] = round(float(conf), 2)
-            up_cards.append(entry)
+        up_cards = list(up_by_player.get(p.name, []))
+        if not up_cards and s.monitor:
+            # Only show latest scan if we don't already have history for this player.
+            latest_txt = s.monitor.last_card.get(p.name, "")
+            latest_parsed = _parse_card_any(latest_txt)
+            if latest_parsed:
+                details = s.monitor.recognition_details.get(p.name, {})
+                conf = details.get("yolo_conf")
+                cur = {"rank": latest_parsed["rank"], "suit": latest_parsed["suit"]}
+                if conf is not None:
+                    cur["confidence"] = round(float(conf), 2)
+                up_cards.append(cur)
 
         entry = {
             "name": p.name,
