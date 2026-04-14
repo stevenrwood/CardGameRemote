@@ -516,22 +516,28 @@ def _slot_crop(slot_num: int, focus: bool = True):
     return crop, slot
 
 
-@app.post("/train/flash/hold")
-def train_flash_hold():
+@app.post("/flash/hold")
+def flash_hold():
     """Keep the flash LEDs on continuously. Captures during a hold skip
-    the warmup/AF-free wait, giving very short capture cycles and rock-steady
-    brightness. The UI calls this on Start/Resume and releases on
-    Stop/completion."""
+    the per-shot LED warmup, giving very short capture cycles and
+    rock-steady brightness. Useful during a dealing round so every
+    down-card capture has identical exposure without extra flicker.
+    """
     assert _state is not None
     _state.flash.hold()
     return jsonify({"ok": True, "held": True})
 
 
-@app.post("/train/flash/release")
-def train_flash_release():
+@app.post("/flash/release")
+def flash_release():
     assert _state is not None
     _state.flash.release()
     return jsonify({"ok": True, "held": False})
+
+
+# Backward-compat aliases for the old /train/flash/* paths
+app.add_url_rule("/train/flash/hold", view_func=flash_hold, methods=["POST"])
+app.add_url_rule("/train/flash/release", view_func=flash_release, methods=["POST"])
 
 
 @app.get("/train/status")
