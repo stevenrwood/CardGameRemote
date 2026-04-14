@@ -369,7 +369,12 @@ def slots_state():
             results.append({"slot": slot["slot"], "error": "crop out of bounds"})
             continue
         t0 = time.time()
-        res = _state.detector.identify(crop)
+        # Prefer real-image slot templates if any have been trained; fall back
+        # to the contour + corner-match path otherwise.
+        if _state.detector.slot_templates:
+            res = _state.detector.identify_slot(crop)
+        else:
+            res = _state.detector.identify(crop)
         ms = round((time.time() - t0) * 1000)
         entry = {"slot": slot["slot"], "camera": cam_idx, "ms": ms}
         if res is None:
@@ -428,6 +433,252 @@ def slots_image():
     if not ok:
         return "encode failed", 500
     return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg")
+
+
+RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]
+SUITS = ["clubs", "diamonds", "hearts", "spades"]
+
+
+def _slot_crop(slot_num: int, focus: bool = True):
+    """Capture the given slot (via its calibrated camera) and return the BGR crop.
+
+    Returns (crop_bgr, slot_meta) or (None, error_string).
+    """
+    assert _state is not None
+    slot = next((s for s in _state.calibration.get("slots", []) if s["slot"] == slot_num), None)
+    if slot is None:
+        return None, f"Slot {slot_num} not calibrated"
+    cam_idx = slot["camera"]
+    if cam_idx not in _state.cameras:
+        return None, f"Camera {cam_idx} not available"
+    frame = _state.capture_with_flash(cam_idx, focus=focus)
+    x, y, w, h = slot["x"], slot["y"], slot["w"], slot["h"]
+    crop = frame[y:y + h, x:x + w]
+    if crop.size == 0:
+        return None, "Crop out of bounds"
+    return crop, slot
+
+
+@app.get("/train/status")
+def train_status():
+    """Return the list of all 52 cards and which have trained templates."""
+    assert _state is not None
+    have = set(_state.detector.list_slot_templates())
+    cards = []
+    for rank in RANKS:
+        for suit in SUITS:
+            cards.append({
+                "rank": rank,
+                "suit": suit,
+                "trained": (rank, suit) in have,
+            })
+    return jsonify({"cards": cards, "count": len(have)})
+
+
+@app.post("/train/capture")
+def train_capture():
+    """Capture the reference slot and save it as a template for (rank, suit).
+
+    JSON body: {"rank": "A", "suit": "hearts", "slot": 4}
+    """
+    assert _state is not None
+    body = request.get_json(silent=True) or {}
+    rank = str(body.get("rank", "")).upper()
+    suit = str(body.get("suit", "")).lower()
+    slot_num = int(body.get("slot", 4))
+    if rank not in RANKS or suit not in SUITS:
+        return jsonify({"ok": False, "error": "bad rank/suit"}), 400
+    crop, meta = _slot_crop(slot_num, focus=True)
+    if crop is None:
+        return jsonify({"ok": False, "error": meta}), 400
+    _state.detector.save_slot_template(rank, suit, crop)
+    log.info(f"Trained template {rank}{suit[0]} from slot {slot_num}")
+    return jsonify({"ok": True, "rank": rank, "suit": suit, "count": len(_state.detector.slot_templates)})
+
+
+@app.delete("/train/capture/<card>")
+def train_delete(card: str):
+    assert _state is not None
+    import re
+    m = re.match(r"^(10|[2-9JQKA])([hdcs])$", card, re.IGNORECASE)
+    if not m:
+        return jsonify({"ok": False, "error": "bad card code"}), 400
+    rank = m.group(1).upper()
+    suit_map = {"h": "hearts", "d": "diamonds", "c": "clubs", "s": "spades"}
+    suit = suit_map[m.group(2).lower()]
+    path = _state.detector.slot_template_path(rank, suit)
+    if path.exists():
+        path.unlink()
+    _state.detector.reload_slot_templates()
+    return jsonify({"ok": True, "count": len(_state.detector.slot_templates)})
+
+
+@app.get("/train/template/<card>")
+def train_template_image(card: str):
+    """Return the stored template image for a card (so the UI can show thumbnails)."""
+    assert _state is not None
+    import re
+    m = re.match(r"^(10|[2-9JQKA])([hdcs])$", card, re.IGNORECASE)
+    if not m:
+        return "bad card code", 400
+    rank = m.group(1).upper()
+    suit_map = {"h": "hearts", "d": "diamonds", "c": "clubs", "s": "spades"}
+    suit = suit_map[m.group(2).lower()]
+    path = _state.detector.slot_template_path(rank, suit)
+    if not path.exists():
+        return "not trained", 404
+    return send_file(str(path), mimetype="image/png")
+
+
+@app.get("/train")
+def train_page():
+    return TRAIN_HTML
+
+
+TRAIN_HTML = """<!DOCTYPE html>
+<html><head><title>Train Card Templates</title>
+<style>
+body{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:12px;margin:0}
+h1{font-size:1.2em;margin:4px 0}
+#status{font-size:1em;color:#4fc3f7;margin:8px 0;padding:8px;background:#0f3460;border-radius:6px}
+button{padding:10px 16px;background:#0f3460;color:#fff;border:none;border-radius:6px;cursor:pointer;margin:3px;font-size:1em}
+button:hover{background:#1a5a9a}
+.btn-green{background:#1b5e20}
+.btn-red{background:#b71c1c}
+.current{padding:14px;background:#16213e;border-radius:8px;margin:8px 0;text-align:center}
+.current .card{font-size:2.5em;font-weight:700}
+.current .card.red{color:#ef5350}
+.current .card.black{color:#e0e0e0}
+.preview{margin:10px 0;text-align:center}
+.preview img{max-width:240px;border:2px solid #444;border-radius:6px}
+.grid{display:grid;grid-template-columns:repeat(13,1fr);gap:2px;margin-top:12px;font-size:.8em}
+.cell{padding:4px 2px;background:#16213e;border-radius:3px;text-align:center;cursor:pointer;border:1px solid transparent}
+.cell.trained{background:#1b5e20}
+.cell.current{border-color:#4fc3f7}
+.cell.red{color:#ef9a9a}
+.row-label{grid-column:1/-1;font-size:.85em;color:#aaa;margin-top:6px}
+.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+label{font-size:.9em}
+select{padding:8px;background:#0f3460;color:#fff;border:1px solid #333;border-radius:4px}
+</style></head><body>
+<h1>Train Card Templates</h1>
+<div id="status">Loading…</div>
+<div class="controls">
+  <label>Reference slot:
+    <select id="slot">
+      <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+      <option value="4" selected>4</option>
+      <option value="5">5</option><option value="6">6</option><option value="7">7</option>
+    </select>
+  </label>
+  <button onclick="refreshPreview()">Refresh Preview</button>
+</div>
+<div class="current">
+  <div>Insert this card into the reference slot:</div>
+  <div class="card" id="current-card">—</div>
+  <div class="controls" style="justify-content:center">
+    <button class="btn-green" onclick="captureCurrent()">Capture</button>
+    <button onclick="skipCurrent()">Skip</button>
+    <button class="btn-red" onclick="deleteCurrent()">Delete template</button>
+  </div>
+</div>
+<div class="preview">
+  <div style="font-size:.85em;color:#aaa">Live preview of reference slot:</div>
+  <img id="preview" src="" alt="preview"/>
+</div>
+<div id="grid" class="grid"></div>
+
+<script>
+var RANKS = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"];
+var SUITS = ["clubs","diamonds","hearts","spades"];
+var SUIT_SYM = {clubs:"♣",diamonds:"♦",hearts:"♥",spades:"♠"};
+var status_ = [];        // [{rank,suit,trained}]
+var idx = 0;
+
+function cardCode(r, s) { return r + s[0]; }
+function isRed(s) { return s === "hearts" || s === "diamonds"; }
+
+function refreshStatus() {
+  return fetch('/train/status').then(function(r){return r.json()}).then(function(d) {
+    status_ = d.cards;
+    renderGrid();
+    updateCurrent();
+    document.getElementById('status').textContent =
+      d.count + ' / 52 cards trained';
+  });
+}
+
+function renderGrid() {
+  var el = document.getElementById('grid');
+  el.innerHTML = '';
+  SUITS.forEach(function(s) {
+    var header = document.createElement('div');
+    header.className = 'row-label';
+    header.textContent = s[0].toUpperCase() + s.slice(1) + ' ' + SUIT_SYM[s];
+    el.appendChild(header);
+    RANKS.forEach(function(r) {
+      var c = status_.find(function(x){return x.rank===r && x.suit===s});
+      var cell = document.createElement('div');
+      cell.className = 'cell' + (c.trained?' trained':'') +
+        (isRed(s)?' red':'') +
+        (status_.indexOf(c)===idx?' current':'');
+      cell.textContent = r;
+      cell.onclick = function() { idx = status_.indexOf(c); updateCurrent(); };
+      el.appendChild(cell);
+    });
+  });
+}
+
+function updateCurrent() {
+  var c = status_[idx];
+  var el = document.getElementById('current-card');
+  el.textContent = c.rank + ' ' + SUIT_SYM[c.suit];
+  el.className = 'card ' + (isRed(c.suit)?'red':'black');
+  renderGrid();
+}
+
+function refreshPreview() {
+  var slot = document.getElementById('slot').value;
+  var img = document.getElementById('preview');
+  img.src = '/slots/' + slot + '/image?t=' + Date.now();
+}
+
+function captureCurrent() {
+  var c = status_[idx];
+  var slot = parseInt(document.getElementById('slot').value, 10);
+  fetch('/train/capture', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({rank: c.rank, suit: c.suit, slot: slot})
+  }).then(function(r){return r.json()}).then(function(d) {
+    if (!d.ok) { alert('Capture failed: ' + d.error); return; }
+    refreshStatus().then(function() {
+      // advance to next untrained card
+      skipCurrent();
+      refreshPreview();
+    });
+  });
+}
+
+function skipCurrent() {
+  for (var step = 1; step <= status_.length; step++) {
+    var next = (idx + step) % status_.length;
+    if (!status_[next].trained) { idx = next; updateCurrent(); return; }
+  }
+  idx = (idx + 1) % status_.length;
+  updateCurrent();
+}
+
+function deleteCurrent() {
+  var c = status_[idx];
+  if (!confirm('Delete template for ' + c.rank + ' of ' + c.suit + '?')) return;
+  fetch('/train/capture/' + cardCode(c.rank, c.suit), {method:'DELETE'})
+    .then(function(r){return r.json()}).then(function() { refreshStatus(); });
+}
+
+refreshStatus().then(refreshPreview);
+</script>
+</body></html>"""
 
 
 @app.get("/calibrate")

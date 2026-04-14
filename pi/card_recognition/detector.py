@@ -59,10 +59,16 @@ class CardResult:
 class CardDetector:
     """Identifies playing cards by matching corner regions against references."""
 
+    # Standard size for slot-template matching. Slot crops are resized to this
+    # for correlation; chosen tall+narrow to match our slot aspect ratio.
+    SLOT_TEMPLATE_SIZE = (96, 256)  # (width, height)
+
     def __init__(self, reference_dir: str):
         self.reference_dir = Path(reference_dir)
         self.corner_templates: dict[tuple[str, str], np.ndarray] = {}
+        self.slot_templates: dict[tuple[str, str], np.ndarray] = {}
         self._load_templates()
+        self.reload_slot_templates()
 
     def _load_templates(self):
         """Load corner reference templates. Expected structure: reference/corners/Kh.png"""
@@ -82,6 +88,72 @@ class CardDetector:
                 self.corner_templates[parsed] = img
 
         print(f"Loaded {len(self.corner_templates)} corner templates")
+
+    def reload_slot_templates(self):
+        """Load real-image slot templates from reference/slot_templates/<card>.png.
+
+        Each file is a BGR crop of a known card in the reference slot. We
+        pre-compute the preprocessed/resized match image for each at load time.
+        """
+        self.slot_templates = {}
+        d = self.reference_dir / "slot_templates"
+        if not d.exists():
+            return
+        for f in sorted(d.iterdir()):
+            if f.suffix.lower() not in (".png", ".jpg"):
+                continue
+            parsed = self._parse_card_name(f.stem)
+            if parsed is None:
+                continue
+            bgr = cv2.imread(str(f), cv2.IMREAD_COLOR)
+            if bgr is None:
+                continue
+            self.slot_templates[parsed] = self._prep_slot_crop(bgr)
+        print(f"Loaded {len(self.slot_templates)} slot templates")
+
+    def slot_template_path(self, rank: str, suit: str) -> Path:
+        d = self.reference_dir / "slot_templates"
+        d.mkdir(parents=True, exist_ok=True)
+        suit_letter = suit[0].lower()
+        return d / f"{rank}{suit_letter}.png"
+
+    def save_slot_template(self, rank: str, suit: str, crop_bgr: np.ndarray):
+        """Persist a BGR slot crop as a reference template and update cache."""
+        path = self.slot_template_path(rank, suit)
+        cv2.imwrite(str(path), crop_bgr)
+        self.slot_templates[(rank, suit)] = self._prep_slot_crop(crop_bgr)
+
+    def list_slot_templates(self) -> list[tuple[str, str]]:
+        return sorted(self.slot_templates.keys())
+
+    def _prep_slot_crop(self, bgr: np.ndarray) -> np.ndarray:
+        """Convert a slot crop to the normalized ink image used for matching."""
+        ink = self._preprocess_corner(bgr)   # works on any BGR card region
+        return cv2.resize(ink, self.SLOT_TEMPLATE_SIZE)
+
+    def identify_slot(self, crop_bgr: np.ndarray) -> CardResult | None:
+        """Identify a card from a pre-cropped slot image.
+
+        Skips contour-based card extraction — the crop IS the card. Preprocesses
+        the whole crop to a suit-aware ink image, resizes to a standard size,
+        and correlates against each loaded slot template at 0° and 180°.
+        """
+        if not self.slot_templates:
+            return None
+        base = self._prep_slot_crop(crop_bgr)
+        flipped = cv2.rotate(base, cv2.ROTATE_180)
+        best = None
+        best_score = -1.0
+        for (rank, suit), tmpl in self.slot_templates.items():
+            for candidate in (base, flipped):
+                r = cv2.matchTemplate(candidate, tmpl, cv2.TM_CCOEFF_NORMED)
+                score = float(r[0][0])
+                if score > best_score:
+                    best_score = score
+                    best = (rank, suit)
+        if best is None:
+            return None
+        return CardResult(rank=best[0], suit=best[1], confidence=max(0.0, best_score))
 
     def _parse_card_name(self, name: str) -> tuple[str, str] | None:
         """Parse 'Kh' or '10s' into ('K', 'hearts')."""
