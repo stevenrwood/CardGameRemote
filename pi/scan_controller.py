@@ -2,18 +2,19 @@
 """
 Scanner box controller service (runs on Pi).
 
-Minimal v1: capture from one camera with flash LED pulse, recognize the card
-using card_recognition.detector, return result over HTTP. No slot cropping
-yet — that requires calibration against assembled hardware.
+Captures from CM4 dual cameras with flash LED pulse, recognizes cards using
+card_recognition.detector. No slot cropping yet — that requires calibration
+against assembled hardware.
 
 Usage:
-    python scan_controller.py [--port 8080] [--camera 0]
+    python scan_controller.py [--port 8080] [--cameras 0,1]
 
 Endpoints:
-    GET  /ping            — health check
-    GET  /capture         — flash + capture + recognize, returns JSON
-    GET  /capture/image   — same as /capture but returns JPEG
-    POST /flash_test      — pulse flash LEDs for hardware verification
+    GET  /ping              — health check
+    GET  /capture?camera=N  — flash + capture on camera N, return JSON (default: 0)
+    GET  /capture/image?camera=N — same but return JPEG
+    GET  /capture/both      — capture from all cameras in one flash, return combined JPEG
+    POST /flash_test        — pulse flash LEDs for hardware verification
 """
 
 import argparse
@@ -131,24 +132,37 @@ class Camera:
 # ---- App state ----
 
 class AppState:
-    def __init__(self, camera_index: int):
+    def __init__(self, camera_indices: list[int]):
         self.flash = Flash(FLASH_GPIO)
-        self.camera = Camera(camera_index)
+        self.cameras: dict[int, Camera] = {}
+        for idx in camera_indices:
+            self.cameras[idx] = Camera(idx)
         self.detector = CardDetector(str(REFERENCE_DIR))
-        self.last_frame: np.ndarray | None = None
-        log.info("Scan controller ready")
+        self.last_frames: dict[int, np.ndarray] = {}
+        log.info(f"Scan controller ready with {len(self.cameras)} cameras")
 
-    def capture_with_flash(self) -> np.ndarray:
-        """Turn flash on, capture frame while lit, turn flash off."""
+    def capture_with_flash(self, camera_idx: int) -> np.ndarray:
+        """Turn flash on, capture from specified camera while lit, turn flash off."""
+        cam = self.cameras[camera_idx]
         self.flash.on()
         try:
-            # Small settle delay so sensor stabilizes with LED light
             time.sleep(0.05)
-            frame = self.camera.capture()
+            frame = cam.capture()
         finally:
             self.flash.off()
-        self.last_frame = frame
+        self.last_frames[camera_idx] = frame
         return frame
+
+    def capture_both(self) -> dict[int, np.ndarray]:
+        """Capture from all cameras during one flash pulse."""
+        self.flash.on()
+        try:
+            time.sleep(0.05)
+            frames = {idx: cam.capture() for idx, cam in self.cameras.items()}
+        finally:
+            self.flash.off()
+        self.last_frames.update(frames)
+        return frames
 
     def recognize(self, frame: np.ndarray) -> dict:
         t0 = time.time()
@@ -174,21 +188,51 @@ def ping():
     return jsonify({"ok": True, "camera": _CAMERA_OK, "gpio": _GPIO_OK})
 
 
+def _pick_camera(default: int = 0) -> int:
+    """Read ?camera=N from query string, default to first available camera."""
+    assert _state is not None
+    try:
+        idx = int(request.args.get("camera", default))
+    except ValueError:
+        idx = default
+    if idx not in _state.cameras:
+        # Fall back to any available camera
+        return next(iter(_state.cameras))
+    return idx
+
+
 @app.get("/capture")
 def capture():
     assert _state is not None
-    frame = _state.capture_with_flash()
+    idx = _pick_camera()
+    frame = _state.capture_with_flash(idx)
     result = _state.recognize(frame)
     result["size"] = f"{frame.shape[1]}x{frame.shape[0]}"
-    log.info(f"Capture: {result}")
+    result["camera"] = idx
+    log.info(f"Capture cam{idx}: {result}")
     return jsonify(result)
 
 
 @app.get("/capture/image")
 def capture_image():
     assert _state is not None
-    frame = _state.capture_with_flash()
+    idx = _pick_camera()
+    frame = _state.capture_with_flash(idx)
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        return "encode failed", 500
+    return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg")
+
+
+@app.get("/capture/both")
+def capture_both():
+    """Capture from all cameras in a single flash and return both JPEGs side-by-side."""
+    assert _state is not None
+    frames = _state.capture_both()
+    # Stack horizontally for a single combined image
+    ordered = [frames[i] for i in sorted(frames.keys())]
+    combined = np.hstack(ordered) if len(ordered) > 1 else ordered[0]
+    ok, buf = cv2.imencode(".jpg", combined, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not ok:
         return "encode failed", 500
     return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg")
@@ -211,12 +255,15 @@ def flash_test():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--camera", type=int, default=0)
+    parser.add_argument("--cameras", type=str, default="0,1",
+                        help="Comma-separated camera indices (default: 0,1 for both CM4 CSI ports)")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     args = parser.parse_args()
 
+    indices = [int(x.strip()) for x in args.cameras.split(",") if x.strip()]
+
     global _state
-    _state = AppState(camera_index=args.camera)
+    _state = AppState(camera_indices=indices)
 
     log.info(f"Listening on http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
