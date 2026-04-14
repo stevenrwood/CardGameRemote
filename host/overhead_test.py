@@ -1585,13 +1585,11 @@ header .meta{color:#aaa}
 .player .name{font-weight:700;margin-bottom:4px;display:flex;justify-content:space-between;align-items:baseline}
 .player .tags{font-size:.75em;color:#aaa}
 .hand{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;min-height:70px}
-.card{width:46px;height:64px;border-radius:4px;background:#fff;color:#000;display:flex;flex-direction:column;justify-content:space-between;padding:3px 5px;font-weight:700;font-size:.9em;border:1px solid #333;position:relative}
-.card.red{color:#d32f2f}
-.card.down{background:repeating-linear-gradient(45deg,#1a3a5a 0,#1a3a5a 4px,#0f2740 4px,#0f2740 8px);color:transparent;border-color:#4fc3f7}
-.card.down.hidden{background:#224;color:transparent}
+.card{width:60px;height:84px;border-radius:6px;overflow:hidden;background:#fff;border:1px solid #333;position:relative;box-shadow:0 1px 2px rgba(0,0,0,.4)}
+.card img{width:100%;height:100%;display:block;object-fit:contain;background:#fff}
 .card.offset-down{margin-top:10px}
-.card .rank{font-size:1.1em}
-.card .suit{text-align:right;font-size:1.1em;line-height:1}
+.card.down img{background:#2b3a55}
+.card.missing{background:#1a3a5a;border-color:#4fc3f7;display:flex;align-items:center;justify-content:center;color:#eee;font-size:.8em}
 .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:14px}
 .toolbar button{padding:6px 12px;background:#0f3460;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.9em}
 .toolbar button.active{background:#1b5e20}
@@ -1658,26 +1656,33 @@ function toggleSort() {
 
 function isRed(suit) { return suit === "hearts" || suit === "diamonds"; }
 
+var RANK_FILE = {"2":"2","3":"3","4":"4","5":"5","6":"6","7":"7","8":"8","9":"9","10":"10",
+                 "J":"jack","Q":"queen","K":"king","A":"ace"};
+
+function cardPngUrl(rank, suit) {
+  var r = RANK_FILE[rank];
+  if (!r || !suit) return null;
+  return '/cards/' + r + '_of_' + suit + '.png';
+}
+
 function cardEl(card) {
   var el = document.createElement('div');
   el.className = 'card';
-  if (card.type === 'down') {
+  if (card.type === 'down' && (card.hidden || !card.rank)) {
+    var back = document.createElement('img');
+    back.src = '/cards/back.png';
+    back.alt = 'card back';
     el.classList.add('down');
-    if (card.hidden || !card.rank) {
-      el.classList.add('hidden');
-      return el;
-    }
-    // Rodney's own down card: show it, offset below up cards
-    el.classList.add('offset-down');
+    el.appendChild(back);
+    return el;
   }
-  if (isRed(card.suit)) el.classList.add('red');
-  var r = document.createElement('div');
-  r.className = 'rank';
-  r.textContent = card.rank || '';
-  var s = document.createElement('div');
-  s.className = 'suit';
-  s.textContent = SUIT_SYM[card.suit] || '';
-  el.appendChild(r); el.appendChild(s);
+  if (card.type === 'down') el.classList.add('offset-down');
+  var url = cardPngUrl(card.rank, card.suit);
+  if (!url) { el.classList.add('missing'); el.textContent = '?'; return el; }
+  var img = document.createElement('img');
+  img.src = url;
+  img.alt = (card.rank || '') + (SUIT_SYM[card.suit] || '');
+  el.appendChild(img);
   return el;
 }
 
@@ -1835,6 +1840,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._zone_img(s, p[6:])
         elif p.startswith("/training/"):
             self._training_file(p[10:])
+        elif p.startswith("/cards/"):
+            self._card_png(p[7:])
         else:
             self._r(404,"text/plain","Not found")
 
@@ -3253,6 +3260,25 @@ refresh();
         if not p.exists(): return self._r(404,"text/plain","Not found")
         self._r(200, "image/jpeg" if p.suffix==".jpg" else "text/plain",
                 p.read_bytes() if p.suffix==".jpg" else p.read_text())
+
+    def _card_png(self, name):
+        """Serve a pretty card PNG from host/static/cards/. Guards against
+        path traversal by resolving and checking the parent dir."""
+        root = (Path(__file__).parent / "static" / "cards").resolve()
+        p = (root / name).resolve()
+        try:
+            p.relative_to(root)
+        except ValueError:
+            return self._r(404, "text/plain", "Not found")
+        if not p.exists() or p.suffix.lower() != ".png":
+            return self._r(404, "text/plain", "Not found")
+        data = p.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(data)
 
 
 # ---------------------------------------------------------------------------
