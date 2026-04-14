@@ -12,6 +12,7 @@ Usage:
 """
 
 import os
+import re
 import cv2
 import numpy as np
 from dataclasses import dataclass
@@ -66,7 +67,8 @@ class CardDetector:
     def __init__(self, reference_dir: str):
         self.reference_dir = Path(reference_dir)
         self.corner_templates: dict[tuple[str, str], np.ndarray] = {}
-        self.slot_templates: dict[tuple[str, str], np.ndarray] = {}
+        # Per-slot template cache: slot_num -> {(rank, suit): prep_image}
+        self.slot_templates: dict[int, dict[tuple[str, str], np.ndarray]] = {}
         self._load_templates()
         self.reload_slot_templates()
 
@@ -90,61 +92,97 @@ class CardDetector:
         print(f"Loaded {len(self.corner_templates)} corner templates")
 
     def reload_slot_templates(self):
-        """Load real-image slot templates from reference/slot_templates/<card>.png.
+        """Load per-slot templates from reference/slot_templates/slot<N>/<card>.png.
 
-        Each file is a BGR crop of a known card in the reference slot. We
-        pre-compute the preprocessed/resized match image for each at load time.
+        Also migrates any legacy flat layout (slot_templates/<card>.png) into
+        slot4/ on first load, so existing training data isn't lost.
         """
-        self.slot_templates = {}
-        d = self.reference_dir / "slot_templates"
-        if not d.exists():
+        root = self.reference_dir / "slot_templates"
+        if not root.exists():
+            self.slot_templates = {}
             return
-        for f in sorted(d.iterdir()):
-            if f.suffix.lower() not in (".png", ".jpg"):
-                continue
-            parsed = self._parse_card_name(f.stem)
-            if parsed is None:
-                continue
-            bgr = cv2.imread(str(f), cv2.IMREAD_COLOR)
-            if bgr is None:
-                continue
-            self.slot_templates[parsed] = self._prep_slot_crop(bgr)
-        print(f"Loaded {len(self.slot_templates)} slot templates")
+        # One-time migration of legacy flat files → slot4/
+        legacy = [f for f in root.iterdir() if f.is_file() and f.suffix.lower() in (".png", ".jpg")]
+        if legacy:
+            dest = root / "slot4"
+            dest.mkdir(exist_ok=True)
+            for f in legacy:
+                if self._parse_card_name(f.stem) is None:
+                    continue
+                f.rename(dest / f.name)
+            print(f"Migrated {len(legacy)} legacy slot templates into slot4/")
 
-    def slot_template_path(self, rank: str, suit: str) -> Path:
-        d = self.reference_dir / "slot_templates"
+        self.slot_templates = {}
+        for slot_dir in sorted(root.iterdir()):
+            if not slot_dir.is_dir():
+                continue
+            m = re.match(r"^slot(\d+)$", slot_dir.name)
+            if not m:
+                continue
+            slot_num = int(m.group(1))
+            entries: dict[tuple[str, str], np.ndarray] = {}
+            for f in sorted(slot_dir.iterdir()):
+                if f.suffix.lower() not in (".png", ".jpg"):
+                    continue
+                parsed = self._parse_card_name(f.stem)
+                if parsed is None:
+                    continue
+                bgr = cv2.imread(str(f), cv2.IMREAD_COLOR)
+                if bgr is None:
+                    continue
+                entries[parsed] = self._prep_slot_crop(bgr)
+            if entries:
+                self.slot_templates[slot_num] = entries
+        total = sum(len(v) for v in self.slot_templates.values())
+        print(f"Loaded slot templates: {total} across {len(self.slot_templates)} slots")
+
+    def slot_template_path(self, slot_num: int, rank: str, suit: str) -> Path:
+        d = self.reference_dir / "slot_templates" / f"slot{slot_num}"
         d.mkdir(parents=True, exist_ok=True)
         suit_letter = suit[0].lower()
         return d / f"{rank}{suit_letter}.png"
 
-    def save_slot_template(self, rank: str, suit: str, crop_bgr: np.ndarray):
-        """Persist a BGR slot crop as a reference template and update cache."""
-        path = self.slot_template_path(rank, suit)
+    def save_slot_template(self, slot_num: int, rank: str, suit: str, crop_bgr: np.ndarray):
+        """Persist a BGR slot crop as a reference template for a specific slot."""
+        path = self.slot_template_path(slot_num, rank, suit)
         cv2.imwrite(str(path), crop_bgr)
-        self.slot_templates[(rank, suit)] = self._prep_slot_crop(crop_bgr)
+        self.slot_templates.setdefault(slot_num, {})[(rank, suit)] = self._prep_slot_crop(crop_bgr)
 
-    def list_slot_templates(self) -> list[tuple[str, str]]:
-        return sorted(self.slot_templates.keys())
+    def list_slot_templates(self, slot_num: int | None = None) -> dict[int, list[tuple[str, str]]]:
+        """Return {slot_num: [(rank, suit), ...]}. If slot_num given, only that slot."""
+        if slot_num is not None:
+            return {slot_num: sorted(self.slot_templates.get(slot_num, {}).keys())}
+        return {n: sorted(v.keys()) for n, v in self.slot_templates.items()}
+
+    def has_any_slot_templates(self) -> bool:
+        return any(self.slot_templates.values())
 
     def _prep_slot_crop(self, bgr: np.ndarray) -> np.ndarray:
         """Convert a slot crop to the normalized ink image used for matching."""
         ink = self._preprocess_corner(bgr)   # works on any BGR card region
         return cv2.resize(ink, self.SLOT_TEMPLATE_SIZE)
 
-    def identify_slot(self, crop_bgr: np.ndarray) -> CardResult | None:
+    def identify_slot(self, crop_bgr: np.ndarray, slot_num: int | None = None) -> CardResult | None:
         """Identify a card from a pre-cropped slot image.
 
-        Skips contour-based card extraction — the crop IS the card. Preprocesses
-        the whole crop to a suit-aware ink image, resizes to a standard size,
-        and correlates against each loaded slot template at 0° and 180°.
+        If slot_num is given and that slot has trained templates, match against
+        only those. Otherwise fall back to matching against every loaded
+        template (union across slots) — useful while partial training data
+        exists.
         """
-        if not self.slot_templates:
+        if slot_num is not None and slot_num in self.slot_templates:
+            templates = self.slot_templates[slot_num]
+        else:
+            templates = {}
+            for per_slot in self.slot_templates.values():
+                templates.update(per_slot)
+        if not templates:
             return None
         base = self._prep_slot_crop(crop_bgr)
         flipped = cv2.rotate(base, cv2.ROTATE_180)
         best = None
         best_score = -1.0
-        for (rank, suit), tmpl in self.slot_templates.items():
+        for (rank, suit), tmpl in templates.items():
             for candidate in (base, flipped):
                 r = cv2.matchTemplate(candidate, tmpl, cv2.TM_CCOEFF_NORMED)
                 score = float(r[0][0])

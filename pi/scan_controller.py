@@ -376,8 +376,8 @@ def slots_state():
         t0 = time.time()
         # Prefer real-image slot templates if any have been trained; fall back
         # to the contour + corner-match path otherwise.
-        if _state.detector.slot_templates:
-            res = _state.detector.identify_slot(crop)
+        if _state.detector.has_any_slot_templates():
+            res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
         else:
             res = _state.detector.identify(crop)
         ms = round((time.time() - t0) * 1000)
@@ -476,23 +476,23 @@ def _slot_crop(slot_num: int, focus: bool = True):
 
 @app.get("/train/status")
 def train_status():
-    """Return the list of all 52 cards and which have trained templates."""
+    """Return per-slot training status: which (slot, card) pairs are trained."""
     assert _state is not None
-    have = set(_state.detector.list_slot_templates())
-    cards = []
-    for rank in RANKS:
-        for suit in SUITS:
-            cards.append({
-                "rank": rank,
-                "suit": suit,
-                "trained": (rank, suit) in have,
-            })
-    return jsonify({"cards": cards, "count": len(have)})
+    per_slot = _state.detector.list_slot_templates()  # {slot: [(rank, suit), ...]}
+    trained = {}
+    for slot_num in range(1, 8):
+        have = set(per_slot.get(slot_num, []))
+        trained[slot_num] = {
+            f"{rank}{suit[0]}": (rank, suit) in have
+            for rank in RANKS for suit in SUITS
+        }
+    total = sum(sum(1 for v in s.values() if v) for s in trained.values())
+    return jsonify({"slots": trained, "count": total, "expected": 7 * 52})
 
 
 @app.post("/train/capture")
 def train_capture():
-    """Capture the reference slot and save it as a template for (rank, suit).
+    """Capture a specific slot and save its image as a per-slot template.
 
     JSON body: {"rank": "A", "suit": "hearts", "slot": 4}
     """
@@ -503,16 +503,18 @@ def train_capture():
     slot_num = int(body.get("slot", 4))
     if rank not in RANKS or suit not in SUITS:
         return jsonify({"ok": False, "error": "bad rank/suit"}), 400
+    if slot_num < 1 or slot_num > 7:
+        return jsonify({"ok": False, "error": "slot must be 1..7"}), 400
     crop, meta = _slot_crop(slot_num, focus=True)
     if crop is None:
         return jsonify({"ok": False, "error": meta}), 400
-    _state.detector.save_slot_template(rank, suit, crop)
-    log.info(f"Trained template {rank}{suit[0]} from slot {slot_num}")
-    return jsonify({"ok": True, "rank": rank, "suit": suit, "count": len(_state.detector.slot_templates)})
+    _state.detector.save_slot_template(slot_num, rank, suit, crop)
+    log.info(f"Trained template slot{slot_num}/{rank}{suit[0]}")
+    return jsonify({"ok": True, "slot": slot_num, "rank": rank, "suit": suit})
 
 
-@app.delete("/train/capture/<card>")
-def train_delete(card: str):
+@app.delete("/train/capture/<int:slot_num>/<card>")
+def train_delete(slot_num: int, card: str):
     assert _state is not None
     import re
     m = re.match(r"^(10|[2-9JQKA])([hdcs])$", card, re.IGNORECASE)
@@ -521,16 +523,16 @@ def train_delete(card: str):
     rank = m.group(1).upper()
     suit_map = {"h": "hearts", "d": "diamonds", "c": "clubs", "s": "spades"}
     suit = suit_map[m.group(2).lower()]
-    path = _state.detector.slot_template_path(rank, suit)
+    path = _state.detector.slot_template_path(slot_num, rank, suit)
     if path.exists():
         path.unlink()
     _state.detector.reload_slot_templates()
-    return jsonify({"ok": True, "count": len(_state.detector.slot_templates)})
+    return jsonify({"ok": True})
 
 
-@app.get("/train/template/<card>")
-def train_template_image(card: str):
-    """Return the stored template image for a card (so the UI can show thumbnails)."""
+@app.get("/train/template/<int:slot_num>/<card>")
+def train_template_image(slot_num: int, card: str):
+    """Return the stored template image for a (slot, card) pair."""
     assert _state is not None
     import re
     m = re.match(r"^(10|[2-9JQKA])([hdcs])$", card, re.IGNORECASE)
@@ -539,7 +541,7 @@ def train_template_image(card: str):
     rank = m.group(1).upper()
     suit_map = {"h": "hearts", "d": "diamonds", "c": "clubs", "s": "spades"}
     suit = suit_map[m.group(2).lower()]
-    path = _state.detector.slot_template_path(rank, suit)
+    path = _state.detector.slot_template_path(slot_num, rank, suit)
     if not path.exists():
         return "not trained", 404
     return send_file(str(path), mimetype="image/png")
@@ -563,127 +565,154 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .btn-red{background:#b71c1c}
 .now{padding:22px;background:#16213e;border-radius:10px;margin:10px 0;text-align:center}
 .now .label{font-size:.95em;color:#aaa;margin-bottom:6px}
-.now .card{font-size:4em;font-weight:700;line-height:1}
+.now .card{font-size:3.5em;font-weight:700;line-height:1}
 .now .card.red{color:#ef5350}
 .now .card.black{color:#e0e0e0}
-.now .countdown{font-size:3.5em;font-weight:700;margin-top:10px;color:#ffb74d}
+.now .slot-line{font-size:1.6em;margin-top:8px;color:#ffd54f}
+.now .countdown{font-size:3em;font-weight:700;margin-top:10px;color:#ffb74d}
 .now.flashing{background:#1b5e20}
 .now.flashing .countdown{color:#e0e0e0}
 .next{padding:10px;background:#0d1b2a;border-radius:8px;margin:8px 0;text-align:center;font-size:.95em;color:#aaa}
-.next .card{font-size:1.4em;font-weight:600;color:#e0e0e0;margin-left:8px}
-.next .card.red{color:#ef9a9a}
-.grid{display:grid;grid-template-columns:repeat(13,1fr);gap:2px;margin-top:12px;font-size:.8em}
-.cell{padding:4px 2px;background:#16213e;border-radius:3px;text-align:center;border:1px solid transparent}
-.cell.trained{background:#1b5e20}
-.cell.active{border-color:#4fc3f7;background:#0f3460}
-.cell.red{color:#ef9a9a}
-.row-label{grid-column:1/-1;font-size:.85em;color:#aaa;margin-top:6px}
+.next .line{margin:3px 0}
+.matrix{margin-top:14px;overflow-x:auto}
+table.matrix-table{border-collapse:collapse;font-size:.72em;min-width:100%}
+table.matrix-table th,table.matrix-table td{padding:2px 4px;border:1px solid #222;text-align:center}
+table.matrix-table th{background:#0f3460;color:#fff}
+table.matrix-table td.trained{background:#1b5e20}
+table.matrix-table td.active{outline:2px solid #4fc3f7}
+table.matrix-table td.red{color:#ef9a9a}
 .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
 label{font-size:.9em}
-select,input[type=number]{padding:8px;background:#0f3460;color:#fff;border:1px solid #333;border-radius:4px;width:4em}
+input[type=number]{padding:8px;background:#0f3460;color:#fff;border:1px solid #333;border-radius:4px;width:4em}
 </style></head><body>
 <h1>Train Card Templates</h1>
 <div id="status">Loading…</div>
 <div class="controls">
-  <label>Reference slot:
-    <select id="slot">
-      <option value="1">1</option><option value="2">2</option><option value="3">3</option>
-      <option value="4" selected>4</option>
-      <option value="5">5</option><option value="6">6</option><option value="7">7</option>
-    </select>
-  </label>
-  <label>Seconds per card: <input id="delay" type="number" min="1" max="20" value="5"/></label>
+  <label>Seconds per slot: <input id="delay" type="number" min="1" max="20" value="5"/></label>
   <button id="start" class="btn-green" onclick="start()">Start</button>
   <button id="pause" onclick="togglePause()" disabled>Pause</button>
   <button id="skip" onclick="skipCurrent()" disabled>Skip</button>
   <button id="reset" class="btn-red" onclick="resetAll()">Reset All</button>
 </div>
 <div class="now" id="now">
-  <div class="label">Insert this card into the reference slot:</div>
+  <div class="label">Insert this card:</div>
   <div class="card" id="current-card">—</div>
+  <div class="slot-line">into <b id="current-slot">slot —</b></div>
   <div class="countdown" id="countdown">—</div>
 </div>
 <div class="next">
-  Next: <span class="card" id="next-card">—</span>
+  <div class="line">Next slot for this card: <b id="next-slot">—</b></div>
+  <div class="line">Next card (after this one): <b id="next-card">—</b></div>
 </div>
-<div id="grid" class="grid"></div>
+<div class="matrix">
+  <table class="matrix-table" id="matrix"></table>
+</div>
 
 <script>
 var RANKS = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"];
 var SUITS = ["clubs","diamonds","hearts","spades"];
 var SUIT_SYM = {clubs:"♣",diamonds:"♦",hearts:"♥",spades:"♠"};
-var ORDER = [];  // fixed training order: 2C,2D,2H,2S,3C,... (same as YOLO training)
-RANKS.forEach(function(r){ SUITS.forEach(function(s){ ORDER.push({rank:r, suit:s}); }); });
+var SLOTS = [1,2,3,4,5,6,7];
 
-var status_ = [];        // [{rank,suit,trained}]
-var idx = 0;             // current position in ORDER
+// ORDER: for each card (2C,2D,2H,2S,3C,...,AS), iterate all 7 slots.
+// So the user holds one card and moves it through all slots before swapping.
+var ORDER = [];
+RANKS.forEach(function(r){
+  SUITS.forEach(function(s){
+    SLOTS.forEach(function(slot){
+      ORDER.push({rank:r, suit:s, slot:slot});
+    });
+  });
+});
+
+var trainedMap = {};     // "<slot>/<rank><suitLetter>" -> true
+var idx = 0;
 var running = false;
 var paused = false;
-var ticker = null;       // setInterval handle
+var ticker = null;
 var remainingMs = 0;
-var flashing = false;    // true during capture network call
-var firstCard = true;    // give extra time before the very first capture
+var flashing = false;
+var firstStep = true;
 var FIRST_DELAY_S = 30;
 
-function cardCode(c) { return c.rank + c.suit[0]; }
+function cardCode(r, s) { return r + s[0]; }
+function key(step) { return step.slot + "/" + cardCode(step.rank, step.suit); }
 function isRed(s) { return s === "hearts" || s === "diamonds"; }
-function cardByIdx(i) { return ORDER[i]; }
+function isTrained(step) { return !!trainedMap[key(step)]; }
 
 function refreshStatus() {
   return fetch('/train/status').then(function(r){return r.json()}).then(function(d) {
-    // build a map for fast trained lookup
-    var m = {};
-    d.cards.forEach(function(c){ m[cardCode(c)] = c.trained; });
-    status_ = ORDER.map(function(c){
-      return {rank:c.rank, suit:c.suit, trained: !!m[cardCode(c)]};
+    trainedMap = {};
+    Object.keys(d.slots).forEach(function(slot) {
+      var cards = d.slots[slot];
+      Object.keys(cards).forEach(function(cc) {
+        if (cards[cc]) trainedMap[slot + "/" + cc] = true;
+      });
     });
-    document.getElementById('status').textContent = d.count + ' / 52 cards trained';
-    renderGrid();
+    document.getElementById('status').textContent =
+      d.count + ' / ' + d.expected + ' (slot,card) pairs trained';
+    renderMatrix();
     updateDisplay();
   });
 }
 
-function renderGrid() {
-  var el = document.getElementById('grid');
-  el.innerHTML = '';
-  SUITS.forEach(function(s) {
-    var header = document.createElement('div');
-    header.className = 'row-label';
-    header.textContent = s[0].toUpperCase() + s.slice(1) + ' ' + SUIT_SYM[s];
-    el.appendChild(header);
-    RANKS.forEach(function(r) {
-      var i = ORDER.findIndex(function(c){return c.rank===r && c.suit===s;});
-      var c = status_[i] || {trained:false};
-      var cell = document.createElement('div');
-      cell.className = 'cell' + (c.trained?' trained':'') +
-        (isRed(s)?' red':'') +
-        (i===idx?' active':'');
-      cell.textContent = r;
-      el.appendChild(cell);
+function renderMatrix() {
+  var t = document.getElementById('matrix');
+  // header row: slot numbers
+  var html = '<tr><th></th>';
+  SLOTS.forEach(function(s){ html += '<th>Slot ' + s + '</th>'; });
+  html += '</tr>';
+  RANKS.forEach(function(r) {
+    SUITS.forEach(function(s) {
+      html += '<tr><th' + (isRed(s)?' class="red"':'') + '>' + r + SUIT_SYM[s] + '</th>';
+      SLOTS.forEach(function(slot) {
+        var step = {rank:r, suit:s, slot:slot};
+        var isActive = (ORDER[idx] &&
+          ORDER[idx].rank===r && ORDER[idx].suit===s && ORDER[idx].slot===slot);
+        var cls = [];
+        if (isTrained(step)) cls.push('trained');
+        if (isActive) cls.push('active');
+        if (isRed(s)) cls.push('red');
+        html += '<td class="' + cls.join(' ') + '">' + (isTrained(step)?'✓':'') + '</td>';
+      });
+      html += '</tr>';
     });
   });
+  t.innerHTML = html;
+}
+
+function describeStep(step) {
+  return step.rank + SUIT_SYM[step.suit];
 }
 
 function updateDisplay() {
-  var c = ORDER[idx];
+  var step = ORDER[idx];
+  if (!step) return;
   var cur = document.getElementById('current-card');
-  cur.textContent = c.rank + ' ' + SUIT_SYM[c.suit];
-  cur.className = 'card ' + (isRed(c.suit)?'red':'black');
-  var n = ORDER[idx+1];
-  var nx = document.getElementById('next-card');
-  if (n) {
-    nx.textContent = n.rank + ' ' + SUIT_SYM[n.suit];
-    nx.className = 'card ' + (isRed(n.suit)?'red':'');
+  cur.textContent = step.rank + ' ' + SUIT_SYM[step.suit];
+  cur.className = 'card ' + (isRed(step.suit)?'red':'black');
+  document.getElementById('current-slot').textContent = 'slot ' + step.slot;
+  // next slot for this card (same rank+suit)
+  var nxt = ORDER[idx+1];
+  var nextSlotEl = document.getElementById('next-slot');
+  if (nxt && nxt.rank===step.rank && nxt.suit===step.suit) {
+    nextSlotEl.textContent = 'slot ' + nxt.slot;
   } else {
-    nx.textContent = '— (finished)';
-    nx.className = 'card';
+    nextSlotEl.textContent = '— (this is last slot for this card)';
   }
+  // next card = first step with a different (rank,suit)
+  var nextCard = null;
+  for (var i = idx+1; i < ORDER.length; i++) {
+    if (ORDER[i].rank !== step.rank || ORDER[i].suit !== step.suit) {
+      nextCard = ORDER[i]; break;
+    }
+  }
+  var ncEl = document.getElementById('next-card');
+  ncEl.textContent = nextCard ? describeStep(nextCard) : '— (training complete)';
+  renderMatrix();
 }
 
-function setCountdown(text) {
-  document.getElementById('countdown').textContent = text;
-}
-
+function setCountdown(text) { document.getElementById('countdown').textContent = text; }
 function setFlashing(on) {
   flashing = on;
   document.getElementById('now').className = 'now' + (on?' flashing':'');
@@ -696,12 +725,11 @@ function start() {
   document.getElementById('start').disabled = true;
   document.getElementById('pause').disabled = false;
   document.getElementById('skip').disabled = false;
-  // jump to first untrained card
-  var first = status_.findIndex(function(c){return !c.trained;});
+  // jump to first untrained step
+  var first = ORDER.findIndex(function(step){ return !isTrained(step); });
   if (first >= 0) idx = first;
-  firstCard = true;
+  firstStep = true;
   updateDisplay();
-  renderGrid();
   beginCountdown();
 }
 
@@ -731,10 +759,16 @@ function skipCurrent() {
 
 function beginCountdown() {
   if (idx >= ORDER.length) { stop(); setCountdown('✓ Done'); return; }
+  var prev = idx > 0 ? ORDER[idx-1] : null;
+  var cur = ORDER[idx];
+  var swappingCard = !prev || prev.rank !== cur.rank || prev.suit !== cur.suit;
   var secs;
-  if (firstCard) {
+  if (firstStep) {
     secs = FIRST_DELAY_S;
-    firstCard = false;
+    firstStep = false;
+  } else if (swappingCard) {
+    // extra time when user needs to grab a new card from the deck
+    secs = Math.max(8, parseInt(document.getElementById('delay').value, 10) || 5);
   } else {
     secs = Math.max(1, parseInt(document.getElementById('delay').value, 10) || 5);
   }
@@ -754,14 +788,13 @@ function beginCountdown() {
 }
 
 function fireCapture() {
-  var c = ORDER[idx];
-  var slot = parseInt(document.getElementById('slot').value, 10);
+  var step = ORDER[idx];
   setFlashing(true);
   setCountdown('📸');
   fetch('/train/capture', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({rank: c.rank, suit: c.suit, slot: slot})
+    body: JSON.stringify({rank: step.rank, suit: step.suit, slot: step.slot})
   }).then(function(r){return r.json()}).then(function(d) {
     setFlashing(false);
     if (!d.ok) {
@@ -780,18 +813,19 @@ function fireCapture() {
 
 function advance() {
   idx++;
-  if (idx >= ORDER.length) { stop(); setCountdown('✓ Done'); updateDisplay(); renderGrid(); return; }
+  if (idx >= ORDER.length) { stop(); setCountdown('✓ Done'); updateDisplay(); return; }
   updateDisplay();
-  renderGrid();
   beginCountdown();
 }
 
 function resetAll() {
-  if (!confirm('Delete ALL trained templates?')) return;
-  var trained = status_.filter(function(c){return c.trained;});
-  Promise.all(trained.map(function(c) {
-    return fetch('/train/capture/' + cardCode(c), {method:'DELETE'});
-  })).then(refreshStatus);
+  if (!confirm('Delete ALL trained templates across all slots?')) return;
+  var deletes = [];
+  Object.keys(trainedMap).forEach(function(k) {
+    var parts = k.split('/');
+    deletes.push(fetch('/train/capture/' + parts[0] + '/' + parts[1], {method:'DELETE'}));
+  });
+  Promise.all(deletes).then(refreshStatus);
 }
 
 refreshStatus();
