@@ -140,30 +140,38 @@ class Camera:
         # picamera2 returns RGB, detector uses BGR
         return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-    def autofocus(self, timeout_s: float = 2.0) -> bool:
+    def autofocus(self, timeout_s: float = 0.8) -> bool:
         """Trigger one-shot AF and wait for lock. Returns True if converged.
 
         Uses AfMode=Auto + AfTrigger=Start, polling AfState until Focused
-        (or timeout). Leaves the lens at the converged position; caller may
-        re-enable Continuous afterwards if desired.
+        (or timeout). Always re-applies the full exposure/gain/AWB control
+        set afterwards, because switching AF modes can nudge other pipeline
+        state on some libcamera/imx708 versions.
         """
         try:
             from libcamera import controls as libc
         except Exception:
             return False
-        with self._lock:
-            self.cam.set_controls({
-                "AfMode": libc.AfModeEnum.Auto,
-                "AfTrigger": libc.AfTriggerEnum.Start,
-            })
-        deadline = time.time() + timeout_s
-        focused = libc.AfStateEnum.Focused
-        while time.time() < deadline:
-            md = self.cam.capture_metadata()
-            if md.get("AfState") == focused:
-                return True
-            time.sleep(0.05)
-        return False
+        converged = False
+        try:
+            with self._lock:
+                self.cam.set_controls({
+                    "AfMode": libc.AfModeEnum.Auto,
+                    "AfTrigger": libc.AfTriggerEnum.Start,
+                })
+            deadline = time.time() + timeout_s
+            focused = libc.AfStateEnum.Focused
+            while time.time() < deadline:
+                md = self.cam.capture_metadata()
+                if md.get("AfState") == focused:
+                    converged = True
+                    break
+                time.sleep(0.05)
+        finally:
+            # Restore exposure/gain/AWB + Continuous AF so subsequent frames
+            # stay correctly exposed regardless of how AF ended.
+            self._apply_controls()
+        return converged
 
 
 # ---- App state ----
