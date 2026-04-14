@@ -689,6 +689,12 @@ function refreshStatus() {
     });
     document.getElementById('status').textContent =
       d.count + ' / ' + d.expected + ' (slot,card) pairs trained';
+    // Before a run has started, point idx at the first untrained step so the
+    // "Insert this card" preview matches where Start will actually begin.
+    if (!running) {
+      var first = ORDER.findIndex(function(step){ return !isTrained(step); });
+      idx = (first >= 0) ? first : 0;
+    }
     renderMatrix();
     updateDisplay();
   });
