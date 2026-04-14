@@ -393,13 +393,12 @@ def slots_state():
     log.info(f"Slots scan: {sum(1 for r in results if r.get('recognized'))}/{len(results)} recognized")
 
     # Compact slot-1..7 summary: "Qc", "10h", "-" if unrecognized / not calibrated
-    SUIT_SYM = {"clubs": "♣", "diamonds": "♦", "hearts": "♥", "spades": "♠"}
     by_slot = {r["slot"]: r for r in results}
     cards = []
     for n in range(1, 8):
         r = by_slot.get(n)
         if r and r.get("recognized"):
-            cards.append(f"{r['rank']}{SUIT_SYM.get(r['suit'], r['suit'][0])}")
+            cards.append(f"{r['rank']}{r['suit'][0]}")
         else:
             cards.append("-")
     return jsonify({"slots": results, "cards": cards})
