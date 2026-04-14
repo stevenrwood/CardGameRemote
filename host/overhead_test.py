@@ -741,8 +741,107 @@ class AppState:
         self.console_total_up_rounds = 0  # total up-card rounds in this game
         self.console_scan_phase = "idle"  # "idle" | "watching" | "settling" | "scanned" | "confirmed"
         self.console_settle_time = 0.0
+        # ---- Remote-player table view ("/table") ----
+        # state_version is bumped whenever anything the observer needs changes.
+        # Rodney's down cards come from the Pi scanner; other players only
+        # expose a down-count + up-cards on the observer view.
+        self.table_state_version = 0
+        self.rodney_hand = []          # [{type, rank, suit, slot?, confidence?}]
+        self.pending_verify = None     # None or {guess, slot, prompt}
+        self.table_log = []            # [{ts, msg}]
+        self.pi_base_url = os.environ.get("PI_BASE_URL", "http://pokerbuddy.local:8080")
 
 _state = None
+
+
+# ---------------------------------------------------------------------------
+# Observer table view ("/table") — shared with Rodney via Teams
+# ---------------------------------------------------------------------------
+
+_CARD_NAME_RE = re.compile(
+    r"^\s*(Ace|King|Queen|Jack|10|[2-9])\s+of\s+(Hearts|Diamonds|Clubs|Spades)\s*$",
+    re.IGNORECASE,
+)
+_RANK_CANON = {"ACE": "A", "KING": "K", "QUEEN": "Q", "JACK": "J"}
+_SUIT_LETTER = {"c": "clubs", "d": "diamonds", "h": "hearts", "s": "spades"}
+
+
+def _parse_card_any(text):
+    """Parse either 'King of Hearts' or 'Kh' / '10s' into {rank, suit} or None."""
+    if not text:
+        return None
+    text = str(text).strip()
+    m = _CARD_NAME_RE.match(text)
+    if m:
+        rank = m.group(1).upper()
+        rank = _RANK_CANON.get(rank, rank)
+        return {"rank": rank, "suit": m.group(2).lower()}
+    m = re.match(r"^(10|[2-9JQKA])([hdcs])$", text, re.IGNORECASE)
+    if m:
+        return {"rank": m.group(1).upper(), "suit": _SUIT_LETTER[m.group(2).lower()]}
+    return None
+
+
+def _build_table_state(s):
+    """Produce the JSON doc that /table/state returns.
+
+    Rodney sees his hand in full. Every other player is just a down-count
+    plus Brio up-card scans. The log is the tail of table_log.
+    """
+    ge = s.game_engine
+    current_game = ge.current_game.name if ge.current_game else None
+    players = []
+    for p in ge.players:
+        zone_card_txt = s.monitor.last_card.get(p.name, "") if s.monitor else ""
+        details = s.monitor.recognition_details.get(p.name, {}) if s.monitor else {}
+        parsed = _parse_card_any(zone_card_txt)
+        up_cards = []
+        if parsed:
+            entry = {"rank": parsed["rank"], "suit": parsed["suit"]}
+            conf = details.get("yolo_conf")
+            if conf is not None:
+                entry["confidence"] = round(float(conf), 2)
+            up_cards.append(entry)
+
+        entry = {
+            "name": p.name,
+            "position": p.position,
+            "is_dealer": p.is_dealer,
+            "is_remote": p.is_remote,
+            "folded": False,   # no folding logic yet
+        }
+        if p.is_remote:
+            entry["hand"] = list(s.rodney_hand)
+            # Rodney's up cards are visible here too; merge them into hand if
+            # not already present as a separate "up" entry.
+            existing_up = [h for h in s.rodney_hand if h.get("type") == "up"]
+            if up_cards and not existing_up:
+                entry["hand"].extend([{"type": "up", **c} for c in up_cards])
+        else:
+            entry["down_count"] = 0   # populated later when deal flow is wired
+            entry["up_cards"] = up_cards
+        players.append(entry)
+
+    return {
+        "version": s.table_state_version,
+        "viewer": next((p.name for p in ge.players if p.is_remote), "Rodney"),
+        "game": {
+            "name": current_game or "",
+            "round": getattr(ge, "draw_round", 0),
+            "wild_label": ge.wild_label or "",
+            "state": getattr(ge.state, "value", str(ge.state)),
+        },
+        "dealer": ge.get_dealer().name,
+        "current_player": None,   # set by game-flow wiring later
+        "players": players,
+        "log": list(s.table_log[-30:]),
+        "pending_verify": s.pending_verify,
+    }
+
+
+def _table_state_bump(s):
+    """Call when something observable changes so polling clients re-render."""
+    s.table_state_version += 1
 
 # ---------------------------------------------------------------------------
 # Deal mode — dictation for game name, then visual recognition for cards
@@ -1333,6 +1432,231 @@ def bg_loop():
 
         time.sleep(1)  # 1 second capture rate
 
+TABLE_HTML = """<!DOCTYPE html>
+<html><head><title>Poker Table</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#0d1b2a;color:#e0e0e0;padding:14px;min-height:100vh}
+header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;padding:12px 16px;background:#16213e;border-radius:10px}
+header .game{font-size:1.3em;font-weight:600}
+header .meta{color:#aaa}
+.players{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:14px}
+.player{background:#16213e;border-radius:10px;padding:10px 12px;border:2px solid transparent}
+.player.dealer{border-color:#ffd54f}
+.player.remote{border-color:#4fc3f7}
+.player .name{font-weight:700;margin-bottom:4px;display:flex;justify-content:space-between;align-items:baseline}
+.player .tags{font-size:.75em;color:#aaa}
+.hand{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;min-height:70px}
+.card{width:46px;height:64px;border-radius:4px;background:#fff;color:#000;display:flex;flex-direction:column;justify-content:space-between;padding:3px 5px;font-weight:700;font-size:.9em;border:1px solid #333;position:relative}
+.card.red{color:#d32f2f}
+.card.down{background:repeating-linear-gradient(45deg,#1a3a5a 0,#1a3a5a 4px,#0f2740 4px,#0f2740 8px);color:transparent;border-color:#4fc3f7}
+.card.down.hidden{background:#224;color:transparent}
+.card.offset-down{margin-top:10px}
+.card .rank{font-size:1.1em}
+.card .suit{text-align:right;font-size:1.1em;line-height:1}
+.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:14px}
+.toolbar button{padding:6px 12px;background:#0f3460;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.9em}
+.toolbar button.active{background:#1b5e20}
+.log{background:#0f3460;border-radius:10px;padding:10px 14px;margin-top:10px}
+.log h3{font-size:.95em;color:#4fc3f7;margin-bottom:6px}
+.log-line{font-size:.85em;color:#ccc;padding:2px 0}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.82);display:none;align-items:center;justify-content:center;z-index:50}
+.modal.show{display:flex}
+.modal-inner{background:#16213e;padding:20px 24px;border-radius:12px;max-width:460px;width:90%}
+.modal h2{color:#4fc3f7;font-size:1.1em;margin-bottom:10px}
+.modal .guess{padding:10px;background:#0f3460;border-radius:6px;margin:10px 0;font-size:1.05em}
+.modal input{width:100%;padding:10px;border-radius:6px;border:1px solid #333;background:#0d1b2a;color:#e0e0e0;font-size:1em;font-family:inherit}
+.modal .buttons{display:flex;gap:8px;margin-top:14px}
+.modal button{flex:1;padding:12px;border:none;border-radius:8px;cursor:pointer;font-weight:600}
+.btn-green{background:#1b5e20;color:#fff}
+.btn-red{background:#b71c1c;color:#fff}
+</style></head><body>
+<header>
+  <div>
+    <div class="game" id="game-name">—</div>
+    <div class="meta" id="game-meta">—</div>
+  </div>
+  <div style="text-align:right">
+    <div id="dealer-name">—</div>
+    <div class="meta" id="current-player">—</div>
+  </div>
+</header>
+<div class="toolbar">
+  <span style="color:#aaa;font-size:.9em">Your hand:</span>
+  <button id="sort-btn" onclick="toggleSort()">Deal order</button>
+</div>
+<div class="players" id="players"></div>
+<div class="log">
+  <h3>Hand log</h3>
+  <div id="log"></div>
+</div>
+
+<div class="modal" id="verify-modal">
+  <div class="modal-inner">
+    <h2>Verify card</h2>
+    <div id="verify-body">—</div>
+    <div class="guess" id="verify-guess">—</div>
+    <input id="verify-input" placeholder="Or type correct code, e.g. Ac, 10h" />
+    <div class="buttons">
+      <button class="btn-green" onclick="confirmVerify()">Accept guess</button>
+      <button class="btn-red" onclick="overrideVerify()">Use my code</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var SUIT_SYM = {clubs:"\u2663",diamonds:"\u2666",hearts:"\u2665",spades:"\u2660"};
+var SORT_MODE = "deal";   // "deal" | "sort"
+var lastVersion = -1;
+var lastEtag = null;
+
+function toggleSort() {
+  SORT_MODE = (SORT_MODE === "deal") ? "sort" : "deal";
+  document.getElementById('sort-btn').textContent =
+    SORT_MODE === "deal" ? "Deal order" : "Sorted";
+  document.getElementById('sort-btn').classList.toggle('active', SORT_MODE === "sort");
+  render(window._lastState);
+}
+
+function isRed(suit) { return suit === "hearts" || suit === "diamonds"; }
+
+function cardEl(card) {
+  var el = document.createElement('div');
+  el.className = 'card';
+  if (card.type === 'down') {
+    el.classList.add('down');
+    if (card.hidden || !card.rank) {
+      el.classList.add('hidden');
+      return el;
+    }
+    // Rodney's own down card: show it, offset below up cards
+    el.classList.add('offset-down');
+  }
+  if (isRed(card.suit)) el.classList.add('red');
+  var r = document.createElement('div');
+  r.className = 'rank';
+  r.textContent = card.rank || '';
+  var s = document.createElement('div');
+  s.className = 'suit';
+  s.textContent = SUIT_SYM[card.suit] || '';
+  el.appendChild(r); el.appendChild(s);
+  return el;
+}
+
+var RANK_ORDER = {"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"10":10,"J":11,"Q":12,"K":13,"A":14};
+
+function sortHand(hand) {
+  if (SORT_MODE !== "sort") return hand;
+  var copy = hand.slice();
+  copy.sort(function(a,b) {
+    var ra = RANK_ORDER[a.rank] || 0, rb = RANK_ORDER[b.rank] || 0;
+    if (ra !== rb) return ra - rb;
+    return (a.suit || "").localeCompare(b.suit || "");
+  });
+  return copy;
+}
+
+function playerTile(p) {
+  var tile = document.createElement('div');
+  tile.className = 'player';
+  if (p.is_dealer) tile.classList.add('dealer');
+  if (p.is_remote) tile.classList.add('remote');
+  var name = document.createElement('div');
+  name.className = 'name';
+  name.innerHTML = '<span>' + p.name + '</span>' +
+    '<span class="tags">' + (p.is_dealer?'D ':'') + (p.is_remote?'★':'') + '</span>';
+  tile.appendChild(name);
+  var hand = document.createElement('div');
+  hand.className = 'hand';
+  if (p.is_remote) {
+    sortHand(p.hand || []).forEach(function(c){ hand.appendChild(cardEl(c)); });
+  } else {
+    (p.up_cards || []).forEach(function(c){
+      hand.appendChild(cardEl({type:'up', rank:c.rank, suit:c.suit}));
+    });
+    for (var i = 0; i < (p.down_count || 0); i++) {
+      hand.appendChild(cardEl({type:'down', hidden:true}));
+    }
+  }
+  tile.appendChild(hand);
+  return tile;
+}
+
+function render(state) {
+  if (!state) return;
+  window._lastState = state;
+  document.getElementById('game-name').textContent = state.game.name || 'No game';
+  var meta = [];
+  if (state.game.round) meta.push('Round ' + state.game.round);
+  if (state.game.wild_label) meta.push(state.game.wild_label);
+  if (state.game.state) meta.push(state.game.state);
+  document.getElementById('game-meta').textContent = meta.join(' \u00b7 ');
+  document.getElementById('dealer-name').textContent = 'Dealer: ' + (state.dealer || '—');
+  document.getElementById('current-player').textContent =
+    state.current_player ? ('Acting: ' + state.current_player) : '';
+  var pcont = document.getElementById('players');
+  pcont.innerHTML = '';
+  state.players.forEach(function(p){ pcont.appendChild(playerTile(p)); });
+  var lc = document.getElementById('log');
+  lc.innerHTML = '';
+  state.log.slice().reverse().forEach(function(e){
+    var d = document.createElement('div');
+    d.className = 'log-line';
+    d.textContent = e.msg || e;
+    lc.appendChild(d);
+  });
+  var pv = state.pending_verify;
+  var modal = document.getElementById('verify-modal');
+  if (pv) {
+    document.getElementById('verify-body').textContent = pv.prompt || '';
+    var g = pv.guess || {};
+    var gtxt = g.rank ? (g.rank + (SUIT_SYM[g.suit] || '')) : '—';
+    if (g.confidence != null) gtxt += ' (' + Math.round(g.confidence * 100) + '%)';
+    document.getElementById('verify-guess').textContent = 'Guess: ' + gtxt;
+    document.getElementById('verify-input').value = '';
+    modal.classList.add('show');
+  } else {
+    modal.classList.remove('show');
+  }
+}
+
+function poll() {
+  var headers = {};
+  if (lastEtag) headers['If-None-Match'] = lastEtag;
+  fetch('/table/state', {headers: headers, cache: 'no-store'}).then(function(r) {
+    if (r.status === 304) return null;
+    lastEtag = r.headers.get('ETag');
+    return r.json();
+  }).then(function(d) {
+    if (!d) return;
+    if (d.version === lastVersion) return;
+    lastVersion = d.version;
+    render(d);
+  }).catch(function(e) { console.warn('poll failed', e); });
+}
+
+function confirmVerify() {
+  fetch('/api/table/verify', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({action:'confirm'})
+  });
+}
+function overrideVerify() {
+  var code = document.getElementById('verify-input').value.trim();
+  if (!code) return alert('Enter card code (e.g. Ac, 10h)');
+  fetch('/api/table/verify', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({action:'override', code: code})
+  });
+}
+
+setInterval(poll, 500);
+poll();
+</script>
+</body></html>"""
+
+
 # ---------------------------------------------------------------------------
 # Web server — single page app
 # ---------------------------------------------------------------------------
@@ -1356,6 +1680,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "/calibration": lambda s: self._r(200,"application/json",CALIBRATION_FILE.read_text()) if CALIBRATION_FILE.exists() else self._r(404,"text/plain","none"),
             "/training": self._training_list,
             "/console": self._console_page,
+            "/table": self._table_page,
+            "/table/state": self._table_state,
         }
         if p in routes:
             routes[p](s)
@@ -2260,6 +2586,33 @@ refresh();
                 lbl = f.with_suffix(".txt").read_text() if f.with_suffix(".txt").exists() else ""
                 h += f'<div style="display:inline-block;margin:8px;text-align:center"><img src="/training/{f.name}" width="150"><br><small>{f.stem[:30]}</small><br>{lbl}</div>'
         self._r(200,"text/html",h+"</body></html>")
+
+    def _table_state(self, s):
+        try:
+            doc = _build_table_state(s)
+            body = json.dumps(doc)
+        except Exception as e:
+            body = json.dumps({"error": str(e)})
+            return self._r(500, "application/json", body)
+        # ETag short-circuit: if client already has this version, return 304.
+        etag = f'W/"v{doc.get("version", 0)}"'
+        inm = self.headers.get("If-None-Match")
+        if inm == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
+        data = body.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _table_page(self, s):
+        self._r(200, "text/html", TABLE_HTML)
 
     def _console_page(self, s):
         self._r(200, "text/html", """<!DOCTYPE html>
