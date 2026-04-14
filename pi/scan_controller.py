@@ -494,22 +494,28 @@ def train_status():
 def train_capture():
     """Capture a specific slot and save its image as a per-slot template.
 
-    JSON body: {"rank": "A", "suit": "hearts", "slot": 4}
+    JSON body: {"rank": "A", "suit": "hearts", "slot": 4, "focus": false}
+
+    focus=false (default) skips autofocus entirely, giving a fast
+    predictable flash (~100ms). The training UI sends focus=true only
+    for the first capture of a new slot, and relies on lens position
+    staying put across the slot's 52 captures.
     """
     assert _state is not None
     body = request.get_json(silent=True) or {}
     rank = str(body.get("rank", "")).upper()
     suit = str(body.get("suit", "")).lower()
     slot_num = int(body.get("slot", 4))
+    focus = bool(body.get("focus", False))
     if rank not in RANKS or suit not in SUITS:
         return jsonify({"ok": False, "error": "bad rank/suit"}), 400
     if slot_num < 1 or slot_num > 7:
         return jsonify({"ok": False, "error": "slot must be 1..7"}), 400
-    crop, meta = _slot_crop(slot_num, focus=True)
+    crop, meta = _slot_crop(slot_num, focus=focus)
     if crop is None:
         return jsonify({"ok": False, "error": meta}), 400
     _state.detector.save_slot_template(slot_num, rank, suit, crop)
-    log.info(f"Trained template slot{slot_num}/{rank}{suit[0]}")
+    log.info(f"Trained template slot{slot_num}/{rank}{suit[0]} (focus={focus})")
     return jsonify({"ok": True, "slot": slot_num, "rank": rank, "suit": suit})
 
 
@@ -732,6 +738,7 @@ var ticker = null;
 var remainingMs = 0;
 var flashing = false;
 var firstStep = true;
+var needsFocus = true;   // AF only on first capture of a run / slot
 var FIRST_DELAY_S = 30;
 
 function cardCode(r, s) { return r + s[0]; }
@@ -908,6 +915,7 @@ function start() {
   var first = ORDER.findIndex(function(step){ return !isTrained(step); });
   if (first >= 0) idx = first;
   firstStep = true;
+  needsFocus = true;
   updateDisplay();
   beginCountdown();
 }
@@ -969,10 +977,11 @@ function fireCapture() {
   var step = ORDER[idx];
   setFlashing(true);
   setCountdown('📸');
+  var useFocus = needsFocus;
   fetch('/train/capture', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({rank: step.rank, suit: step.suit, slot: step.slot})
+    body: JSON.stringify({rank: step.rank, suit: step.suit, slot: step.slot, focus: useFocus})
   }).then(function(r){return r.json()}).then(function(d) {
     setFlashing(false);
     if (!d.ok) {
@@ -981,6 +990,7 @@ function fireCapture() {
       stop();
       return;
     }
+    needsFocus = false;   // subsequent captures in this slot skip AF
     refreshStatus().then(function() { advance(); });
   }).catch(function(e) {
     setFlashing(false);
@@ -998,6 +1008,7 @@ function advance() {
   // Auto-pause at slot boundaries (every 52 captures)
   if (prev && cur && prev.slot !== cur.slot) {
     paused = true;
+    needsFocus = true;    // re-AF for the new slot's first capture
     document.getElementById('pause').textContent = 'Resume';
     setCountdown('⏸ slot ' + prev.slot + ' done — press Resume for slot ' + cur.slot);
     return;
