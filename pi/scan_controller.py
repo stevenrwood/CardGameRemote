@@ -102,15 +102,23 @@ class Camera:
             main={"size": (2304, 1296), "format": "RGB888"},
         )
         self.cam.configure(cfg)
-        # Lock exposure for consistent flash-lit captures
-        self.cam.set_controls({
+        # Lock exposure for consistent flash-lit captures; keep AWB enabled
+        # so colors look right. AfMode=Continuous keeps cards in focus.
+        controls = {
             "AeEnable": False,       # disable auto-exposure
-            "AwbEnable": False,      # disable auto-white-balance
             "ExposureTime": 20000,   # 20ms — long enough for LED flash to fully illuminate
             "AnalogueGain": 1.0,     # minimum gain to reduce noise
-        })
+            "AwbEnable": True,       # auto white balance
+        }
+        # Camera v3 has autofocus; v2 and HQ don't. Ignore control errors.
+        try:
+            from libcamera import controls as libc
+            controls["AfMode"] = libc.AfModeEnum.Continuous
+        except Exception:
+            pass
+        self.cam.set_controls(controls)
         self.cam.start()
-        time.sleep(0.3)  # warmup
+        time.sleep(0.5)  # warmup + AF settle
         log.info(f"Camera {camera_index} started at {cfg['main']['size']}")
 
     def capture(self) -> np.ndarray:
