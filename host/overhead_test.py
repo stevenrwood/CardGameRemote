@@ -768,8 +768,14 @@ class AppState:
         self.pi_prev_slots = {}        # slot_num -> last-seen card code (e.g. "Ac")
         self.table_lock = Lock()       # guards rodney_downs / pending_verify / table_log
         self.pi_confidence_threshold = 0.70  # >= this → auto-accept
-        self.pi_empty_threshold = 0.15       # below this → treat slot as empty
-        self._pi_last_logged = {}            # slot_num -> last logged code, to throttle log spam
+        # The Pi's template matcher returns low-but-nonzero confidence for
+        # every slot (including empty ones), so "empty" as a confidence
+        # threshold doesn't work reliably. We trust the Pi's recognized
+        # flag + any nonzero confidence as "something was seen" so the
+        # weak-but-present scan still ends up in slot_pending and can be
+        # manually verified.
+        self.pi_empty_threshold = 0.0
+        self._pi_last_logged = {}            # slot_num -> last logged code, throttle log spam
         self.folded_players = set()     # Rodney's view of who's folded this hand
 
 _state = None
@@ -1069,22 +1075,29 @@ def _pi_poll_loop(s):
                         s.slot_pending[slot_num] = guess
                         changed = True
 
-            # If a modal isn't currently open, promote the first queued slot
-            # that's gone physically empty into pending_verify.
+            # If a modal isn't currently open, promote the first queued
+            # slot into pending_verify. The Pi's template matcher can't
+            # reliably tell "empty" from "low-confidence card" so we don't
+            # wait for the slot to go empty — the user will simply remove
+            # the card, hold it up to the camera, then confirm or override
+            # in the modal.
             if s.pending_verify is None and s.verify_queue:
                 for slot_num in list(s.verify_queue):
-                    if s.slot_empty.get(slot_num) and s.slot_pending.get(slot_num):
-                        s.pending_verify = {
-                            "slot": slot_num,
-                            "guess": dict(s.slot_pending[slot_num]),
-                            "prompt": (
-                                f"Slot {slot_num} needs verification. "
-                                f"Hold the card up for Rodney, then confirm or override."
-                            ),
-                        }
-                        _table_log_add(s, f"Slot {slot_num}: modal opened for verify")
-                        changed = True
-                        break
+                    guess = s.slot_pending.get(slot_num)
+                    if not guess:
+                        continue
+                    s.pending_verify = {
+                        "slot": slot_num,
+                        "guess": dict(guess),
+                        "prompt": (
+                            f"Slot {slot_num} needs verification. "
+                            f"Remove the card, hold it up for Rodney, "
+                            f"then confirm or override."
+                        ),
+                    }
+                    _table_log_add(s, f"Slot {slot_num}: modal opened for verify")
+                    changed = True
+                    break
             if changed:
                 s.table_state_version += 1
         time.sleep(1.0)
@@ -2485,6 +2498,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.console_scan_phase = "watching"
                 log.log("[CONSOLE] Baselines recaptured, watching dealer zone")
             log.log(f"[CONSOLE] Next Round — up round {s.console_up_round}/{s.console_total_up_rounds}")
+            # Also queue any pending down-card scans so games with a final
+            # down (no Confirm Cards) still get a chance to verify.
+            queued = _enqueue_down_card_verifies(s)
+            if queued:
+                log.log(f"[CONSOLE] Down-card verify queued for slots {queued}")
             self._r(200, "application/json", json.dumps({
                 "hand": ge.get_hand_state(),
                 "up_round": s.console_up_round,
