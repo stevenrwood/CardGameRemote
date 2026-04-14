@@ -453,7 +453,7 @@ canvas{border:1px solid #444;cursor:crosshair;display:block;max-width:100%;heigh
 </div>
 <p style="font-size:.9em;color:#aaa">
   Currently marking slot <b id="next-slot">1</b> of 7.
-  Click top-left then bottom-right corner of the slot window in the appropriate camera view.
+  Press on the top-left corner and drag to the bottom-right of the slot window, then release.
 </p>
 <div class="cam-box">
   <div class="cam-title">Camera 0 (slots 1-4 area)</div>
@@ -467,25 +467,25 @@ canvas{border:1px solid #444;cursor:crosshair;display:block;max-width:100%;heigh
 
 <script>
 var slots = [];
-var pendingClick = null;  // {camera, x1, y1} after first click
+var cachedImages = {};     // camIdx -> HTMLImageElement (last loaded)
+var drag = null;           // {camera, x1, y1, x2, y2} while pointer is down
 
 function refreshCaptures() {
   [0, 1].forEach(function(camIdx) {
     var img = new Image();
     img.onload = function() {
+      cachedImages[camIdx] = img;
       var canvas = document.getElementById('cam' + camIdx);
       canvas.width = img.naturalWidth;
       canvas.height = img.naturalHeight;
       canvas.dataset.scale = Math.min(window.innerWidth - 60, img.naturalWidth) / img.naturalWidth;
-      var ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      drawSlots(canvas, ctx, camIdx);
+      redrawCam(camIdx);
     };
     img.src = '/capture/image?camera=' + camIdx + '&focus=1&t=' + Date.now();
   });
 }
 
-function drawSlots(canvas, ctx, camIdx) {
+function drawSlots(ctx, camIdx) {
   slots.filter(function(s){return s.camera === camIdx}).forEach(function(s) {
     ctx.strokeStyle = '#4caf50';
     ctx.lineWidth = 3;
@@ -494,62 +494,89 @@ function drawSlots(canvas, ctx, camIdx) {
     ctx.font = 'bold 32px sans-serif';
     ctx.fillText('#' + s.slot, s.x, s.y - 8);
   });
-  if (pendingClick && pendingClick.camera === camIdx) {
-    ctx.fillStyle = '#ff9800';
-    ctx.beginPath();
-    ctx.arc(pendingClick.x1, pendingClick.y1, 10, 0, Math.PI * 2);
-    ctx.fill();
+  if (drag && drag.camera === camIdx) {
+    var x = Math.min(drag.x1, drag.x2);
+    var y = Math.min(drag.y1, drag.y2);
+    var w = Math.abs(drag.x2 - drag.x1);
+    var h = Math.abs(drag.y2 - drag.y1);
+    ctx.strokeStyle = '#ff9800';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([8, 6]);
+    ctx.strokeRect(x, y, w, h);
+    ctx.setLineDash([]);
   }
+}
+
+function redrawCam(camIdx) {
+  var canvas = document.getElementById('cam' + camIdx);
+  var ctx = canvas.getContext('2d');
+  var img = cachedImages[camIdx];
+  if (img) ctx.drawImage(img, 0, 0);
+  drawSlots(ctx, camIdx);
+}
+
+function canvasCoords(canvas, ev) {
+  var rect = canvas.getBoundingClientRect();
+  var scale = canvas.width / rect.width;
+  return {
+    x: Math.round((ev.clientX - rect.left) * scale),
+    y: Math.round((ev.clientY - rect.top) * scale)
+  };
 }
 
 function attachHandlers() {
   [0, 1].forEach(function(camIdx) {
     var canvas = document.getElementById('cam' + camIdx);
-    canvas.onclick = function(ev) {
-      var rect = canvas.getBoundingClientRect();
-      var scale = canvas.width / rect.width;
-      var x = Math.round((ev.clientX - rect.left) * scale);
-      var y = Math.round((ev.clientY - rect.top) * scale);
-      handleClick(camIdx, x, y);
-    };
+    canvas.style.touchAction = 'none';  // prevent scroll/zoom on drag
+    canvas.addEventListener('pointerdown', function(ev) {
+      if (slots.length >= 7) return;
+      var p = canvasCoords(canvas, ev);
+      drag = {camera: camIdx, x1: p.x, y1: p.y, x2: p.x, y2: p.y};
+      canvas.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+      updateStatus();
+      redrawCam(camIdx);
+    });
+    canvas.addEventListener('pointermove', function(ev) {
+      if (!drag || drag.camera !== camIdx) return;
+      var p = canvasCoords(canvas, ev);
+      drag.x2 = p.x;
+      drag.y2 = p.y;
+      redrawCam(camIdx);
+    });
+    function finish(ev) {
+      if (!drag || drag.camera !== camIdx) return;
+      var p = canvasCoords(canvas, ev);
+      drag.x2 = p.x;
+      drag.y2 = p.y;
+      var x1 = Math.min(drag.x1, drag.x2);
+      var y1 = Math.min(drag.y1, drag.y2);
+      var x2 = Math.max(drag.x1, drag.x2);
+      var y2 = Math.max(drag.y1, drag.y2);
+      var w = x2 - x1, h = y2 - y1;
+      drag = null;
+      if (w < 5 || h < 5) {
+        // accidental tap — ignore
+        redrawCam(camIdx);
+        updateStatus();
+        return;
+      }
+      slots.push({
+        slot: slots.length + 1,
+        camera: camIdx,
+        x: x1, y: y1, w: w, h: h
+      });
+      redrawCam(camIdx);
+      updateStatus();
+      updateSlotsList();
+    }
+    canvas.addEventListener('pointerup', finish);
+    canvas.addEventListener('pointercancel', function() {
+      drag = null;
+      redrawCam(camIdx);
+      updateStatus();
+    });
   });
-}
-
-function handleClick(camIdx, x, y) {
-  if (!pendingClick) {
-    pendingClick = {camera: camIdx, x1: x, y1: y};
-    updateStatus();
-    redraw();
-    return;
-  }
-  if (pendingClick.camera !== camIdx) {
-    // first click on one camera, second on different — cancel
-    pendingClick = null;
-    updateStatus('Second click must be on same camera. Resetting.');
-    redraw();
-    return;
-  }
-  // Second click — create slot rectangle
-  var x1 = Math.min(pendingClick.x1, x);
-  var y1 = Math.min(pendingClick.y1, y);
-  var x2 = Math.max(pendingClick.x1, x);
-  var y2 = Math.max(pendingClick.y1, y);
-  var nextSlotNum = slots.length + 1;
-  if (nextSlotNum > 7) {
-    pendingClick = null;
-    updateStatus('All 7 slots marked. Click "Save Calibration".');
-    redraw();
-    return;
-  }
-  slots.push({
-    slot: nextSlotNum,
-    camera: camIdx,
-    x: x1, y: y1, w: x2 - x1, h: y2 - y1
-  });
-  pendingClick = null;
-  updateStatus();
-  redraw();
-  updateSlotsList();
 }
 
 function updateStatus(msg) {
@@ -559,26 +586,11 @@ function updateStatus(msg) {
   document.getElementById('next-slot').textContent = Math.min(next, 7);
   if (next > 7) {
     s.textContent = '✓ All 7 slots marked. Review and Save Calibration.';
-  } else if (pendingClick) {
-    s.textContent = 'Click BOTTOM-RIGHT corner of slot #' + next + ' on camera ' + pendingClick.camera;
+  } else if (drag) {
+    s.textContent = 'Drag to bottom-right of slot #' + next + ' and release…';
   } else {
-    s.textContent = 'Click TOP-LEFT corner of slot #' + next + ' on the camera that sees it best';
+    s.textContent = 'Press on TOP-LEFT of slot #' + next + ' and drag to BOTTOM-RIGHT';
   }
-}
-
-function redraw() {
-  [0, 1].forEach(function(camIdx) {
-    var canvas = document.getElementById('cam' + camIdx);
-    var ctx = canvas.getContext('2d');
-    var img = new Image();
-    img.onload = function() {
-      ctx.drawImage(img, 0, 0);
-      drawSlots(canvas, ctx, camIdx);
-    };
-    // Keep using last loaded image by reading current frame dimensions — we just redraw overlays
-    // Simpler: reload
-    img.src = '/capture/image?camera=' + camIdx;
-  });
 }
 
 function updateSlotsList() {
@@ -603,10 +615,10 @@ function saveSlots() {
 function clearSlots() {
   if (!confirm('Clear all marked slots?')) return;
   slots = [];
-  pendingClick = null;
+  drag = null;
   updateStatus();
   updateSlotsList();
-  redraw();
+  [0, 1].forEach(redrawCam);
 }
 
 // Load existing calibration on startup
