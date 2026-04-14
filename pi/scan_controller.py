@@ -513,6 +513,24 @@ def train_capture():
     return jsonify({"ok": True, "slot": slot_num, "rank": rank, "suit": suit})
 
 
+@app.delete("/train/reset/<int:slot_num>")
+def train_reset_slot(slot_num: int):
+    """Delete all templates for a single slot."""
+    assert _state is not None
+    if slot_num < 1 or slot_num > 7:
+        return jsonify({"ok": False, "error": "slot must be 1..7"}), 400
+    d = _state.detector.reference_dir / "slot_templates" / f"slot{slot_num}"
+    removed = 0
+    if d.exists():
+        for f in list(d.iterdir()):
+            if f.suffix.lower() in (".png", ".jpg"):
+                f.unlink()
+                removed += 1
+    _state.detector.reload_slot_templates()
+    log.info(f"Reset slot {slot_num}: removed {removed} templates")
+    return jsonify({"ok": True, "removed": removed})
+
+
 @app.delete("/train/capture/<int:slot_num>/<card>")
 def train_delete(slot_num: int, card: str):
     assert _state is not None
@@ -578,6 +596,8 @@ button:disabled{opacity:.4;cursor:not-allowed}
 table.matrix-table{border-collapse:collapse;font-size:.72em;min-width:100%}
 table.matrix-table th,table.matrix-table td{padding:2px 4px;border:1px solid #222;text-align:center}
 table.matrix-table th{background:#0f3460;color:#fff}
+table.matrix-table th.slot-header{cursor:pointer;user-select:none}
+table.matrix-table th.slot-header:hover{background:#b71c1c}
 table.matrix-table td.trained{background:#1b5e20;cursor:pointer}
 table.matrix-table td.trained:hover{background:#2e7d32}
 table.matrix-table td.active{outline:2px solid #4fc3f7}
@@ -677,7 +697,9 @@ function refreshStatus() {
 function renderMatrix() {
   var t = document.getElementById('matrix');
   var html = '<tr><th></th>';
-  SLOTS.forEach(function(s){ html += '<th>Slot ' + s + '</th>'; });
+  SLOTS.forEach(function(s){
+    html += '<th class="slot-header" data-reset-slot="' + s + '" title="Click to reset slot ' + s + '">Slot ' + s + '</th>';
+  });
   html += '</tr>';
   RANKS.forEach(function(r) {
     SUITS.forEach(function(s) {
@@ -703,6 +725,15 @@ function renderMatrix() {
 }
 
 document.getElementById('matrix').addEventListener('click', function(ev) {
+  var header = ev.target.closest('th[data-reset-slot]');
+  if (header) {
+    var slot = parseInt(header.dataset.resetSlot, 10);
+    if (confirm('Delete all trained templates for slot ' + slot + '?')) {
+      fetch('/train/reset/' + slot, {method:'DELETE'})
+        .then(function(r){return r.json()}).then(refreshStatus);
+    }
+    return;
+  }
   var cell = ev.target.closest('td[data-slot]');
   if (!cell) return;
   showTemplate(parseInt(cell.dataset.slot, 10), cell.dataset.card);
