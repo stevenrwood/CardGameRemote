@@ -140,6 +140,31 @@ class Camera:
         # picamera2 returns RGB, detector uses BGR
         return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
+    def autofocus(self, timeout_s: float = 2.0) -> bool:
+        """Trigger one-shot AF and wait for lock. Returns True if converged.
+
+        Uses AfMode=Auto + AfTrigger=Start, polling AfState until Focused
+        (or timeout). Leaves the lens at the converged position; caller may
+        re-enable Continuous afterwards if desired.
+        """
+        try:
+            from libcamera import controls as libc
+        except Exception:
+            return False
+        with self._lock:
+            self.cam.set_controls({
+                "AfMode": libc.AfModeEnum.Auto,
+                "AfTrigger": libc.AfTriggerEnum.Start,
+            })
+        deadline = time.time() + timeout_s
+        focused = libc.AfStateEnum.Focused
+        while time.time() < deadline:
+            md = self.cam.capture_metadata()
+            if md.get("AfState") == focused:
+                return True
+            time.sleep(0.05)
+        return False
+
 
 # ---- App state ----
 
@@ -169,11 +194,17 @@ class AppState:
         CALIBRATION_FILE.write_text(json.dumps(data, indent=2))
         log.info(f"Calibration saved: {len(data.get('slots', []))} slots")
 
-    def capture_with_flash(self, camera_idx: int) -> np.ndarray:
-        """Turn flash on, capture from specified camera while lit, turn flash off."""
+    def capture_with_flash(self, camera_idx: int, focus: bool = False) -> np.ndarray:
+        """Turn flash on, capture from specified camera while lit, turn flash off.
+
+        If focus=True, trigger a one-shot AF lock (under flash) before the capture
+        so the scene is illuminated during focus acquisition.
+        """
         cam = self.cameras[camera_idx]
         self.flash.on()
         try:
+            if focus:
+                cam.autofocus(timeout_s=1.5)
             time.sleep(self.flash_settle_ms / 1000.0)
             frame = cam.capture()
         finally:
@@ -245,7 +276,8 @@ def capture():
 def capture_image():
     assert _state is not None
     idx = _pick_camera()
-    frame = _state.capture_with_flash(idx)
+    focus = request.args.get("focus") in ("1", "true", "yes")
+    frame = _state.capture_with_flash(idx, focus=focus)
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not ok:
         return "encode failed", 500
@@ -449,7 +481,7 @@ function refreshCaptures() {
       ctx.drawImage(img, 0, 0);
       drawSlots(canvas, ctx, camIdx);
     };
-    img.src = '/capture/image?camera=' + camIdx + '&t=' + Date.now();
+    img.src = '/capture/image?camera=' + camIdx + '&focus=1&t=' + Date.now();
   });
 }
 
