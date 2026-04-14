@@ -3401,8 +3401,11 @@ def main():
     _state = AppState(capture, cal, monitor)
     _state.latest_frame = frame
 
-    # Start server
-    server = http.server.HTTPServer(("0.0.0.0", 8888), Handler)
+    # Start server. ThreadingHTTPServer gives each client connection its own
+    # thread so a browser's keep-alive polling (e.g. /table/state every 500ms)
+    # can't starve other clients like /console or /logview.
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", 8888), Handler)
+    server.daemon_threads = True
     Thread(target=server.serve_forever, daemon=True).start()
     log.log("Server at http://localhost:8888")
 
