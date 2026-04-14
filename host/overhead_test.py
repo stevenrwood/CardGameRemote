@@ -701,11 +701,18 @@ def _check_follow_the_queen_round(s, round_cards):
         rank_short = RANK_SHORT.get(rank, rank)
 
         if ge.last_up_was_queen:
-            ge.wild_ranks = ["Q", rank_short]
-            plural = f"{rank}'s" if rank.isdigit() else f"{rank}s"
-            ge.wild_label = f"Queens and {plural} are wild"
-            log.log(f"[WILD] {ge.wild_label}")
-            speech.say(f"Queens and {plural} are now wild")
+            if rank_short == "Q":
+                # Queen immediately after a Queen: ignore the earlier one
+                # and keep watching. The second Queen's follower is what
+                # becomes wild. (Avoids the "Queens and Queens are wild"
+                # annunciation.)
+                pass
+            else:
+                ge.wild_ranks = ["Q", rank_short]
+                plural = f"{rank}'s" if rank.isdigit() else f"{rank}s"
+                ge.wild_label = f"Queens and {plural} are wild"
+                log.log(f"[WILD] {ge.wild_label}")
+                speech.say(f"Queens and {plural} are now wild")
 
         ge.last_up_was_queen = (rank_short == "Q")
 
@@ -761,7 +768,8 @@ class AppState:
         self.pi_prev_slots = {}        # slot_num -> last-seen card code (e.g. "Ac")
         self.table_lock = Lock()       # guards rodney_downs / pending_verify / table_log
         self.pi_confidence_threshold = 0.70  # >= this → auto-accept
-        self.pi_empty_threshold = 0.30       # below this → treat slot as empty
+        self.pi_empty_threshold = 0.15       # below this → treat slot as empty
+        self._pi_last_logged = {}            # slot_num -> last logged code, to throttle log spam
         self.folded_players = set()     # Rodney's view of who's folded this hand
 
 _state = None
@@ -1021,6 +1029,16 @@ def _pi_poll_loop(s):
                     # Slot physically empty: mark empty but keep slot_pending
                     # intact — the last-seen guess survives removal so the
                     # verify modal can still fire after a Confirm Cards.
+                    # If there's a weak scan below threshold log it once so
+                    # the user can see that the scanner IS seeing something
+                    # but deciding it's noise.
+                    if recognized and rank and suit and conf > 0:
+                        weak_code = f"{rank}{suit[0]} ({int(conf*100)}%)"
+                        if s._pi_last_logged.get(slot_num) != weak_code:
+                            log.log(f"[PI] Slot {slot_num}: weak {weak_code} below empty threshold")
+                            s._pi_last_logged[slot_num] = weak_code
+                    elif s._pi_last_logged.get(slot_num) is not None:
+                        s._pi_last_logged[slot_num] = None
                     s.slot_empty[slot_num] = True
                     s.pi_prev_slots.pop(slot_num, None)
                     continue
