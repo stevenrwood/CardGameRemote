@@ -203,13 +203,20 @@ class AppState:
         CALIBRATION_FILE.write_text(json.dumps(data, indent=2))
         log.info(f"Calibration saved: {len(data.get('slots', []))} slots")
 
+    # Minimum time the flash needs to be on before the sensor reads a
+    # consistently-exposed frame. LED drivers and the rail take a couple of
+    # hundred ms to fully stabilize; without this the no-AF path produced
+    # visibly dimmer/cream-tinted captures.
+    FLASH_WARMUP_MS = 300
+
     def capture_with_flash(self, camera_idx: int, focus: bool = False) -> np.ndarray:
         """Turn flash on, capture from specified camera while lit, turn flash off.
 
         If focus=True, trigger a one-shot AF lock (under flash) before the capture
-        so the scene is illuminated during focus acquisition. The flash lock
-        serializes concurrent requests so one camera's flash.off() can't clobber
-        another camera's in-flight capture.
+        so the scene is illuminated during focus acquisition. AF already keeps
+        the flash on ~800ms, so the AF path just needs the small settle.
+        When focus is False, we enforce FLASH_WARMUP_MS (~300ms) before the
+        capture so the LEDs have time to reach full brightness.
         """
         cam = self.cameras[camera_idx]
         with self.flash_lock:
@@ -217,7 +224,10 @@ class AppState:
             try:
                 if focus:
                     cam.autofocus(timeout_s=1.5)
-                time.sleep(self.flash_settle_ms / 1000.0)
+                    time.sleep(self.flash_settle_ms / 1000.0)
+                else:
+                    warmup = max(self.flash_settle_ms, self.FLASH_WARMUP_MS) / 1000.0
+                    time.sleep(warmup)
                 frame = cam.capture()
             finally:
                 self.flash.off()
