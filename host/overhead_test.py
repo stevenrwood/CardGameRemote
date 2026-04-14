@@ -1058,6 +1058,14 @@ def _pi_poll_loop(s):
     """
     log.log("[PI] poll loop started")
     while s.pi_polling:
+        # Only hit the Pi when we're actually expecting a down card to be
+        # in the scanner (pi_flash_held is True whenever the next dealt
+        # card is a down). Otherwise just keep the flash state in sync and
+        # idle — no reason to run the camera + template match every tick.
+        _update_flash_for_deal_state(s)
+        if not s.pi_flash_held:
+            time.sleep(2.0)
+            continue
         doc = _pi_fetch_slots(s)
         if doc is None:
             time.sleep(2.0)
@@ -1157,8 +1165,6 @@ def _pi_poll_loop(s):
                     break
             if changed:
                 s.table_state_version += 1
-        # Keep LEDs on whenever we're waiting for a down card, off otherwise.
-        _update_flash_for_deal_state(s)
         time.sleep(1.0)
     log.log("[PI] poll loop stopped")
 

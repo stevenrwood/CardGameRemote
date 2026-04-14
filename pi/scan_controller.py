@@ -1157,17 +1157,34 @@ var cachedImages = {};     // camIdx -> HTMLImageElement (last loaded)
 var drag = null;           // {camera, x1, y1, x2, y2} while pointer is down
 
 function refreshCaptures() {
-  [0, 1].forEach(function(camIdx) {
-    var img = new Image();
-    img.onload = function() {
-      cachedImages[camIdx] = img;
-      var canvas = document.getElementById('cam' + camIdx);
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      canvas.dataset.scale = Math.min(window.innerWidth - 60, img.naturalWidth) / img.naturalWidth;
-      redrawCam(camIdx);
-    };
-    img.src = '/capture/image?camera=' + camIdx + '&focus=1&t=' + Date.now();
+  // Hold the LEDs on for a full 2 seconds so they're at steady brightness,
+  // then grab a fresh image from each camera, then release.
+  fetch('/flash/hold', {method:'POST'}).then(function() {
+    setTimeout(function() {
+      var remaining = 2;
+      [0, 1].forEach(function(camIdx) {
+        var img = new Image();
+        img.onload = function() {
+          cachedImages[camIdx] = img;
+          var canvas = document.getElementById('cam' + camIdx);
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          canvas.dataset.scale = Math.min(window.innerWidth - 60, img.naturalWidth) / img.naturalWidth;
+          redrawCam(camIdx);
+          remaining--;
+          if (remaining === 0) {
+            fetch('/flash/release', {method:'POST'});
+          }
+        };
+        img.onerror = function() {
+          remaining--;
+          if (remaining === 0) {
+            fetch('/flash/release', {method:'POST'});
+          }
+        };
+        img.src = '/capture/image?camera=' + camIdx + '&focus=1&t=' + Date.now();
+      });
+    }, 2000);
   });
 }
 
