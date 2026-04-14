@@ -72,6 +72,14 @@ class Flash:
             except Exception as e:
                 log.warning(f"Flash LED init failed: {e}")
 
+    def on(self):
+        if self.led is not None:
+            self.led.on()
+
+    def off(self):
+        if self.led is not None:
+            self.led.off()
+
     def pulse(self, duration_ms: int = FLASH_PULSE_MS):
         if self.led is None:
             log.debug("Flash pulse skipped (no LED)")
@@ -90,8 +98,17 @@ class Camera:
         if not _CAMERA_OK:
             raise RuntimeError("picamera2 not available — cannot initialize camera")
         self.cam = Picamera2(camera_num=camera_index)
-        cfg = self.cam.create_still_configuration(main={"size": (2304, 1296), "format": "RGB888"})
+        cfg = self.cam.create_still_configuration(
+            main={"size": (2304, 1296), "format": "RGB888"},
+        )
         self.cam.configure(cfg)
+        # Lock exposure for consistent flash-lit captures
+        self.cam.set_controls({
+            "AeEnable": False,       # disable auto-exposure
+            "AwbEnable": False,      # disable auto-white-balance
+            "ExposureTime": 20000,   # 20ms — long enough for LED flash to fully illuminate
+            "AnalogueGain": 1.0,     # minimum gain to reduce noise
+        })
         self.cam.start()
         time.sleep(0.3)  # warmup
         log.info(f"Camera {camera_index} started at {cfg['main']['size']}")
@@ -114,8 +131,14 @@ class AppState:
         log.info("Scan controller ready")
 
     def capture_with_flash(self) -> np.ndarray:
-        self.flash.pulse()
-        frame = self.camera.capture()
+        """Turn flash on, capture frame while lit, turn flash off."""
+        self.flash.on()
+        try:
+            # Small settle delay so sensor stabilizes with LED light
+            time.sleep(0.05)
+            frame = self.camera.capture()
+        finally:
+            self.flash.off()
         self.last_frame = frame
         return frame
 
