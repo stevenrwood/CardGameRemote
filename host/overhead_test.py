@@ -750,6 +750,11 @@ class AppState:
         self.pending_verify = None     # None or {guess, slot, prompt}
         self.table_log = []            # [{ts, msg}]
         self.pi_base_url = os.environ.get("PI_BASE_URL", "http://pokerbuddy.local:8080")
+        self.pi_polling = False
+        self.pi_poll_thread = None
+        self.pi_prev_slots = {}        # slot_num -> last-seen card code (e.g. "Ac")
+        self.table_lock = Lock()       # guards rodney_hand / pending_verify / table_log
+        self.pi_confidence_threshold = 0.70
 
 _state = None
 
@@ -842,6 +847,138 @@ def _build_table_state(s):
 def _table_state_bump(s):
     """Call when something observable changes so polling clients re-render."""
     s.table_state_version += 1
+
+
+def _table_log_add(s, msg):
+    s.table_log.append({"ts": int(time.time()), "msg": msg})
+    if len(s.table_log) > 200:
+        s.table_log = s.table_log[-100:]
+
+
+def _parse_card_code(code):
+    """Parse 'Ac' or '10h' into {rank, suit} or None."""
+    if not code:
+        return None
+    m = re.match(r"^\s*(10|[2-9JQKA])([hdcs])\s*$", code, re.IGNORECASE)
+    if not m:
+        return None
+    return {"rank": m.group(1).upper(), "suit": _SUIT_LETTER[m.group(2).lower()]}
+
+
+def _pi_fetch_slots(s):
+    """Fetch /slots from the Pi. Returns the parsed dict or None on error."""
+    import urllib.request
+    try:
+        url = f"{s.pi_base_url.rstrip('/')}/slots"
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        log.log(f"[PI] /slots error: {e}")
+        return None
+
+
+def _pi_poll_loop(s):
+    """Background poll: map Pi scanner detections into rodney_hand.
+
+    - Each /slots result is compared against s.pi_prev_slots.
+    - A new card (slot was empty or held a different card) becomes:
+        * a rodney_hand entry when confidence >= threshold, OR
+        * a pending_verify prompt otherwise (poller stops advancing that
+          slot until the verify modal is resolved).
+    - Slots that go empty are forgotten so swapping cards through a slot
+      works naturally between hands.
+    """
+    log.log("[PI] poll loop started")
+    while s.pi_polling:
+        doc = _pi_fetch_slots(s)
+        if doc is None:
+            time.sleep(2.0)
+            continue
+        with s.table_lock:
+            changed = False
+            for entry in doc.get("slots", []):
+                slot_num = entry.get("slot")
+                if slot_num is None:
+                    continue
+                if not entry.get("recognized"):
+                    # slot went (or stayed) empty
+                    if slot_num in s.pi_prev_slots:
+                        s.pi_prev_slots.pop(slot_num, None)
+                    continue
+                rank = entry.get("rank")
+                suit = entry.get("suit")
+                conf = float(entry.get("confidence", 0.0))
+                code = f"{rank}{suit[0]}" if rank and suit else ""
+                prev = s.pi_prev_slots.get(slot_num)
+                if prev == code:
+                    continue  # already processed this card in this slot
+                # New or changed card in this slot
+                if s.pending_verify and s.pending_verify.get("slot") == slot_num:
+                    # Don't spam; wait for the modal to resolve
+                    continue
+                if conf >= s.pi_confidence_threshold:
+                    # Auto-accept
+                    s.rodney_hand.append({
+                        "type": "down",
+                        "rank": rank,
+                        "suit": suit,
+                        "slot": slot_num,
+                        "confidence": round(conf, 2),
+                    })
+                    s.pi_prev_slots[slot_num] = code
+                    _table_log_add(s, f"Slot {slot_num}: {code} (auto, {int(conf*100)}%)")
+                    changed = True
+                else:
+                    # Route to manual verify modal
+                    s.pending_verify = {
+                        "slot": slot_num,
+                        "guess": {"rank": rank, "suit": suit, "confidence": round(conf, 2)},
+                        "prompt": f"Low confidence on slot {slot_num}. Hold the card up for Rodney and confirm / override.",
+                    }
+                    _table_log_add(s, f"Slot {slot_num}: verify needed (guess {code}, {int(conf*100)}%)")
+                    changed = True
+            if changed:
+                s.table_state_version += 1
+        time.sleep(1.0)
+    log.log("[PI] poll loop stopped")
+
+
+def _pi_poll_start(s):
+    if s.pi_polling:
+        return
+    s.pi_polling = True
+    s.pi_prev_slots = {}
+    t = Thread(target=_pi_poll_loop, args=(s,), daemon=True)
+    s.pi_poll_thread = t
+    t.start()
+
+
+def _pi_poll_stop(s):
+    s.pi_polling = False
+    # Don't join — daemon thread will exit on its own
+
+
+def _resolve_verify(s, card_dict):
+    """Add a card_dict to rodney_hand from a verify action and clear the modal."""
+    with s.table_lock:
+        pv = s.pending_verify
+        if not pv:
+            return False
+        slot = pv.get("slot")
+        s.rodney_hand.append({
+            "type": "down",
+            "rank": card_dict["rank"],
+            "suit": card_dict["suit"],
+            "slot": slot,
+        })
+        code = f"{card_dict['rank']}{card_dict['suit'][0]}"
+        if slot is not None:
+            s.pi_prev_slots[slot] = code
+        s.pending_verify = None
+        _table_log_add(s, f"Slot {slot}: {code} (verified)")
+        s.table_state_version += 1
+    return True
+
 
 # ---------------------------------------------------------------------------
 # Deal mode — dictation for game name, then visual recognition for cards
@@ -1832,6 +1969,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 cv2.imwrite(str(path), cropped)
                 log.log(f"Snapshot saved: {path.name}")
             self._r(200,"application/json",'{"ok":true}')
+
+        # --- Observer table view ---
+
+        elif p == "/api/table/pi_start":
+            _pi_poll_start(s)
+            self._r(200, "application/json", '{"ok":true,"polling":true}')
+
+        elif p == "/api/table/pi_stop":
+            _pi_poll_stop(s)
+            self._r(200, "application/json", '{"ok":true,"polling":false}')
+
+        elif p == "/api/table/reset_hand":
+            with s.table_lock:
+                s.rodney_hand = []
+                s.pending_verify = None
+                s.pi_prev_slots = {}
+                _table_log_add(s, "Remote hand cleared")
+                s.table_state_version += 1
+            self._r(200, "application/json", '{"ok":true}')
+
+        elif p == "/api/table/verify":
+            action = data.get("action", "")
+            ok = False
+            if action == "confirm":
+                pv = s.pending_verify
+                if pv and pv.get("guess"):
+                    g = pv["guess"]
+                    if g.get("rank") and g.get("suit"):
+                        ok = _resolve_verify(s, {"rank": g["rank"], "suit": g["suit"]})
+            elif action == "override":
+                parsed = _parse_card_code(data.get("code", ""))
+                if parsed:
+                    ok = _resolve_verify(s, parsed)
+            self._r(200, "application/json", json.dumps({"ok": ok}))
 
         # --- Console (dealer phone UI) ---
 

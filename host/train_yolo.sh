@@ -33,13 +33,26 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-pip3 install --quiet ultralytics opencv-python numpy
+# Ensure training deps are present. Prefer a local venv if one exists
+# at host/.venv; otherwise try the current Python. PEP 668-managed
+# system Pythons (Homebrew) block naked `pip install`, so install only
+# if the modules are actually missing.
+if [[ -x "$(dirname "$0")/.venv/bin/python3" ]]; then
+    PY="$(dirname "$0")/.venv/bin/python3"
+else
+    PY=python3
+fi
+
+if ! "$PY" -c "import ultralytics, cv2, numpy" 2>/dev/null; then
+    echo "Installing training deps with $PY ..."
+    "$PY" -m pip install --quiet --break-system-packages ultralytics opencv-python numpy
+fi
 
 if [[ -z "$SKIP_PREP" ]]; then
     echo ""
     echo "=== Preparing dataset ==="
     echo ""
-    python3 prepare_training.py "${PREP_ARGS[@]}"
+    "$PY" prepare_training.py "${PREP_ARGS[@]}"
     echo ""
 fi
 
@@ -59,7 +72,7 @@ echo ""
 BASE_MODEL="${BASE_MODEL:-yolov8s.pt}"
 echo "Base model: $BASE_MODEL"
 
-python3 -c "
+"$PY" -c "
 import os
 from pathlib import Path
 from ultralytics import YOLO
