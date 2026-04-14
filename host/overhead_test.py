@@ -35,7 +35,7 @@ from game_engine import GameEngine
 PLAYER_NAMES = ["Steve", "Bill", "David", "Joe", "Rodney"]
 NUM_ZONES = len(PLAYER_NAMES)
 
-DEFAULT_CAMERA_INDEX = 0
+DEFAULT_CAMERA_INDEX = 1  # Brio on the Thunderbolt hub; 0 is the MacBook built-in
 DEFAULT_THRESHOLD = 30.0
 DEFAULT_RESOLUTION = "auto"
 
