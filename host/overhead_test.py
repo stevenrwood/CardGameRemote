@@ -755,6 +755,7 @@ class AppState:
         self.pi_prev_slots = {}        # slot_num -> last-seen card code (e.g. "Ac")
         self.table_lock = Lock()       # guards rodney_hand / pending_verify / table_log
         self.pi_confidence_threshold = 0.70
+        self.folded_players = set()     # Rodney's view of who's folded this hand
 
 _state = None
 
@@ -813,7 +814,7 @@ def _build_table_state(s):
             "position": p.position,
             "is_dealer": p.is_dealer,
             "is_remote": p.is_remote,
-            "folded": False,   # no folding logic yet
+            "folded": p.name in s.folded_players,
         }
         if p.is_remote:
             entry["hand"] = list(s.rodney_hand)
@@ -834,6 +835,9 @@ def _build_table_state(s):
             "name": current_game or "",
             "round": getattr(ge, "draw_round", 0),
             "wild_label": ge.wild_label or "",
+            "wild_ranks": list(getattr(ge, "wild_ranks", []) or []),
+            "current_round": s.console_up_round,
+            "total_rounds": s.console_total_up_rounds,
             "state": getattr(ge.state, "value", str(ge.state)),
         },
         "dealer": ge.get_dealer().name,
@@ -1574,57 +1578,86 @@ TABLE_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,sans-serif;background:#0d1b2a;color:#e0e0e0;padding:14px;min-height:100vh}
-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;padding:12px 16px;background:#16213e;border-radius:10px}
-header .game{font-size:1.3em;font-weight:600}
-header .meta{color:#aaa}
-.players{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:14px}
-.player{background:#16213e;border-radius:10px;padding:10px 12px;border:2px solid transparent}
-.player.dealer{border-color:#ffd54f}
-.player.remote{border-color:#4fc3f7}
-.player .name{font-weight:700;margin-bottom:4px;display:flex;justify-content:space-between;align-items:baseline}
-.player .tags{font-size:.75em;color:#aaa}
-.hand{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;min-height:70px}
-.card{width:60px;height:84px;border-radius:6px;overflow:hidden;background:#fff;border:1px solid #333;position:relative;box-shadow:0 1px 2px rgba(0,0,0,.4)}
+html,body{height:100%}
+body{font-family:-apple-system,sans-serif;background:#0d1b2a;color:#e0e0e0;overflow:hidden;display:flex;flex-direction:column}
+
+/* Top bar */
+header{flex:0 0 auto;display:flex;justify-content:space-between;align-items:center;
+  padding:10px 18px;background:#16213e;border-bottom:1px solid #1f3560;font-size:.95em}
+header .group{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+header .lbl{color:#8faacc;margin-right:4px;font-size:.85em}
+header .val{color:#e0e0e0;font-weight:600}
+header .val.game{color:#4fc3f7;font-size:1.1em}
+header button{padding:6px 12px;background:#0f3460;color:#fff;border:none;border-radius:6px;
+  cursor:pointer;font-size:.85em}
+header button:hover{background:#1a5a9a}
+
+/* Table area split into three rows */
+.table{flex:1 1 auto;display:grid;grid-template-rows:1fr 1fr 1fr;gap:8px;padding:10px;min-height:0}
+.row{display:flex;align-items:center;min-height:0}
+.row.top, .row.middle{justify-content:space-between}
+.row.bottom{justify-content:center}
+
+/* Per-player hand region */
+.hand-box{display:flex;flex-direction:column;min-height:0;max-width:48%;height:100%}
+.hand-box.center{max-width:90%;align-items:center}
+.hand-box .head{display:flex;gap:6px;align-items:baseline;margin-bottom:4px}
+.hand-box .name{font-weight:700;font-size:1em}
+.hand-box .name.dealer{color:#ffd54f}
+.hand-box .name.remote{color:#4fc3f7}
+.hand-box .sml-btn{padding:2px 8px;background:#0f3460;color:#fff;border:none;border-radius:4px;
+  cursor:pointer;font-size:.75em}
+.hand-box .sml-btn.active{background:#1b5e20}
+.hand-box .sml-btn.folded{background:#b71c1c}
+.hand-box .cards{flex:1 1 auto;display:flex;gap:4px;align-items:flex-start;min-height:0;overflow:hidden}
+.hand-box.center .cards{justify-content:center}
+.hand-box.folded .cards{opacity:.3;filter:grayscale(60%)}
+
+/* Card art scales to 80% of the row height */
+.card{height:80%;aspect-ratio:2.5/3.5;border-radius:6px;overflow:hidden;background:#fff;
+  border:1px solid #333;box-shadow:0 1px 3px rgba(0,0,0,.5);flex-shrink:0;position:relative}
 .card img{width:100%;height:100%;display:block;object-fit:contain;background:#fff}
-.card.offset-down{margin-top:10px}
-.card.down img{background:#2b3a55}
-.card.missing{background:#1a3a5a;border-color:#4fc3f7;display:flex;align-items:center;justify-content:center;color:#eee;font-size:.8em}
-.toolbar{display:flex;gap:8px;align-items:center;margin-bottom:14px}
-.toolbar button{padding:6px 12px;background:#0f3460;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:.9em}
-.toolbar button.active{background:#1b5e20}
-.log{background:#0f3460;border-radius:10px;padding:10px 14px;margin-top:10px}
-.log h3{font-size:.95em;color:#4fc3f7;margin-bottom:6px}
-.log-line{font-size:.85em;color:#ccc;padding:2px 0}
-.modal{position:fixed;inset:0;background:rgba(0,0,0,.82);display:none;align-items:center;justify-content:center;z-index:50}
+.card.offset-down{transform:translateY(10px)}
+.card.missing{background:#1a3a5a;display:flex;align-items:center;justify-content:center;color:#eee;font-size:.8em}
+
+/* Verify modal */
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;
+  justify-content:center;z-index:50}
 .modal.show{display:flex}
 .modal-inner{background:#16213e;padding:20px 24px;border-radius:12px;max-width:460px;width:90%}
 .modal h2{color:#4fc3f7;font-size:1.1em;margin-bottom:10px}
 .modal .guess{padding:10px;background:#0f3460;border-radius:6px;margin:10px 0;font-size:1.05em}
-.modal input{width:100%;padding:10px;border-radius:6px;border:1px solid #333;background:#0d1b2a;color:#e0e0e0;font-size:1em;font-family:inherit}
+.modal input{width:100%;padding:10px;border-radius:6px;border:1px solid #333;background:#0d1b2a;
+  color:#e0e0e0;font-size:1em;font-family:inherit}
 .modal .buttons{display:flex;gap:8px;margin-top:14px}
 .modal button{flex:1;padding:12px;border:none;border-radius:8px;cursor:pointer;font-weight:600}
 .btn-green{background:#1b5e20;color:#fff}
 .btn-red{background:#b71c1c;color:#fff}
 </style></head><body>
 <header>
-  <div>
-    <div class="game" id="game-name">—</div>
-    <div class="meta" id="game-meta">—</div>
+  <div class="group">
+    <span><span class="lbl">Game</span><span class="val game" id="game-name">—</span></span>
+    <span><span class="lbl">Dealer</span><span class="val" id="dealer-name">—</span></span>
+    <span><span class="lbl">Round</span><span class="val" id="round-info">—</span></span>
+    <span><span class="lbl">Wilds</span><span class="val" id="wilds-info">—</span></span>
   </div>
-  <div style="text-align:right">
-    <div id="dealer-name">—</div>
-    <div class="meta" id="current-player">—</div>
+  <div class="group">
+    <button onclick="openLogs()">Logs</button>
   </div>
 </header>
-<div class="toolbar">
-  <span style="color:#aaa;font-size:.9em">Your hand:</span>
-  <button id="sort-btn" onclick="toggleSort()">Deal order</button>
-</div>
-<div class="players" id="players"></div>
-<div class="log">
-  <h3>Hand log</h3>
-  <div id="log"></div>
+
+<div class="table">
+  <div class="row top">
+    <div class="hand-box" id="box-Bill"></div>
+    <div class="hand-box" id="box-David"></div>
+  </div>
+  <div class="row middle">
+    <div class="hand-box" id="box-Steve"></div>
+    <div class="hand-box" id="box-Joe"></div>
+  </div>
+  <div class="row bottom">
+    <div class="hand-box center" id="box-Rodney"></div>
+  </div>
 </div>
 
 <div class="modal" id="verify-modal">
@@ -1642,22 +1675,20 @@ header .meta{color:#aaa}
 
 <script>
 var SUIT_SYM = {clubs:"\u2663",diamonds:"\u2666",hearts:"\u2665",spades:"\u2660"};
-var SORT_MODE = "deal";   // "deal" | "sort"
-var lastVersion = -1;
-var lastEtag = null;
-
-function toggleSort() {
-  SORT_MODE = (SORT_MODE === "deal") ? "sort" : "deal";
-  document.getElementById('sort-btn').textContent =
-    SORT_MODE === "deal" ? "Deal order" : "Sorted";
-  document.getElementById('sort-btn').classList.toggle('active', SORT_MODE === "sort");
-  render(window._lastState);
-}
-
-function isRed(suit) { return suit === "hearts" || suit === "diamonds"; }
-
 var RANK_FILE = {"2":"2","3":"3","4":"4","5":"5","6":"6","7":"7","8":"8","9":"9","10":"10",
                  "J":"jack","Q":"queen","K":"king","A":"ace"};
+var RANK_ORDER = {"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"10":10,"J":11,"Q":12,"K":13,"A":14};
+
+// Per-player sort preference; default deal order.
+var sortMode = {};    // name -> "deal" | "rank"
+var lastVersion = -1;
+var lastEtag = null;
+var _logWin = null;
+
+function openLogs() {
+  if (_logWin && !_logWin.closed) { _logWin.focus(); return; }
+  _logWin = window.open('/logview', '_tablelogs', 'width=900,height=500,scrollbars=yes');
+}
 
 function cardImgUrl(rank, suit) {
   var r = RANK_FILE[rank];
@@ -1672,7 +1703,7 @@ function cardEl(card) {
     var back = document.createElement('img');
     back.src = '/cards/back.svg';
     back.alt = 'card back';
-    el.classList.add('down');
+    el.classList.add('offset-down');
     el.appendChild(back);
     return el;
   }
@@ -1686,12 +1717,13 @@ function cardEl(card) {
   return el;
 }
 
-var RANK_ORDER = {"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9,"10":10,"J":11,"Q":12,"K":13,"A":14};
-
-function sortHand(hand) {
-  if (SORT_MODE !== "sort") return hand;
-  var copy = hand.slice();
+function sortCards(cards, mode) {
+  if (mode !== "rank") return cards;
+  var copy = cards.slice();
   copy.sort(function(a,b) {
+    // Put down (unknown) cards first, then sort the rest by rank
+    var aKnown = !!a.rank, bKnown = !!b.rank;
+    if (aKnown !== bKnown) return aKnown ? 1 : -1;
     var ra = RANK_ORDER[a.rank] || 0, rb = RANK_ORDER[b.rank] || 0;
     if (ra !== rb) return ra - rb;
     return (a.suit || "").localeCompare(b.suit || "");
@@ -1699,55 +1731,93 @@ function sortHand(hand) {
   return copy;
 }
 
-function playerTile(p) {
-  var tile = document.createElement('div');
-  tile.className = 'player';
-  if (p.is_dealer) tile.classList.add('dealer');
-  if (p.is_remote) tile.classList.add('remote');
-  var name = document.createElement('div');
-  name.className = 'name';
-  name.innerHTML = '<span>' + p.name + '</span>' +
-    '<span class="tags">' + (p.is_dealer?'D ':'') + (p.is_remote?'★':'') + '</span>';
-  tile.appendChild(name);
-  var hand = document.createElement('div');
-  hand.className = 'hand';
-  if (p.is_remote) {
-    sortHand(p.hand || []).forEach(function(c){ hand.appendChild(cardEl(c)); });
-  } else {
-    (p.up_cards || []).forEach(function(c){
-      hand.appendChild(cardEl({type:'up', rank:c.rank, suit:c.suit}));
-    });
-    for (var i = 0; i < (p.down_count || 0); i++) {
-      hand.appendChild(cardEl({type:'down', hidden:true}));
-    }
+function buildCards(p) {
+  // Normalized list of cards for this player.
+  if (p.is_remote) return (p.hand || []).slice();
+  var cards = [];
+  (p.up_cards || []).forEach(function(c){
+    cards.push({type:'up', rank:c.rank, suit:c.suit});
+  });
+  for (var i = 0; i < (p.down_count || 0); i++) {
+    cards.push({type:'down', hidden:true});
   }
-  tile.appendChild(hand);
-  return tile;
+  return cards;
+}
+
+function toggleSort(name) {
+  sortMode[name] = (sortMode[name] === "rank") ? "deal" : "rank";
+  renderPlayer(window._playersByName[name]);
+}
+
+function toggleFold(name, currentlyFolded) {
+  fetch('/api/table/fold', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({player: name, folded: !currentlyFolded})
+  });
+}
+
+function renderPlayer(p) {
+  if (!p) return;
+  var box = document.getElementById('box-' + p.name);
+  if (!box) return;
+  var folded = !!p.folded;
+  box.classList.toggle('folded', folded);
+
+  // Header: name + Deal/Rank toggle + Fold button
+  var head = document.createElement('div');
+  head.className = 'head';
+  var nm = document.createElement('span');
+  nm.className = 'name' + (p.is_dealer ? ' dealer' : '') + (p.is_remote ? ' remote' : '');
+  nm.textContent = p.name + (p.is_dealer ? ' (D)' : '');
+  head.appendChild(nm);
+
+  var mode = sortMode[p.name] || "deal";
+  var sortBtn = document.createElement('button');
+  sortBtn.className = 'sml-btn' + (mode === "rank" ? ' active' : '');
+  sortBtn.textContent = (mode === "rank") ? 'Rank Order' : 'Deal Order';
+  sortBtn.onclick = function(){ toggleSort(p.name); };
+  head.appendChild(sortBtn);
+
+  var foldBtn = document.createElement('button');
+  foldBtn.className = 'sml-btn' + (folded ? ' folded' : '');
+  foldBtn.textContent = folded ? 'Folded' : 'Fold';
+  foldBtn.onclick = function(){ toggleFold(p.name, folded); };
+  head.appendChild(foldBtn);
+
+  var cardRow = document.createElement('div');
+  cardRow.className = 'cards';
+  var cards = sortCards(buildCards(p), mode);
+  cards.forEach(function(c){ cardRow.appendChild(cardEl(c)); });
+
+  box.innerHTML = '';
+  box.appendChild(head);
+  box.appendChild(cardRow);
 }
 
 function render(state) {
   if (!state) return;
   window._lastState = state;
+  var byName = {};
+  state.players.forEach(function(p){ byName[p.name] = p; });
+  window._playersByName = byName;
+
   document.getElementById('game-name').textContent = state.game.name || 'No game';
-  var meta = [];
-  if (state.game.round) meta.push('Round ' + state.game.round);
-  if (state.game.wild_label) meta.push(state.game.wild_label);
-  if (state.game.state) meta.push(state.game.state);
-  document.getElementById('game-meta').textContent = meta.join(' \u00b7 ');
-  document.getElementById('dealer-name').textContent = 'Dealer: ' + (state.dealer || '—');
-  document.getElementById('current-player').textContent =
-    state.current_player ? ('Acting: ' + state.current_player) : '';
-  var pcont = document.getElementById('players');
-  pcont.innerHTML = '';
-  state.players.forEach(function(p){ pcont.appendChild(playerTile(p)); });
-  var lc = document.getElementById('log');
-  lc.innerHTML = '';
-  state.log.slice().reverse().forEach(function(e){
-    var d = document.createElement('div');
-    d.className = 'log-line';
-    d.textContent = e.msg || e;
-    lc.appendChild(d);
+  document.getElementById('dealer-name').textContent = state.dealer || '—';
+  var cur = state.game.current_round || 0;
+  var tot = state.game.total_rounds || 0;
+  document.getElementById('round-info').textContent =
+    tot ? (cur + ' of ' + tot) : (cur ? String(cur) : '—');
+  var wilds = state.game.wild_ranks || [];
+  document.getElementById('wilds-info').textContent = wilds.length ? wilds.join(', ') : '—';
+
+  // Render every configured box; missing players just get cleared.
+  ['Bill','David','Steve','Joe','Rodney'].forEach(function(nm) {
+    var p = byName[nm];
+    var box = document.getElementById('box-' + nm);
+    if (!p) { if (box) box.innerHTML = ''; return; }
+    renderPlayer(p);
   });
+
   var pv = state.pending_verify;
   var modal = document.getElementById('verify-modal');
   if (pv) {
@@ -1992,9 +2062,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.rodney_hand = []
                 s.pending_verify = None
                 s.pi_prev_slots = {}
+                s.folded_players = set()
                 _table_log_add(s, "Remote hand cleared")
                 s.table_state_version += 1
             self._r(200, "application/json", '{"ok":true}')
+
+        elif p == "/api/table/fold":
+            name = str(data.get("player", "")).strip()
+            folded = bool(data.get("folded", True))
+            ge = s.game_engine
+            valid = next((pl.name for pl in ge.players if pl.name.lower() == name.lower()), None)
+            if not valid:
+                return self._r(400, "application/json", '{"ok":false,"error":"unknown player"}')
+            with s.table_lock:
+                if folded:
+                    s.folded_players.add(valid)
+                else:
+                    s.folded_players.discard(valid)
+                _table_log_add(s, f"{valid} {'folded' if folded else 'unfolded'}")
+                s.table_state_version += 1
+            self._r(200, "application/json",
+                    json.dumps({"ok": True, "player": valid, "folded": folded}))
 
         elif p == "/api/table/verify":
             action = data.get("action", "")
