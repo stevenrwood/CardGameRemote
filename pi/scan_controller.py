@@ -578,9 +578,16 @@ button:disabled{opacity:.4;cursor:not-allowed}
 table.matrix-table{border-collapse:collapse;font-size:.72em;min-width:100%}
 table.matrix-table th,table.matrix-table td{padding:2px 4px;border:1px solid #222;text-align:center}
 table.matrix-table th{background:#0f3460;color:#fff}
-table.matrix-table td.trained{background:#1b5e20}
+table.matrix-table td.trained{background:#1b5e20;cursor:pointer}
+table.matrix-table td.trained:hover{background:#2e7d32}
 table.matrix-table td.active{outline:2px solid #4fc3f7}
 table.matrix-table td.red{color:#ef9a9a}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:100}
+.modal.show{display:flex}
+.modal-content{background:#16213e;padding:16px;border-radius:10px;max-width:90%;max-height:90%;text-align:center}
+.modal-content img{max-width:300px;max-height:60vh;border:2px solid #444;border-radius:4px;background:#000}
+.modal-content .title{font-size:1.2em;margin-bottom:8px}
+.modal-content .buttons{margin-top:12px;display:flex;gap:8px;justify-content:center}
 .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
 label{font-size:.9em}
 input[type=number]{padding:8px;background:#0f3460;color:#fff;border:1px solid #333;border-radius:4px;width:4em}
@@ -606,6 +613,16 @@ input[type=number]{padding:8px;background:#0f3460;color:#fff;border:1px solid #3
 </div>
 <div class="matrix">
   <table class="matrix-table" id="matrix"></table>
+</div>
+<div class="modal" id="modal" onclick="closeModal(event)">
+  <div class="modal-content" onclick="event.stopPropagation()">
+    <div class="title" id="modal-title">—</div>
+    <img id="modal-img" src="" alt="template"/>
+    <div class="buttons">
+      <button class="btn-red" onclick="retrainFromModal()">Retrain</button>
+      <button onclick="closeModal()">Close</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -659,7 +676,6 @@ function refreshStatus() {
 
 function renderMatrix() {
   var t = document.getElementById('matrix');
-  // header row: slot numbers
   var html = '<tr><th></th>';
   SLOTS.forEach(function(s){ html += '<th>Slot ' + s + '</th>'; });
   html += '</tr>';
@@ -671,15 +687,61 @@ function renderMatrix() {
         var isActive = (ORDER[idx] &&
           ORDER[idx].rank===r && ORDER[idx].suit===s && ORDER[idx].slot===slot);
         var cls = [];
-        if (isTrained(step)) cls.push('trained');
+        var attrs = '';
+        if (isTrained(step)) {
+          cls.push('trained');
+          attrs = ' data-slot="' + slot + '" data-card="' + cardCode(r, s) + '"';
+        }
         if (isActive) cls.push('active');
         if (isRed(s)) cls.push('red');
-        html += '<td class="' + cls.join(' ') + '">' + (isTrained(step)?'✓':'') + '</td>';
+        html += '<td class="' + cls.join(' ') + '"' + attrs + '>' + (isTrained(step)?'✓':'') + '</td>';
       });
       html += '</tr>';
     });
   });
   t.innerHTML = html;
+}
+
+document.getElementById('matrix').addEventListener('click', function(ev) {
+  var cell = ev.target.closest('td[data-slot]');
+  if (!cell) return;
+  showTemplate(parseInt(cell.dataset.slot, 10), cell.dataset.card);
+});
+
+var modalSlot = null;
+var modalCard = null;
+function showTemplate(slot, card) {
+  modalSlot = slot;
+  modalCard = card;
+  document.getElementById('modal-title').textContent =
+    'Slot ' + slot + ' — ' + card.toUpperCase();
+  document.getElementById('modal-img').src =
+    '/train/template/' + slot + '/' + card + '?t=' + Date.now();
+  document.getElementById('modal').classList.add('show');
+}
+function closeModal(ev) {
+  if (ev && ev.target !== ev.currentTarget) return;
+  document.getElementById('modal').classList.remove('show');
+  modalSlot = null; modalCard = null;
+}
+function retrainFromModal() {
+  if (modalSlot == null || !modalCard) return;
+  var m = /^(10|[2-9jqka])([hdcs])$/i.exec(modalCard);
+  if (!m) return;
+  var rank = m[1].toUpperCase();
+  var suitLetter = m[2].toLowerCase();
+  var suit = {c:"clubs",d:"diamonds",h:"hearts",s:"spades"}[suitLetter];
+  closeModal();
+  if (!confirm('Capture a new image for slot ' + modalSlot + ' / ' + modalCard.toUpperCase() +
+               ' now? Make sure the card is in the slot.')) return;
+  fetch('/train/capture', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({rank:rank, suit:suit, slot: parseInt(modalSlot, 10)})
+  }).then(function(r){return r.json()}).then(function(d) {
+    if (!d.ok) { alert('Capture failed: ' + d.error); return; }
+    refreshStatus();
+  });
 }
 
 function describeStep(step) {
