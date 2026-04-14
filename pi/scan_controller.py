@@ -570,6 +570,57 @@ def train_page():
     return TRAIN_HTML
 
 
+@app.get("/train/validate/<int:slot_num>")
+def train_validate(slot_num: int):
+    """Render a 4x13 grid of all 52 templates for a slot so the user can
+    eyeball whether every capture is complete and correct."""
+    if slot_num < 1 or slot_num > 7:
+        return "slot must be 1..7", 400
+    rows = []
+    for suit in SUITS:
+        cells = []
+        for rank in RANKS:
+            suit_letter = suit[0]
+            code = f"{rank}{suit_letter}"
+            cells.append((rank, suit, code))
+        rows.append((suit, cells))
+    red_suits = {"hearts", "diamonds"}
+
+    html_rows = []
+    for suit, cells in rows:
+        row_color = "color:#ef9a9a" if suit in red_suits else "color:#e0e0e0"
+        row_html = f'<tr><th style="{row_color};padding:4px 8px">{suit.capitalize()}</th>'
+        for rank, _s, code in cells:
+            img_src = f"/train/template/{slot_num}/{code}?t={int(time.time())}"
+            row_html += (
+                f'<td style="padding:4px;text-align:center;vertical-align:top">'
+                f'<div style="font-size:.85em;color:#888">{rank}</div>'
+                f'<img src="{img_src}" alt="{code}" '
+                f'style="max-width:90px;max-height:180px;border:1px solid #333;background:#000;display:block;margin:0 auto"'
+                f' onerror="this.style.visibility=\'hidden\';this.parentNode.innerHTML+=\'<div style=&quot;color:#b71c1c;font-size:.8em&quot;>missing</div>\'" />'
+                f"</td>"
+            )
+        row_html += "</tr>"
+        html_rows.append(row_html)
+
+    header = '<tr><th></th>' + "".join(f'<th style="color:#aaa;font-weight:normal">{r}</th>' for r in RANKS) + '</tr>'
+    body = header + "".join(html_rows)
+
+    page = f"""<!DOCTYPE html>
+<html><head><title>Slot {slot_num} — Validate Templates</title>
+<style>
+body{{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:12px;margin:0}}
+h1{{font-size:1.2em;margin:4px 0}}
+table{{border-collapse:collapse;margin-top:10px}}
+th{{text-align:left}}
+</style></head><body>
+<h1>Slot {slot_num} — captured templates ({len(_state.detector.list_slot_templates().get(slot_num, []))}/52)</h1>
+<div style="color:#aaa;font-size:.9em">4 suits × 13 ranks. Missing captures show "missing".</div>
+<table>{body}</table>
+</body></html>"""
+    return page
+
+
 TRAIN_HTML = """<!DOCTYPE html>
 <html><head><title>Train Card Templates</title>
 <style>
@@ -633,6 +684,16 @@ input[type=number]{padding:8px;background:#0f3460;color:#fff;border:1px solid #3
 </div>
 <div class="matrix">
   <table class="matrix-table" id="matrix"></table>
+</div>
+<div class="modal" id="slot-menu" onclick="closeSlotMenu(event)">
+  <div class="modal-content" onclick="event.stopPropagation()">
+    <div class="title" id="slot-menu-title">Slot —</div>
+    <div class="buttons">
+      <button class="btn-green" onclick="validateSlot()">Validate (open in new tab)</button>
+      <button class="btn-red" onclick="resetSlot()">Reset slot</button>
+      <button onclick="closeSlotMenu()">Cancel</button>
+    </div>
+  </div>
 </div>
 <div class="modal" id="modal" onclick="closeModal(event)">
   <div class="modal-content" onclick="event.stopPropagation()">
@@ -733,17 +794,35 @@ function renderMatrix() {
 document.getElementById('matrix').addEventListener('click', function(ev) {
   var header = ev.target.closest('th[data-reset-slot]');
   if (header) {
-    var slot = parseInt(header.dataset.resetSlot, 10);
-    if (confirm('Delete all trained templates for slot ' + slot + '?')) {
-      fetch('/train/reset/' + slot, {method:'DELETE'})
-        .then(function(r){return r.json()}).then(refreshStatus);
-    }
+    openSlotMenu(parseInt(header.dataset.resetSlot, 10));
     return;
   }
   var cell = ev.target.closest('td[data-slot]');
   if (!cell) return;
   showTemplate(parseInt(cell.dataset.slot, 10), cell.dataset.card);
 });
+
+function openSlotMenu(slot) {
+  document.getElementById('slot-menu-title').textContent = 'Slot ' + slot;
+  document.getElementById('slot-menu').dataset.slot = slot;
+  document.getElementById('slot-menu').classList.add('show');
+}
+function closeSlotMenu(ev) {
+  if (ev && ev.target !== ev.currentTarget) return;
+  document.getElementById('slot-menu').classList.remove('show');
+}
+function validateSlot() {
+  var slot = document.getElementById('slot-menu').dataset.slot;
+  window.open('/train/validate/' + slot, '_blank');
+  closeSlotMenu();
+}
+function resetSlot() {
+  var slot = document.getElementById('slot-menu').dataset.slot;
+  closeSlotMenu();
+  if (!confirm('Delete all trained templates for slot ' + slot + '?')) return;
+  fetch('/train/reset/' + slot, {method:'DELETE'})
+    .then(function(r){return r.json()}).then(refreshStatus);
+}
 
 var modalSlot = null;
 var modalCard = null;
