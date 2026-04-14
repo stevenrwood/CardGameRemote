@@ -103,24 +103,34 @@ class Camera:
             main={"size": (2304, 1296), "format": "RGB888"},
         )
         self.cam.configure(cfg)
-        # Lock exposure for consistent flash-lit captures; keep AWB enabled
-        # so colors look right. AfMode=Continuous keeps cards in focus.
+        # Runtime-tunable settings
+        self.exposure_us = 20000    # 20ms
+        self.gain = 1.0             # analogue gain
+        self._apply_controls()
+        self.cam.start()
+        time.sleep(0.5)  # warmup + AF settle
+        log.info(f"Camera {camera_index} started at {cfg['main']['size']}")
+
+    def _apply_controls(self):
         controls = {
-            "AeEnable": False,       # disable auto-exposure
-            "ExposureTime": 20000,   # 20ms — long enough for LED flash to fully illuminate
-            "AnalogueGain": 1.0,     # minimum gain to reduce noise
-            "AwbEnable": True,       # auto white balance
+            "AeEnable": False,
+            "ExposureTime": int(self.exposure_us),
+            "AnalogueGain": float(self.gain),
+            "AwbEnable": True,
         }
-        # Camera v3 has autofocus; v2 and HQ don't. Ignore control errors.
         try:
             from libcamera import controls as libc
             controls["AfMode"] = libc.AfModeEnum.Continuous
         except Exception:
             pass
         self.cam.set_controls(controls)
-        self.cam.start()
-        time.sleep(0.5)  # warmup + AF settle
-        log.info(f"Camera {camera_index} started at {cfg['main']['size']}")
+
+    def set_exposure(self, exposure_us: int | None = None, gain: float | None = None):
+        if exposure_us is not None:
+            self.exposure_us = int(exposure_us)
+        if gain is not None:
+            self.gain = float(gain)
+        self._apply_controls()
 
     def capture(self) -> np.ndarray:
         with self._lock:
@@ -139,6 +149,7 @@ class AppState:
             self.cameras[idx] = Camera(idx)
         self.detector = CardDetector(str(REFERENCE_DIR))
         self.last_frames: dict[int, np.ndarray] = {}
+        self.flash_settle_ms = 50  # ms between flash-on and capture
         log.info(f"Scan controller ready with {len(self.cameras)} cameras")
 
     def capture_with_flash(self, camera_idx: int) -> np.ndarray:
@@ -146,7 +157,7 @@ class AppState:
         cam = self.cameras[camera_idx]
         self.flash.on()
         try:
-            time.sleep(0.05)
+            time.sleep(self.flash_settle_ms / 1000.0)
             frame = cam.capture()
         finally:
             self.flash.off()
@@ -157,7 +168,7 @@ class AppState:
         """Capture from all cameras during one flash pulse."""
         self.flash.on()
         try:
-            time.sleep(0.05)
+            time.sleep(self.flash_settle_ms / 1000.0)
             frames = {idx: cam.capture() for idx, cam in self.cameras.items()}
         finally:
             self.flash.off()
@@ -236,6 +247,36 @@ def capture_both():
     if not ok:
         return "encode failed", 500
     return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg")
+
+
+@app.post("/camera_settings")
+def camera_settings():
+    """Update exposure and gain on all cameras at runtime.
+
+    JSON body:
+      {"exposure_ms": 40, "gain": 2.0, "flash_settle_ms": 80}
+
+    All fields optional. Returns current settings.
+    """
+    assert _state is not None
+    body = request.get_json(silent=True) or {}
+    if "exposure_ms" in body:
+        us = int(float(body["exposure_ms"]) * 1000)
+        for cam in _state.cameras.values():
+            cam.set_exposure(exposure_us=us)
+    if "gain" in body:
+        g = float(body["gain"])
+        for cam in _state.cameras.values():
+            cam.set_exposure(gain=g)
+    if "flash_settle_ms" in body:
+        _state.flash_settle_ms = int(body["flash_settle_ms"])
+
+    any_cam = next(iter(_state.cameras.values()))
+    return jsonify({
+        "exposure_ms": any_cam.exposure_us / 1000.0,
+        "gain": any_cam.gain,
+        "flash_settle_ms": _state.flash_settle_ms,
+    })
 
 
 @app.post("/flash_test")
