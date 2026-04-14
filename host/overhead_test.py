@@ -825,7 +825,7 @@ def _build_table_state(s):
             if up_cards and not existing_up:
                 entry["hand"].extend([{"type": "up", **c} for c in up_cards])
         else:
-            entry["down_count"] = 0   # populated later when deal flow is wired
+            entry["down_count"] = _down_cards_dealt_so_far(ge)
             entry["up_cards"] = up_cards
         players.append(entry)
 
@@ -891,6 +891,29 @@ def _cards_dealt_so_far(ge):
                 completed += ge.card_in_phase
             break
     return completed
+
+
+def _down_cards_dealt_so_far(ge):
+    """How many 'down' cards each player has received so far in this game.
+
+    Walks DEAL/COMMUNITY phase patterns up to the current position and counts
+    entries equal to 'down'. Since the dealer deals the same card-type to
+    each player in each round, every non-folded player has this many down
+    cards in their hand.
+    """
+    if ge.current_game is None:
+        return 0
+    allowed = _dealing_phase_types()
+    downs = 0
+    for i, ph in enumerate(ge.current_game.phases):
+        if i < ge.phase_index:
+            if ph.type in allowed:
+                downs += sum(1 for t in ph.pattern if t == "down")
+        elif i == ge.phase_index:
+            if ph.type in allowed:
+                downs += sum(1 for t in ph.pattern[:ge.card_in_phase] if t == "down")
+            break
+    return downs
 
 
 def _table_log_add(s, msg):
