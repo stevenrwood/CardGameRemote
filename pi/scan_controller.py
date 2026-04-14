@@ -546,25 +546,31 @@ TRAIN_HTML = """<!DOCTYPE html>
 body{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:12px;margin:0}
 h1{font-size:1.2em;margin:4px 0}
 #status{font-size:1em;color:#4fc3f7;margin:8px 0;padding:8px;background:#0f3460;border-radius:6px}
-button{padding:10px 16px;background:#0f3460;color:#fff;border:none;border-radius:6px;cursor:pointer;margin:3px;font-size:1em}
+button{padding:12px 20px;background:#0f3460;color:#fff;border:none;border-radius:6px;cursor:pointer;margin:3px;font-size:1em}
 button:hover{background:#1a5a9a}
+button:disabled{opacity:.4;cursor:not-allowed}
 .btn-green{background:#1b5e20}
 .btn-red{background:#b71c1c}
-.current{padding:14px;background:#16213e;border-radius:8px;margin:8px 0;text-align:center}
-.current .card{font-size:2.5em;font-weight:700}
-.current .card.red{color:#ef5350}
-.current .card.black{color:#e0e0e0}
-.preview{margin:10px 0;text-align:center}
-.preview img{max-width:240px;border:2px solid #444;border-radius:6px}
+.now{padding:22px;background:#16213e;border-radius:10px;margin:10px 0;text-align:center}
+.now .label{font-size:.95em;color:#aaa;margin-bottom:6px}
+.now .card{font-size:4em;font-weight:700;line-height:1}
+.now .card.red{color:#ef5350}
+.now .card.black{color:#e0e0e0}
+.now .countdown{font-size:3.5em;font-weight:700;margin-top:10px;color:#ffb74d}
+.now.flashing{background:#1b5e20}
+.now.flashing .countdown{color:#e0e0e0}
+.next{padding:10px;background:#0d1b2a;border-radius:8px;margin:8px 0;text-align:center;font-size:.95em;color:#aaa}
+.next .card{font-size:1.4em;font-weight:600;color:#e0e0e0;margin-left:8px}
+.next .card.red{color:#ef9a9a}
 .grid{display:grid;grid-template-columns:repeat(13,1fr);gap:2px;margin-top:12px;font-size:.8em}
-.cell{padding:4px 2px;background:#16213e;border-radius:3px;text-align:center;cursor:pointer;border:1px solid transparent}
+.cell{padding:4px 2px;background:#16213e;border-radius:3px;text-align:center;border:1px solid transparent}
 .cell.trained{background:#1b5e20}
-.cell.current{border-color:#4fc3f7}
+.cell.active{border-color:#4fc3f7;background:#0f3460}
 .cell.red{color:#ef9a9a}
 .row-label{grid-column:1/-1;font-size:.85em;color:#aaa;margin-top:6px}
-.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
 label{font-size:.9em}
-select{padding:8px;background:#0f3460;color:#fff;border:1px solid #333;border-radius:4px}
+select,input[type=number]{padding:8px;background:#0f3460;color:#fff;border:1px solid #333;border-radius:4px;width:4em}
 </style></head><body>
 <h1>Train Card Templates</h1>
 <div id="status">Loading…</div>
@@ -576,20 +582,19 @@ select{padding:8px;background:#0f3460;color:#fff;border:1px solid #333;border-ra
       <option value="5">5</option><option value="6">6</option><option value="7">7</option>
     </select>
   </label>
-  <button onclick="refreshPreview()">Refresh Preview</button>
+  <label>Seconds per card: <input id="delay" type="number" min="1" max="20" value="5"/></label>
+  <button id="start" class="btn-green" onclick="start()">Start</button>
+  <button id="pause" onclick="togglePause()" disabled>Pause</button>
+  <button id="skip" onclick="skipCurrent()" disabled>Skip</button>
+  <button id="reset" class="btn-red" onclick="resetAll()">Reset All</button>
 </div>
-<div class="current">
-  <div>Insert this card into the reference slot:</div>
+<div class="now" id="now">
+  <div class="label">Insert this card into the reference slot:</div>
   <div class="card" id="current-card">—</div>
-  <div class="controls" style="justify-content:center">
-    <button class="btn-green" onclick="captureCurrent()">Capture</button>
-    <button onclick="skipCurrent()">Skip</button>
-    <button class="btn-red" onclick="deleteCurrent()">Delete template</button>
-  </div>
+  <div class="countdown" id="countdown">—</div>
 </div>
-<div class="preview">
-  <div style="font-size:.85em;color:#aaa">Live preview of reference slot:</div>
-  <img id="preview" src="" alt="preview"/>
+<div class="next">
+  Next: <span class="card" id="next-card">—</span>
 </div>
 <div id="grid" class="grid"></div>
 
@@ -597,19 +602,32 @@ select{padding:8px;background:#0f3460;color:#fff;border:1px solid #333;border-ra
 var RANKS = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"];
 var SUITS = ["clubs","diamonds","hearts","spades"];
 var SUIT_SYM = {clubs:"♣",diamonds:"♦",hearts:"♥",spades:"♠"};
-var status_ = [];        // [{rank,suit,trained}]
-var idx = 0;
+var ORDER = [];  // fixed training order: 2C,2D,2H,2S,3C,... (same as YOLO training)
+RANKS.forEach(function(r){ SUITS.forEach(function(s){ ORDER.push({rank:r, suit:s}); }); });
 
-function cardCode(r, s) { return r + s[0]; }
+var status_ = [];        // [{rank,suit,trained}]
+var idx = 0;             // current position in ORDER
+var running = false;
+var paused = false;
+var ticker = null;       // setInterval handle
+var remainingMs = 0;
+var flashing = false;    // true during capture network call
+
+function cardCode(c) { return c.rank + c.suit[0]; }
 function isRed(s) { return s === "hearts" || s === "diamonds"; }
+function cardByIdx(i) { return ORDER[i]; }
 
 function refreshStatus() {
   return fetch('/train/status').then(function(r){return r.json()}).then(function(d) {
-    status_ = d.cards;
+    // build a map for fast trained lookup
+    var m = {};
+    d.cards.forEach(function(c){ m[cardCode(c)] = c.trained; });
+    status_ = ORDER.map(function(c){
+      return {rank:c.rank, suit:c.suit, trained: !!m[cardCode(c)]};
+    });
+    document.getElementById('status').textContent = d.count + ' / 52 cards trained';
     renderGrid();
-    updateCurrent();
-    document.getElementById('status').textContent =
-      d.count + ' / 52 cards trained';
+    updateDisplay();
   });
 }
 
@@ -622,66 +640,142 @@ function renderGrid() {
     header.textContent = s[0].toUpperCase() + s.slice(1) + ' ' + SUIT_SYM[s];
     el.appendChild(header);
     RANKS.forEach(function(r) {
-      var c = status_.find(function(x){return x.rank===r && x.suit===s});
+      var i = ORDER.findIndex(function(c){return c.rank===r && c.suit===s;});
+      var c = status_[i] || {trained:false};
       var cell = document.createElement('div');
       cell.className = 'cell' + (c.trained?' trained':'') +
         (isRed(s)?' red':'') +
-        (status_.indexOf(c)===idx?' current':'');
+        (i===idx?' active':'');
       cell.textContent = r;
-      cell.onclick = function() { idx = status_.indexOf(c); updateCurrent(); };
       el.appendChild(cell);
     });
   });
 }
 
-function updateCurrent() {
-  var c = status_[idx];
-  var el = document.getElementById('current-card');
-  el.textContent = c.rank + ' ' + SUIT_SYM[c.suit];
-  el.className = 'card ' + (isRed(c.suit)?'red':'black');
+function updateDisplay() {
+  var c = ORDER[idx];
+  var cur = document.getElementById('current-card');
+  cur.textContent = c.rank + ' ' + SUIT_SYM[c.suit];
+  cur.className = 'card ' + (isRed(c.suit)?'red':'black');
+  var n = ORDER[idx+1];
+  var nx = document.getElementById('next-card');
+  if (n) {
+    nx.textContent = n.rank + ' ' + SUIT_SYM[n.suit];
+    nx.className = 'card ' + (isRed(n.suit)?'red':'');
+  } else {
+    nx.textContent = '— (finished)';
+    nx.className = 'card';
+  }
+}
+
+function setCountdown(text) {
+  document.getElementById('countdown').textContent = text;
+}
+
+function setFlashing(on) {
+  flashing = on;
+  document.getElementById('now').className = 'now' + (on?' flashing':'');
+}
+
+function start() {
+  if (running) return;
+  running = true;
+  paused = false;
+  document.getElementById('start').disabled = true;
+  document.getElementById('pause').disabled = false;
+  document.getElementById('skip').disabled = false;
+  // jump to first untrained card
+  var first = status_.findIndex(function(c){return !c.trained;});
+  if (first >= 0) idx = first;
+  updateDisplay();
   renderGrid();
+  beginCountdown();
 }
 
-function refreshPreview() {
-  var slot = document.getElementById('slot').value;
-  var img = document.getElementById('preview');
-  img.src = '/slots/' + slot + '/image?t=' + Date.now();
+function stop() {
+  running = false;
+  paused = false;
+  if (ticker) { clearInterval(ticker); ticker = null; }
+  document.getElementById('start').disabled = false;
+  document.getElementById('pause').disabled = true;
+  document.getElementById('pause').textContent = 'Pause';
+  document.getElementById('skip').disabled = true;
+  setCountdown('—');
+  setFlashing(false);
 }
 
-function captureCurrent() {
-  var c = status_[idx];
+function togglePause() {
+  if (!running) return;
+  paused = !paused;
+  document.getElementById('pause').textContent = paused ? 'Resume' : 'Pause';
+}
+
+function skipCurrent() {
+  if (!running) return;
+  if (ticker) { clearInterval(ticker); ticker = null; }
+  advance();
+}
+
+function beginCountdown() {
+  if (idx >= ORDER.length) { stop(); setCountdown('✓ Done'); return; }
+  var secs = Math.max(1, parseInt(document.getElementById('delay').value, 10) || 5);
+  remainingMs = secs * 1000;
+  setCountdown(secs.toString());
+  if (ticker) clearInterval(ticker);
+  ticker = setInterval(function() {
+    if (paused || flashing) return;
+    remainingMs -= 100;
+    if (remainingMs <= 0) {
+      clearInterval(ticker); ticker = null;
+      fireCapture();
+      return;
+    }
+    setCountdown(Math.ceil(remainingMs / 1000).toString());
+  }, 100);
+}
+
+function fireCapture() {
+  var c = ORDER[idx];
   var slot = parseInt(document.getElementById('slot').value, 10);
+  setFlashing(true);
+  setCountdown('📸');
   fetch('/train/capture', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({rank: c.rank, suit: c.suit, slot: slot})
   }).then(function(r){return r.json()}).then(function(d) {
-    if (!d.ok) { alert('Capture failed: ' + d.error); return; }
-    refreshStatus().then(function() {
-      // advance to next untrained card
-      skipCurrent();
-      refreshPreview();
-    });
+    setFlashing(false);
+    if (!d.ok) {
+      setCountdown('✗');
+      alert('Capture failed: ' + d.error);
+      stop();
+      return;
+    }
+    refreshStatus().then(function() { advance(); });
+  }).catch(function(e) {
+    setFlashing(false);
+    alert('Network error: ' + e);
+    stop();
   });
 }
 
-function skipCurrent() {
-  for (var step = 1; step <= status_.length; step++) {
-    var next = (idx + step) % status_.length;
-    if (!status_[next].trained) { idx = next; updateCurrent(); return; }
-  }
-  idx = (idx + 1) % status_.length;
-  updateCurrent();
+function advance() {
+  idx++;
+  if (idx >= ORDER.length) { stop(); setCountdown('✓ Done'); updateDisplay(); renderGrid(); return; }
+  updateDisplay();
+  renderGrid();
+  beginCountdown();
 }
 
-function deleteCurrent() {
-  var c = status_[idx];
-  if (!confirm('Delete template for ' + c.rank + ' of ' + c.suit + '?')) return;
-  fetch('/train/capture/' + cardCode(c.rank, c.suit), {method:'DELETE'})
-    .then(function(r){return r.json()}).then(function() { refreshStatus(); });
+function resetAll() {
+  if (!confirm('Delete ALL trained templates?')) return;
+  var trained = status_.filter(function(c){return c.trained;});
+  Promise.all(trained.map(function(c) {
+    return fetch('/train/capture/' + cardCode(c), {method:'DELETE'});
+  })).then(refreshStatus);
 }
 
-refreshStatus().then(refreshPreview);
+refreshStatus();
 </script>
 </body></html>"""
 
