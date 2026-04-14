@@ -103,9 +103,9 @@ class Camera:
             main={"size": (2304, 1296), "format": "RGB888"},
         )
         self.cam.configure(cfg)
-        # Runtime-tunable settings
-        self.exposure_us = 20000    # 20ms
-        self.gain = 1.0             # analogue gain
+        # Runtime-tunable settings (defaults tuned for scanner box LEDs)
+        self.exposure_us = 40000    # 40ms
+        self.gain = 2.0             # analogue gain
         self._apply_controls()
         self.cam.start()
         time.sleep(0.5)  # warmup + AF settle
