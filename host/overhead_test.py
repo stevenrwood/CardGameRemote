@@ -961,11 +961,23 @@ def _pi_poll_loop(s):
         if doc is None:
             time.sleep(2.0)
             continue
+        # Only process the slots that should currently hold a Rodney down card
+        # this hand. For Follow the Queen round 1 that's {1}; round 2 {1,2};
+        # and so on up to {1,2,3} by the final down. Before any game starts
+        # this is empty — the scanner's spurious matches on empty slots are
+        # ignored until a hand is actually in progress.
+        expected_downs = _down_cards_dealt_so_far(s.game_engine)
+        active_slots = set(range(1, expected_downs + 1))
         with s.table_lock:
             changed = False
             for entry in doc.get("slots", []):
                 slot_num = entry.get("slot")
                 if slot_num is None:
+                    continue
+                if slot_num not in active_slots:
+                    # forget any prior state so the slot is fresh next hand
+                    if slot_num in s.pi_prev_slots:
+                        s.pi_prev_slots.pop(slot_num, None)
                     continue
                 if not entry.get("recognized"):
                     # slot went (or stayed) empty
