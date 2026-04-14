@@ -749,7 +749,10 @@ class AppState:
         # Rodney's down-card slots. Indexed by scanner slot number so a
         # fluctuating or re-scanned slot replaces its prior value instead of
         # appending a new entry. Each value is {rank, suit, confidence}.
-        self.rodney_downs = {}         # slot_num (1..7) -> {rank, suit, confidence}
+        self.rodney_downs = {}         # slot_num -> {rank, suit, confidence} (verified / auto-accepted)
+        self.slot_pending = {}         # slot_num -> {rank, suit, confidence} (latest low-conf guess, awaiting confirm)
+        self.slot_empty = {}           # slot_num -> True when poller sees no card
+        self.verify_queue = []         # FIFO of slot_nums that need manual verify after /api/console/confirm
         self.pending_verify = None     # None or {guess, slot, prompt}
         self.table_log = []            # [{ts, msg}]
         self.pi_base_url = os.environ.get("PI_BASE_URL", "http://pokerbuddy.local:8080")
@@ -987,10 +990,7 @@ def _pi_poll_loop(s):
         if doc is None:
             time.sleep(2.0)
             continue
-        # Only scan slots the current game actually uses. Before a hand
-        # starts no slot is monitored; for a game with 3 downs/player only
-        # slots 1..3 are monitored (FTQ, 7-Card Stud). Everything else is
-        # ignored so noise on empty slots can't create phantom cards.
+        # Only scan slots the current game actually uses (FTQ=3, Hold'em=2).
         max_slot = _total_downs_in_pattern(s.game_engine)
         with s.table_lock:
             changed = False
@@ -1000,47 +1000,69 @@ def _pi_poll_loop(s):
                     continue
                 if slot_num > max_slot:
                     if slot_num in s.rodney_downs:
-                        # Out-of-range slot still had a stale card; clear it.
                         s.rodney_downs.pop(slot_num, None)
                         changed = True
                     s.pi_prev_slots.pop(slot_num, None)
+                    s.slot_pending.pop(slot_num, None)
+                    s.slot_empty[slot_num] = True
                     continue
-                if not entry.get("recognized"):
-                    s.pi_prev_slots.pop(slot_num, None)
-                    continue
+
+                recognized = entry.get("recognized")
                 rank = entry.get("rank")
                 suit = entry.get("suit")
                 conf = float(entry.get("confidence", 0.0))
-                code = f"{rank}{suit[0]}" if rank and suit else ""
-                # Below the empty threshold the scanner is matching noise
-                # in a physically empty slot. Forget any prior card there
-                # (in case a card was removed) and skip.
-                if conf < s.pi_empty_threshold:
-                    if slot_num in s.rodney_downs:
-                        s.rodney_downs.pop(slot_num, None)
-                        changed = True
+                is_empty = (not recognized) or conf < s.pi_empty_threshold
+
+                if is_empty:
+                    # Slot physically empty: mark empty but keep slot_pending
+                    # intact — the last-seen guess survives removal so the
+                    # verify modal can still fire after a Confirm Cards.
+                    s.slot_empty[slot_num] = True
                     s.pi_prev_slots.pop(slot_num, None)
                     continue
-                prev = s.pi_prev_slots.get(slot_num)
-                if prev == code:
-                    continue  # already processed this card in this slot
-                if s.pending_verify and s.pending_verify.get("slot") == slot_num:
-                    continue  # wait for modal resolution
+
+                # Non-empty: remember what's there now.
+                s.slot_empty[slot_num] = False
+                code = f"{rank}{suit[0]}" if rank and suit else ""
+
                 if conf >= s.pi_confidence_threshold:
+                    prev = s.pi_prev_slots.get(slot_num)
+                    if prev == code:
+                        continue
                     s.rodney_downs[slot_num] = {
                         "rank": rank, "suit": suit, "confidence": round(conf, 2),
                     }
+                    s.slot_pending.pop(slot_num, None)
+                    if slot_num in s.verify_queue:
+                        s.verify_queue.remove(slot_num)
                     s.pi_prev_slots[slot_num] = code
                     _table_log_add(s, f"Slot {slot_num}: {code} (auto, {int(conf*100)}%)")
                     changed = True
                 else:
-                    s.pending_verify = {
-                        "slot": slot_num,
-                        "guess": {"rank": rank, "suit": suit, "confidence": round(conf, 2)},
-                        "prompt": f"Low confidence on slot {slot_num}. Hold the card up for Rodney and confirm / override.",
-                    }
-                    _table_log_add(s, f"Slot {slot_num}: verify needed (guess {code}, {int(conf*100)}%)")
-                    changed = True
+                    # Medium confidence: hold as the latest guess but don't
+                    # surface a modal until the dealer runs /api/console/confirm
+                    # and the user subsequently removes the card from the slot.
+                    guess = {"rank": rank, "suit": suit, "confidence": round(conf, 2)}
+                    if s.slot_pending.get(slot_num) != guess:
+                        s.slot_pending[slot_num] = guess
+                        changed = True
+
+            # If a modal isn't currently open, promote the first queued slot
+            # that's gone physically empty into pending_verify.
+            if s.pending_verify is None and s.verify_queue:
+                for slot_num in list(s.verify_queue):
+                    if s.slot_empty.get(slot_num) and s.slot_pending.get(slot_num):
+                        s.pending_verify = {
+                            "slot": slot_num,
+                            "guess": dict(s.slot_pending[slot_num]),
+                            "prompt": (
+                                f"Slot {slot_num} needs verification. "
+                                f"Hold the card up for Rodney, then confirm or override."
+                            ),
+                        }
+                        _table_log_add(s, f"Slot {slot_num}: modal opened for verify")
+                        changed = True
+                        break
             if changed:
                 s.table_state_version += 1
         time.sleep(1.0)
@@ -1062,6 +1084,31 @@ def _pi_poll_stop(s):
     # Don't join — daemon thread will exit on its own
 
 
+def _enqueue_down_card_verifies(s):
+    """Called at the end of an up-card round (console Confirm Cards).
+
+    Any slot that has a pending (low-confidence) scan that isn't already
+    verified in rodney_downs gets added to the FIFO verify queue. The Pi
+    will eventually be asked to blink that slot's green LED; for now we
+    just log the intent.
+    """
+    with s.table_lock:
+        newly_queued = []
+        for slot_num, guess in s.slot_pending.items():
+            if slot_num in s.rodney_downs:
+                continue
+            if slot_num in s.verify_queue:
+                continue
+            s.verify_queue.append(slot_num)
+            newly_queued.append(slot_num)
+        if newly_queued:
+            for sn in newly_queued:
+                _table_log_add(s, f"Slot {sn}: queued for verify (blink LED)")
+            s.table_state_version += 1
+    # TODO: POST to Pi /slots/<n>/led to blink once that endpoint is wired.
+    return newly_queued
+
+
 def _resolve_verify(s, card_dict):
     """Set the verified card into rodney_downs[slot] and clear the modal."""
     with s.table_lock:
@@ -1077,6 +1124,9 @@ def _resolve_verify(s, card_dict):
         }
         code = f"{card_dict['rank']}{card_dict['suit'][0]}"
         s.pi_prev_slots[slot] = code
+        s.slot_pending.pop(slot, None)
+        if slot in s.verify_queue:
+            s.verify_queue.remove(slot)
         s.pending_verify = None
         _table_log_add(s, f"Slot {slot}: {code} (verified)")
         s.table_state_version += 1
@@ -2176,6 +2226,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p == "/api/table/reset_hand":
             with s.table_lock:
                 s.rodney_downs = {}
+                s.slot_pending = {}
+                s.slot_empty = {}
+                s.verify_queue = []
                 s.pending_verify = None
                 s.pi_prev_slots = {}
                 s.folded_players = set()
@@ -2333,6 +2386,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.console_hand_cards.append({"player": c["player"], "card": c["card"], "round": round_num})
             s.console_scan_phase = "confirmed"
             log.log(f"[CONSOLE] Cards confirmed for up round {round_num}")
+            # Once the up-card round is confirmed, check Rodney's down slots
+            # for anything below the auto-accept threshold. Those slots get
+            # queued and (on LED-equipped hardware) will start blinking; the
+            # /table modal will appear when the user removes each card.
+            queued = _enqueue_down_card_verifies(s)
+            if queued:
+                log.log(f"[CONSOLE] Down-card verify queued for slots {queued}")
             self._r(200, "application/json", json.dumps({"ok": True}))
 
         elif p == "/api/console/next_round":
