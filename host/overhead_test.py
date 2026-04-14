@@ -776,6 +776,7 @@ class AppState:
         # manually verified.
         self.pi_empty_threshold = 0.0
         self._pi_last_logged = {}            # slot_num -> last logged code, throttle log spam
+        self.pi_flash_held = False           # tracked so we don't spam hold/release
         self.folded_players = set()     # Rodney's view of who's folded this hand
 
 _state = None
@@ -946,6 +947,36 @@ def _cards_dealt_so_far(ge):
     return completed
 
 
+def _next_deal_position_type(s):
+    """Returns 'down', 'up', or None for the next card about to be dealt.
+
+    Walks the combined DEAL/COMMUNITY pattern of the current game, consuming
+    one up-card-per-up-round-confirmed and one down-per-rodney_down, and
+    returns the type of the next un-dealt position.
+    """
+    ge = s.game_engine
+    if ge.current_game is None:
+        return None
+    pattern = []
+    for ph in ge.current_game.phases:
+        if ph.type in _dealing_phase_types():
+            pattern.extend(ph.pattern)
+    dealt_ups = s.console_up_round
+    dealt_downs = len(s.rodney_downs)
+    for pos in pattern:
+        if pos == "up":
+            if dealt_ups > 0:
+                dealt_ups -= 1
+                continue
+            return "up"
+        else:
+            if dealt_downs > 0:
+                dealt_downs -= 1
+                continue
+            return "down"
+    return None
+
+
 def _total_downs_in_pattern(ge):
     """Total number of down cards in the current game's deal pattern.
 
@@ -990,6 +1021,29 @@ def _pi_fetch_slots(s):
     except Exception as e:
         log.log(f"[PI] /slots error: {e}")
         return None
+
+
+def _pi_flash(s, hold):
+    """Hold or release the Pi's flash LEDs. Tracks state to avoid redundant calls."""
+    if s.pi_flash_held == hold:
+        return
+    import urllib.request
+    path = "/flash/hold" if hold else "/flash/release"
+    try:
+        url = f"{s.pi_base_url.rstrip('/')}{path}"
+        req = urllib.request.Request(url, method="POST")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            resp.read()
+        s.pi_flash_held = hold
+        log.log(f"[PI] flash {'held' if hold else 'released'}")
+    except Exception as e:
+        log.log(f"[PI] {path} error: {e}")
+
+
+def _update_flash_for_deal_state(s):
+    """Hold LEDs while a down card is the next expected deal; release otherwise."""
+    nxt = _next_deal_position_type(s)
+    _pi_flash(s, nxt == "down")
 
 
 def _pi_poll_loop(s):
@@ -1094,12 +1148,17 @@ def _pi_poll_loop(s):
                             f"Remove the card, hold it up for Rodney, "
                             f"then confirm or override."
                         ),
+                        # Direct Pi URL of the slot crop so the modal can
+                        # show the actual scan for diagnostic purposes.
+                        "image_url": f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/image",
                     }
                     _table_log_add(s, f"Slot {slot_num}: modal opened for verify")
                     changed = True
                     break
             if changed:
                 s.table_state_version += 1
+        # Keep LEDs on whenever we're waiting for a down card, off otherwise.
+        _update_flash_for_deal_state(s)
         time.sleep(1.0)
     log.log("[PI] poll loop stopped")
 
@@ -1849,6 +1908,11 @@ header button:hover{background:#1a5a9a}
   <div class="modal-inner">
     <h2>Verify card</h2>
     <div id="verify-body">—</div>
+    <div style="text-align:center;margin:8px 0">
+      <img id="verify-scan" alt="slot scan"
+           style="max-width:120px;max-height:180px;border:1px solid #444;
+                  border-radius:4px;background:#000;display:none"/>
+    </div>
     <div class="guess" id="verify-guess">—</div>
     <div style="display:flex;gap:10px;align-items:center;margin:8px 0">
       <label style="width:60px">Rank</label>
@@ -2056,6 +2120,13 @@ function render(state) {
     if (!modal.classList.contains('show')) {
       document.getElementById('verify-rank').value = g.rank || '';
       document.getElementById('verify-suit').value = g.suit || '';
+      var img = document.getElementById('verify-scan');
+      if (pv.image_url) {
+        img.src = pv.image_url + '?t=' + Date.now();
+        img.style.display = 'inline-block';
+      } else {
+        img.style.display = 'none';
+      }
     }
     modal.classList.add('show');
   } else {
@@ -2303,6 +2374,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.folded_players = set()
                 _table_log_add(s, "Remote hand cleared")
                 s.table_state_version += 1
+            _update_flash_for_deal_state(s)
             self._r(200, "application/json", '{"ok":true}')
 
         elif p == "/api/table/fold":
@@ -2450,6 +2522,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 log.log(f"[CONSOLE] New hand: {game_name}, dealer: {result['dealer']}")
                 if result.get("wild_label"):
                     log.log(f"[CONSOLE] {result['wild_label']}")
+                # Start the hand fresh: clear Rodney-side state and turn the
+                # scanner LEDs on so the initial down cards get good scans.
+                with s.table_lock:
+                    s.rodney_downs = {}
+                    s.slot_pending = {}
+                    s.slot_empty = {}
+                    s.verify_queue = []
+                    s.pending_verify = None
+                    s.pi_prev_slots = {}
+                    s.folded_players = set()
+                    s.table_state_version += 1
+                _update_flash_for_deal_state(s)
                 self._r(200, "application/json", json.dumps(result))
 
         elif p == "/api/console/confirm":
@@ -2481,6 +2565,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             queued = _enqueue_down_card_verifies(s)
             if queued:
                 log.log(f"[CONSOLE] Down-card verify queued for slots {queued}")
+            _update_flash_for_deal_state(s)
             self._r(200, "application/json", json.dumps({"ok": True}))
 
         elif p == "/api/console/next_round":
@@ -2503,6 +2588,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             queued = _enqueue_down_card_verifies(s)
             if queued:
                 log.log(f"[CONSOLE] Down-card verify queued for slots {queued}")
+            # Advancing rounds may change what the next expected card is —
+            # e.g. after the 4th up round the 7th-card down becomes next, so
+            # the LEDs need to come back on.
+            _update_flash_for_deal_state(s)
             self._r(200, "application/json", json.dumps({
                 "hand": ge.get_hand_state(),
                 "up_round": s.console_up_round,
@@ -2523,6 +2612,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.monitor.recognition_details[z["name"]] = {}
                 s.monitor.recognition_crops[z["name"]] = None
             log.log(f"[CONSOLE] Hand over — next dealer: {result['next_dealer']}")
+            # Clear Rodney-side hand state and turn scanner LEDs off now
+            # that no cards are expected.
+            with s.table_lock:
+                s.rodney_downs = {}
+                s.slot_pending = {}
+                s.slot_empty = {}
+                s.verify_queue = []
+                s.pending_verify = None
+                s.pi_prev_slots = {}
+                s.folded_players = set()
+                s.table_state_version += 1
+            _update_flash_for_deal_state(s)
             self._r(200, "application/json", json.dumps(result))
 
         elif p == "/api/console/advance_dealer":
