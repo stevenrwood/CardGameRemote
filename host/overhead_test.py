@@ -754,7 +754,8 @@ class AppState:
         self.pi_poll_thread = None
         self.pi_prev_slots = {}        # slot_num -> last-seen card code (e.g. "Ac")
         self.table_lock = Lock()       # guards rodney_hand / pending_verify / table_log
-        self.pi_confidence_threshold = 0.70
+        self.pi_confidence_threshold = 0.70  # >= this → auto-accept
+        self.pi_empty_threshold = 0.30       # below this → treat slot as empty
         self.folded_players = set()     # Rodney's view of who's folded this hand
 
 _state = None
@@ -952,6 +953,13 @@ def _pi_poll_loop(s):
                 suit = entry.get("suit")
                 conf = float(entry.get("confidence", 0.0))
                 code = f"{rank}{suit[0]}" if rank and suit else ""
+                # Very low confidence = the scanner is matching noise in an
+                # empty slot. Treat as absent so we don't spam verify prompts
+                # for slots that don't actually hold a card.
+                if conf < s.pi_empty_threshold:
+                    if slot_num in s.pi_prev_slots:
+                        s.pi_prev_slots.pop(slot_num, None)
+                    continue
                 prev = s.pi_prev_slots.get(slot_num)
                 if prev == code:
                     continue  # already processed this card in this slot
@@ -1614,6 +1622,7 @@ def bg_loop():
 
 TABLE_HTML = """<!DOCTYPE html>
 <html><head><title>Poker Table</title>
+<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -2917,7 +2926,7 @@ refresh();
         self.wfile.write(data)
 
     def _table_page(self, s):
-        self._r(200, "text/html", TABLE_HTML)
+        self._r(200, "text/html; charset=utf-8", TABLE_HTML)
 
     def _console_page(self, s):
         self._r(200, "text/html", """<!DOCTYPE html>
