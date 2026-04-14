@@ -400,11 +400,37 @@ def save_calibration():
 
 @app.get("/slots")
 def slots_state():
-    """Capture both cameras, crop each slot, run recognition, return state."""
+    """Capture both cameras, crop each slot, run recognition, return state.
+
+    Query params:
+      max_slot=N     — only scan slots 1..N (caller tells us how many
+                       down cards the current game actually uses).
+      slots=1,2,3    — explicit allow-list of slot numbers.
+    Defaults to scanning every calibrated slot.
+    """
     assert _state is not None
+    allowed = None
+    max_slot_raw = request.args.get("max_slot")
+    if max_slot_raw:
+        try:
+            allowed = set(range(1, int(max_slot_raw) + 1))
+        except ValueError:
+            pass
+    slots_raw = request.args.get("slots")
+    if slots_raw:
+        try:
+            allowed = {int(x) for x in slots_raw.split(",") if x.strip()}
+        except ValueError:
+            pass
+
+    slots_to_scan = [s for s in _state.calibration.get("slots", [])
+                     if allowed is None or s["slot"] in allowed]
+    if not slots_to_scan:
+        return jsonify({"slots": [], "cards": ["-"] * 7})
+
     frames = _state.capture_both()
     results = []
-    for slot in _state.calibration.get("slots", []):
+    for slot in slots_to_scan:
         cam_idx = slot.get("camera")
         if cam_idx not in frames:
             results.append({"slot": slot["slot"], "error": "camera not available"})

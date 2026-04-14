@@ -1012,11 +1012,18 @@ def _parse_card_code(code):
 
 
 def _pi_fetch_slots(s):
-    """Fetch /slots from the Pi. Returns the parsed dict or None on error."""
+    """Fetch /slots from the Pi, limiting to the slots our game uses.
+
+    Passes max_slot so the Pi skips capturing + matching the unused ones.
+    Returns the parsed dict or None on error.
+    """
     import urllib.request
+    max_slot = _total_downs_in_pattern(s.game_engine)
+    if max_slot <= 0:
+        return {"slots": []}
     try:
-        url = f"{s.pi_base_url.rstrip('/')}/slots"
-        with urllib.request.urlopen(url, timeout=3) as resp:
+        url = f"{s.pi_base_url.rstrip('/')}/slots?max_slot={max_slot}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
         log.log(f"[PI] /slots error: {e}")
