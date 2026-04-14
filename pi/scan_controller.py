@@ -179,6 +179,7 @@ class Camera:
 class AppState:
     def __init__(self, camera_indices: list[int]):
         self.flash = Flash(FLASH_GPIO)
+        self.flash_lock = Lock()
         self.cameras: dict[int, Camera] = {}
         for idx in camera_indices:
             self.cameras[idx] = Camera(idx)
@@ -206,28 +207,32 @@ class AppState:
         """Turn flash on, capture from specified camera while lit, turn flash off.
 
         If focus=True, trigger a one-shot AF lock (under flash) before the capture
-        so the scene is illuminated during focus acquisition.
+        so the scene is illuminated during focus acquisition. The flash lock
+        serializes concurrent requests so one camera's flash.off() can't clobber
+        another camera's in-flight capture.
         """
         cam = self.cameras[camera_idx]
-        self.flash.on()
-        try:
-            if focus:
-                cam.autofocus(timeout_s=1.5)
-            time.sleep(self.flash_settle_ms / 1000.0)
-            frame = cam.capture()
-        finally:
-            self.flash.off()
+        with self.flash_lock:
+            self.flash.on()
+            try:
+                if focus:
+                    cam.autofocus(timeout_s=1.5)
+                time.sleep(self.flash_settle_ms / 1000.0)
+                frame = cam.capture()
+            finally:
+                self.flash.off()
         self.last_frames[camera_idx] = frame
         return frame
 
     def capture_both(self) -> dict[int, np.ndarray]:
         """Capture from all cameras during one flash pulse."""
-        self.flash.on()
-        try:
-            time.sleep(self.flash_settle_ms / 1000.0)
-            frames = {idx: cam.capture() for idx, cam in self.cameras.items()}
-        finally:
-            self.flash.off()
+        with self.flash_lock:
+            self.flash.on()
+            try:
+                time.sleep(self.flash_settle_ms / 1000.0)
+                frames = {idx: cam.capture() for idx, cam in self.cameras.items()}
+            finally:
+                self.flash.off()
         self.last_frames.update(frames)
         return frames
 
