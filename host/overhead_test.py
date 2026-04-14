@@ -836,8 +836,8 @@ def _build_table_state(s):
             "round": getattr(ge, "draw_round", 0),
             "wild_label": ge.wild_label or "",
             "wild_ranks": list(getattr(ge, "wild_ranks", []) or []),
-            "current_round": s.console_up_round,
-            "total_rounds": s.console_total_up_rounds,
+            "current_round": _cards_dealt_so_far(ge),
+            "total_rounds": _total_card_rounds(ge),
             "state": getattr(ge.state, "value", str(ge.state)),
         },
         "dealer": ge.get_dealer().name,
@@ -851,6 +851,45 @@ def _build_table_state(s):
 def _table_state_bump(s):
     """Call when something observable changes so polling clients re-render."""
     s.table_state_version += 1
+
+
+def _dealing_phase_types():
+    """Tuple of phase type values that contribute a round per card."""
+    from game_engine import PhaseType
+    return (PhaseType.DEAL, PhaseType.COMMUNITY)
+
+
+def _total_card_rounds(ge):
+    """Total cards in the game's deal + community phases (per player).
+
+    Follow the Queen and 7-Card Stud = 7; Texas Hold'em = 2 hole + 5 community = 7.
+    Returns 0 when no game is active.
+    """
+    if ge.current_game is None:
+        return 0
+    allowed = _dealing_phase_types()
+    total = 0
+    for ph in ge.current_game.phases:
+        if ph.type in allowed:
+            total += len(ph.pattern)
+    return total
+
+
+def _cards_dealt_so_far(ge):
+    """Zero-based count of cards already dealt in the current game."""
+    if ge.current_game is None:
+        return 0
+    allowed = _dealing_phase_types()
+    completed = 0
+    for i, ph in enumerate(ge.current_game.phases):
+        if i < ge.phase_index:
+            if ph.type in allowed:
+                completed += len(ph.pattern)
+        elif i == ge.phase_index:
+            if ph.type in allowed:
+                completed += ge.card_in_phase
+            break
+    return completed
 
 
 def _table_log_add(s, msg):
@@ -3407,6 +3446,12 @@ def main():
     server = http.server.ThreadingHTTPServer(("0.0.0.0", 8888), Handler)
     server.daemon_threads = True
     Thread(target=server.serve_forever, daemon=True).start()
+
+    # Auto-start Pi slot poller so /table populates Rodney's hand without a
+    # manual kick. The loop handles Pi-unreachable with a retry delay, so
+    # starting it here is safe even if the Pi is off.
+    _pi_poll_start(_state)
+    log.log(f"Pi poller started against {_state.pi_base_url}")
     log.log("Server at http://localhost:8888")
 
     # Start background capture
