@@ -757,22 +757,23 @@ function closeModal(ev) {
 }
 function retrainFromModal() {
   if (modalSlot == null || !modalCard) return;
-  var m = /^(10|[2-9jqka])([hdcs])$/i.exec(modalCard);
+  var slot = modalSlot;
+  var card = modalCard;
+  var m = /^(10|[2-9jqka])([hdcs])$/i.exec(card);
   if (!m) return;
   var rank = m[1].toUpperCase();
-  var suitLetter = m[2].toLowerCase();
-  var suit = {c:"clubs",d:"diamonds",h:"hearts",s:"spades"}[suitLetter];
-  closeModal();
-  if (!confirm('Capture a new image for slot ' + modalSlot + ' / ' + modalCard.toUpperCase() +
+  var suit = {c:"clubs",d:"diamonds",h:"hearts",s:"spades"}[m[2].toLowerCase()];
+  if (!confirm('Capture a new image for slot ' + slot + ' / ' + card.toUpperCase() +
                ' now? Make sure the card is in the slot.')) return;
+  closeModal();
   fetch('/train/capture', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({rank:rank, suit:suit, slot: parseInt(modalSlot, 10)})
+    body: JSON.stringify({rank:rank, suit:suit, slot: slot})
   }).then(function(r){return r.json()}).then(function(d) {
-    if (!d.ok) { alert('Capture failed: ' + d.error); return; }
+    if (!d.ok) { alert('Capture failed: ' + (d.error || 'unknown')); return; }
     refreshStatus();
-  });
+  }).catch(function(e){ alert('Network error: ' + e); });
 }
 
 function describeStep(step) {
