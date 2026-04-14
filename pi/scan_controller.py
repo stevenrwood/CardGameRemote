@@ -24,7 +24,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 
 import cv2
 import numpy as np
@@ -96,6 +96,21 @@ class Flash:
         self.held = False
         if self.led is not None:
             self.led.off()
+
+    def blink_off(self, duration_ms: int):
+        """While held, drop the LED for duration_ms then bring it back.
+
+        Used as a visual cue to the user that a capture just completed.
+        Runs asynchronously so the HTTP response isn't delayed.
+        """
+        if self.led is None or not self.held:
+            return
+        def run():
+            self.led.off()
+            time.sleep(duration_ms / 1000.0)
+            if self.held:
+                self.led.on()
+        Thread(target=run, daemon=True).start()
 
     def pulse(self, duration_ms: int = FLASH_PULSE_MS):
         if self.led is None:
@@ -561,6 +576,9 @@ def train_capture():
         return jsonify({"ok": False, "error": meta}), 400
     _state.detector.save_slot_template(slot_num, rank, suit, crop)
     log.info(f"Trained template slot{slot_num}/{rank}{suit[0]} (focus={focus})")
+    # Visual swap cue: dim the held flash for 500ms so the user knows the
+    # capture finished. No-op if flash isn't currently held.
+    _state.flash.blink_off(500)
     return jsonify({"ok": True, "slot": slot_num, "rank": rank, "suit": suit})
 
 
