@@ -311,6 +311,58 @@ def save_calibration():
     return jsonify({"ok": True, "count": len(slots)})
 
 
+@app.get("/slots")
+def slots_state():
+    """Capture both cameras, crop each slot, run recognition, return state."""
+    assert _state is not None
+    frames = _state.capture_both()
+    results = []
+    for slot in _state.calibration.get("slots", []):
+        cam_idx = slot.get("camera")
+        if cam_idx not in frames:
+            results.append({"slot": slot["slot"], "error": "camera not available"})
+            continue
+        frame = frames[cam_idx]
+        x, y, w, h = slot["x"], slot["y"], slot["w"], slot["h"]
+        crop = frame[y:y + h, x:x + w]
+        if crop.size == 0:
+            results.append({"slot": slot["slot"], "error": "crop out of bounds"})
+            continue
+        t0 = time.time()
+        res = _state.detector.identify(crop)
+        ms = round((time.time() - t0) * 1000)
+        entry = {"slot": slot["slot"], "camera": cam_idx, "ms": ms}
+        if res is None:
+            entry["recognized"] = False
+        else:
+            entry["recognized"] = True
+            entry["rank"] = res.rank
+            entry["suit"] = res.suit
+            entry["confidence"] = round(float(res.confidence), 3)
+        results.append(entry)
+    log.info(f"Slots scan: {sum(1 for r in results if r.get('recognized'))}/{len(results)} recognized")
+    return jsonify({"slots": results})
+
+
+@app.get("/slots/<int:slot_num>/image")
+def slot_image(slot_num: int):
+    """Return JPEG of just the specified slot's cropped region."""
+    assert _state is not None
+    slot = next((s for s in _state.calibration.get("slots", []) if s["slot"] == slot_num), None)
+    if slot is None:
+        return f"Slot {slot_num} not calibrated", 404
+    cam_idx = slot["camera"]
+    if cam_idx not in _state.cameras:
+        return "Camera not available", 500
+    frame = _state.capture_with_flash(cam_idx)
+    x, y, w, h = slot["x"], slot["y"], slot["w"], slot["h"]
+    crop = frame[y:y + h, x:x + w]
+    ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        return "encode failed", 500
+    return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg")
+
+
 @app.get("/slots/image")
 def slots_image():
     """Capture both cameras and draw calibrated slot rectangles for verification."""
