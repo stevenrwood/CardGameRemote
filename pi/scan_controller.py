@@ -166,9 +166,15 @@ def capture_image():
 @app.post("/flash_test")
 def flash_test():
     assert _state is not None
-    ms = int(request.json.get("duration_ms", 100)) if request.is_json else 100
-    _state.flash.pulse(duration_ms=ms)
-    return jsonify({"ok": True, "duration_ms": ms})
+    body = request.get_json(silent=True) or {}
+    ms = int(body.get("duration_ms", 100))
+    count = int(body.get("count", 1))
+    interval_ms = int(body.get("interval_ms", 500))
+    for i in range(count):
+        _state.flash.pulse(duration_ms=ms)
+        if i < count - 1:
+            time.sleep(interval_ms / 1000.0)
+    return jsonify({"ok": True, "duration_ms": ms, "count": count, "interval_ms": interval_ms})
 
 
 def main():
