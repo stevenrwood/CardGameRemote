@@ -746,14 +746,17 @@ class AppState:
         # Rodney's down cards come from the Pi scanner; other players only
         # expose a down-count + up-cards on the observer view.
         self.table_state_version = 0
-        self.rodney_hand = []          # [{type, rank, suit, slot?, confidence?}]
+        # Rodney's down-card slots. Indexed by scanner slot number so a
+        # fluctuating or re-scanned slot replaces its prior value instead of
+        # appending a new entry. Each value is {rank, suit, confidence}.
+        self.rodney_downs = {}         # slot_num (1..7) -> {rank, suit, confidence}
         self.pending_verify = None     # None or {guess, slot, prompt}
         self.table_log = []            # [{ts, msg}]
         self.pi_base_url = os.environ.get("PI_BASE_URL", "http://pokerbuddy.local:8080")
         self.pi_polling = False
         self.pi_poll_thread = None
         self.pi_prev_slots = {}        # slot_num -> last-seen card code (e.g. "Ac")
-        self.table_lock = Lock()       # guards rodney_hand / pending_verify / table_log
+        self.table_lock = Lock()       # guards rodney_downs / pending_verify / table_log
         self.pi_confidence_threshold = 0.70  # >= this → auto-accept
         self.pi_empty_threshold = 0.30       # below this → treat slot as empty
         self.folded_players = set()     # Rodney's view of who's folded this hand
@@ -834,23 +837,30 @@ def _build_table_state(s):
             "folded": p.name in s.folded_players,
         }
         if p.is_remote:
-            entry["hand"] = list(s.rodney_hand)
-            # Rodney's up cards are visible here too; merge them into hand if
-            # not already present as a separate "up" entry.
-            existing_up = [h for h in s.rodney_hand if h.get("type") == "up"]
-            if up_cards and not existing_up:
-                entry["hand"].extend([{"type": "up", **c} for c in up_cards])
+            # Rodney's hand = down cards from Pi scanner (one per slot)
+            # sorted by slot number, then his up cards.
+            hand = []
+            for slot_num in sorted(s.rodney_downs.keys()):
+                d = s.rodney_downs[slot_num]
+                hand.append({"type": "down", "rank": d["rank"],
+                             "suit": d["suit"], "slot": slot_num,
+                             "confidence": d.get("confidence")})
+            for c in up_cards:
+                hand.append({"type": "up", **c})
+            entry["hand"] = hand
         else:
-            # The console flow doesn't drive game_engine per-card, so
-            # _down_cards_dealt_so_far(ge) always returns 0. Use Rodney's
-            # actual down-card count as the source of truth: the dealer
-            # deals the same card-type to each player in each round, so
-            # every non-folded player holds that many downs.
-            rodney_downs = sum(1 for c in s.rodney_hand if c.get("type") == "down")
-            entry["down_count"] = rodney_downs
+            # Dealer deals the same card-type to every player in each round,
+            # so every non-folded player holds as many downs as Rodney has.
+            entry["down_count"] = len(s.rodney_downs)
             entry["up_cards"] = up_cards
         players.append(entry)
 
+    # Console flow doesn't advance game_engine.phase_index, so derive the
+    # round counter from console_up_round (confirmed up rounds) + down cards
+    # Rodney has actually received. E.g. Follow the Queen after 4 confirmed
+    # up rounds + 2 scanned downs = Round 6 of 7.
+    current_round = s.console_up_round + len(s.rodney_downs)
+    total_rounds = _total_card_rounds(ge)
     return {
         "version": s.table_state_version,
         "viewer": next((p.name for p in ge.players if p.is_remote), "Rodney"),
@@ -859,12 +869,12 @@ def _build_table_state(s):
             "round": getattr(ge, "draw_round", 0),
             "wild_label": ge.wild_label or "",
             "wild_ranks": list(getattr(ge, "wild_ranks", []) or []),
-            "current_round": _cards_dealt_so_far(ge),
-            "total_rounds": _total_card_rounds(ge),
+            "current_round": current_round,
+            "total_rounds": total_rounds,
             "state": getattr(ge.state, "value", str(ge.state)),
         },
         "dealer": ge.get_dealer().name,
-        "current_player": None,   # set by game-flow wiring later
+        "current_player": None,
         "players": players,
         "log": list(s.table_log[-30:]),
         "pending_verify": s.pending_verify,
@@ -915,27 +925,22 @@ def _cards_dealt_so_far(ge):
     return completed
 
 
-def _down_cards_dealt_so_far(ge):
-    """How many 'down' cards each player has received so far in this game.
+def _total_downs_in_pattern(ge):
+    """Total number of down cards in the current game's deal pattern.
 
-    Walks DEAL/COMMUNITY phase patterns up to the current position and counts
-    entries equal to 'down'. Since the dealer deals the same card-type to
-    each player in each round, every non-folded player has this many down
-    cards in their hand.
+    Each game has a fixed number of down cards per player regardless of
+    where they appear in the deal order (FTQ = 3, 7-Card Stud = 3,
+    Hold'em = 2, 5-Card Draw = 5). The scanner box only needs to monitor
+    that many slots.
     """
     if ge.current_game is None:
         return 0
     allowed = _dealing_phase_types()
-    downs = 0
-    for i, ph in enumerate(ge.current_game.phases):
-        if i < ge.phase_index:
-            if ph.type in allowed:
-                downs += sum(1 for t in ph.pattern if t == "down")
-        elif i == ge.phase_index:
-            if ph.type in allowed:
-                downs += sum(1 for t in ph.pattern[:ge.card_in_phase] if t == "down")
-            break
-    return downs
+    n = 0
+    for ph in ge.current_game.phases:
+        if ph.type in allowed:
+            n += sum(1 for t in ph.pattern if t == "down")
+    return n
 
 
 def _table_log_add(s, msg):
@@ -967,15 +972,14 @@ def _pi_fetch_slots(s):
 
 
 def _pi_poll_loop(s):
-    """Background poll: map Pi scanner detections into rodney_hand.
+    """Background poll: map Pi scanner detections into rodney_downs.
 
     - Each /slots result is compared against s.pi_prev_slots.
     - A new card (slot was empty or held a different card) becomes:
-        * a rodney_hand entry when confidence >= threshold, OR
+        * rodney_downs[slot] = card when confidence >= threshold, OR
         * a pending_verify prompt otherwise (poller stops advancing that
           slot until the verify modal is resolved).
-    - Slots that go empty are forgotten so swapping cards through a slot
-      works naturally between hands.
+    - Slots that go empty clear their rodney_downs entry too.
     """
     log.log("[PI] poll loop started")
     while s.pi_polling:
@@ -983,49 +987,53 @@ def _pi_poll_loop(s):
         if doc is None:
             time.sleep(2.0)
             continue
+        # Only scan slots the current game actually uses. Before a hand
+        # starts no slot is monitored; for a game with 3 downs/player only
+        # slots 1..3 are monitored (FTQ, 7-Card Stud). Everything else is
+        # ignored so noise on empty slots can't create phantom cards.
+        max_slot = _total_downs_in_pattern(s.game_engine)
         with s.table_lock:
             changed = False
             for entry in doc.get("slots", []):
                 slot_num = entry.get("slot")
                 if slot_num is None:
                     continue
+                if slot_num > max_slot:
+                    if slot_num in s.rodney_downs:
+                        # Out-of-range slot still had a stale card; clear it.
+                        s.rodney_downs.pop(slot_num, None)
+                        changed = True
+                    s.pi_prev_slots.pop(slot_num, None)
+                    continue
                 if not entry.get("recognized"):
-                    # slot went (or stayed) empty
-                    if slot_num in s.pi_prev_slots:
-                        s.pi_prev_slots.pop(slot_num, None)
+                    s.pi_prev_slots.pop(slot_num, None)
                     continue
                 rank = entry.get("rank")
                 suit = entry.get("suit")
                 conf = float(entry.get("confidence", 0.0))
                 code = f"{rank}{suit[0]}" if rank and suit else ""
-                # Very low confidence = the scanner is matching noise in an
-                # empty slot. Treat as absent so we don't spam verify prompts
-                # for slots that don't actually hold a card.
+                # Below the empty threshold the scanner is matching noise
+                # in a physically empty slot. Forget any prior card there
+                # (in case a card was removed) and skip.
                 if conf < s.pi_empty_threshold:
-                    if slot_num in s.pi_prev_slots:
-                        s.pi_prev_slots.pop(slot_num, None)
+                    if slot_num in s.rodney_downs:
+                        s.rodney_downs.pop(slot_num, None)
+                        changed = True
+                    s.pi_prev_slots.pop(slot_num, None)
                     continue
                 prev = s.pi_prev_slots.get(slot_num)
                 if prev == code:
                     continue  # already processed this card in this slot
-                # New or changed card in this slot
                 if s.pending_verify and s.pending_verify.get("slot") == slot_num:
-                    # Don't spam; wait for the modal to resolve
-                    continue
+                    continue  # wait for modal resolution
                 if conf >= s.pi_confidence_threshold:
-                    # Auto-accept
-                    s.rodney_hand.append({
-                        "type": "down",
-                        "rank": rank,
-                        "suit": suit,
-                        "slot": slot_num,
-                        "confidence": round(conf, 2),
-                    })
+                    s.rodney_downs[slot_num] = {
+                        "rank": rank, "suit": suit, "confidence": round(conf, 2),
+                    }
                     s.pi_prev_slots[slot_num] = code
                     _table_log_add(s, f"Slot {slot_num}: {code} (auto, {int(conf*100)}%)")
                     changed = True
                 else:
-                    # Route to manual verify modal
                     s.pending_verify = {
                         "slot": slot_num,
                         "guess": {"rank": rank, "suit": suit, "confidence": round(conf, 2)},
@@ -1055,21 +1063,20 @@ def _pi_poll_stop(s):
 
 
 def _resolve_verify(s, card_dict):
-    """Add a card_dict to rodney_hand from a verify action and clear the modal."""
+    """Set the verified card into rodney_downs[slot] and clear the modal."""
     with s.table_lock:
         pv = s.pending_verify
         if not pv:
             return False
         slot = pv.get("slot")
-        s.rodney_hand.append({
-            "type": "down",
+        if slot is None:
+            return False
+        s.rodney_downs[slot] = {
             "rank": card_dict["rank"],
             "suit": card_dict["suit"],
-            "slot": slot,
-        })
+        }
         code = f"{card_dict['rank']}{card_dict['suit'][0]}"
-        if slot is not None:
-            s.pi_prev_slots[slot] = code
+        s.pi_prev_slots[slot] = code
         s.pending_verify = None
         _table_log_add(s, f"Slot {slot}: {code} (verified)")
         s.table_state_version += 1
@@ -1895,7 +1902,7 @@ function renderPlayer(p) {
     if (!first) return;
     var w = first.getBoundingClientRect().width;
     if (!w) return;
-    var reveal = 22;  // px of underlying card left edge to show
+    var reveal = 44;  // px of underlying card left edge to show
     var overlap = Math.max(0, w - reveal);
     Array.prototype.forEach.call(cardRow.querySelectorAll('.card'), function(c, i) {
       c.style.marginLeft = (i === 0) ? '0' : ('-' + overlap + 'px');
@@ -2168,7 +2175,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/table/reset_hand":
             with s.table_lock:
-                s.rodney_hand = []
+                s.rodney_downs = {}
                 s.pending_verify = None
                 s.pi_prev_slots = {}
                 s.folded_players = set()
