@@ -129,7 +129,7 @@ class AppState:
             "recognized": True,
             "rank": result.rank,
             "suit": result.suit,
-            "confidence": round(result.confidence, 3),
+            "confidence": round(float(result.confidence), 3),
             "ms": round(ms),
         }
 
