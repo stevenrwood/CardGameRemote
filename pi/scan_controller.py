@@ -67,6 +67,7 @@ class Flash:
     def __init__(self, pin: int):
         self.pin = pin
         self.led = None
+        self.held = False
         if _GPIO_OK:
             try:
                 self.led = LED(pin)
@@ -80,6 +81,19 @@ class Flash:
             self.led.on()
 
     def off(self):
+        if self.held:
+            return  # held on — ignore transient off requests
+        if self.led is not None:
+            self.led.off()
+
+    def hold(self):
+        """Force flash on and suppress .off() calls until release()."""
+        self.held = True
+        self.on()
+
+    def release(self):
+        """Clear held state and turn flash off."""
+        self.held = False
         if self.led is not None:
             self.led.off()
 
@@ -225,6 +239,9 @@ class AppState:
                 if focus:
                     cam.autofocus(timeout_s=1.5)
                     time.sleep(self.flash_settle_ms / 1000.0)
+                elif self.flash.held:
+                    # LEDs already at full brightness from a prior hold()
+                    pass
                 else:
                     warmup = max(self.flash_settle_ms, self.FLASH_WARMUP_MS) / 1000.0
                     time.sleep(warmup)
@@ -482,6 +499,24 @@ def _slot_crop(slot_num: int, focus: bool = True):
     if crop.size == 0:
         return None, "Crop out of bounds"
     return crop, slot
+
+
+@app.post("/train/flash/hold")
+def train_flash_hold():
+    """Keep the flash LEDs on continuously. Captures during a hold skip
+    the warmup/AF-free wait, giving very short capture cycles and rock-steady
+    brightness. The UI calls this on Start/Resume and releases on
+    Stop/completion."""
+    assert _state is not None
+    _state.flash.hold()
+    return jsonify({"ok": True, "held": True})
+
+
+@app.post("/train/flash/release")
+def train_flash_release():
+    assert _state is not None
+    _state.flash.release()
+    return jsonify({"ok": True, "held": False})
 
 
 @app.get("/train/status")
@@ -926,6 +961,9 @@ function start() {
   if (first >= 0) idx = first;
   firstStep = true;
   needsFocus = true;
+  // Keep flash on continuously for the whole session — consistent
+  // brightness and no per-capture LED warmup.
+  fetch('/train/flash/hold', {method:'POST'});
   updateDisplay();
   beginCountdown();
 }
@@ -940,16 +978,20 @@ function stop() {
   document.getElementById('skip').disabled = true;
   setCountdown('—');
   setFlashing(false);
+  fetch('/train/flash/release', {method:'POST'});
 }
 
 function togglePause() {
   if (!running) return;
   paused = !paused;
   document.getElementById('pause').textContent = paused ? 'Resume' : 'Pause';
-  // If we were paused at a slot boundary (no active ticker), kick off the
-  // next slot's countdown on resume.
-  if (!paused && !ticker) {
-    beginCountdown();
+  if (paused) {
+    fetch('/train/flash/release', {method:'POST'});
+  } else {
+    fetch('/train/flash/hold', {method:'POST'});
+    // If we were paused at a slot boundary (no active ticker), kick off the
+    // next slot's countdown on resume.
+    if (!ticker) beginCountdown();
   }
 }
 
@@ -1021,6 +1063,7 @@ function advance() {
     needsFocus = true;    // re-AF for the new slot's first capture
     document.getElementById('pause').textContent = 'Resume';
     setCountdown('⏸ slot ' + prev.slot + ' done — press Resume for slot ' + cur.slot);
+    fetch('/train/flash/release', {method:'POST'});
     return;
   }
   beginCountdown();
