@@ -1659,10 +1659,10 @@ function isRed(suit) { return suit === "hearts" || suit === "diamonds"; }
 var RANK_FILE = {"2":"2","3":"3","4":"4","5":"5","6":"6","7":"7","8":"8","9":"9","10":"10",
                  "J":"jack","Q":"queen","K":"king","A":"ace"};
 
-function cardPngUrl(rank, suit) {
+function cardImgUrl(rank, suit) {
   var r = RANK_FILE[rank];
   if (!r || !suit) return null;
-  return '/cards/' + r + '_of_' + suit + '.png';
+  return '/cards/' + r + '_of_' + suit + '.svg';
 }
 
 function cardEl(card) {
@@ -1670,14 +1670,14 @@ function cardEl(card) {
   el.className = 'card';
   if (card.type === 'down' && (card.hidden || !card.rank)) {
     var back = document.createElement('img');
-    back.src = '/cards/back.png';
+    back.src = '/cards/back.svg';
     back.alt = 'card back';
     el.classList.add('down');
     el.appendChild(back);
     return el;
   }
   if (card.type === 'down') el.classList.add('offset-down');
-  var url = cardPngUrl(card.rank, card.suit);
+  var url = cardImgUrl(card.rank, card.suit);
   if (!url) { el.classList.add('missing'); el.textContent = '?'; return el; }
   var img = document.createElement('img');
   img.src = url;
@@ -1841,7 +1841,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p.startswith("/training/"):
             self._training_file(p[10:])
         elif p.startswith("/cards/"):
-            self._card_png(p[7:])
+            self._card_asset(p[7:])
         else:
             self._r(404,"text/plain","Not found")
 
@@ -3261,20 +3261,22 @@ refresh();
         self._r(200, "image/jpeg" if p.suffix==".jpg" else "text/plain",
                 p.read_bytes() if p.suffix==".jpg" else p.read_text())
 
-    def _card_png(self, name):
-        """Serve a pretty card PNG from host/static/cards/. Guards against
-        path traversal by resolving and checking the parent dir."""
+    def _card_asset(self, name):
+        """Serve a pretty card image (SVG or PNG) from host/static/cards/.
+        Guards against path traversal."""
         root = (Path(__file__).parent / "static" / "cards").resolve()
         p = (root / name).resolve()
         try:
             p.relative_to(root)
         except ValueError:
             return self._r(404, "text/plain", "Not found")
-        if not p.exists() or p.suffix.lower() != ".png":
+        ext = p.suffix.lower()
+        if ext not in (".svg", ".png") or not p.exists():
             return self._r(404, "text/plain", "Not found")
+        mime = "image/svg+xml" if ext == ".svg" else "image/png"
         data = p.read_bytes()
         self.send_response(200)
-        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "public, max-age=86400")
         self.end_headers()
