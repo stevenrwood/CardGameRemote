@@ -854,15 +854,19 @@ def _build_table_state(s):
         else:
             # Dealer deals the same card-type to every player in each round,
             # so every non-folded player holds as many downs as Rodney has.
-            entry["down_count"] = len(s.rodney_downs)
+            # Count slots that have *any* scan present — verified or pending —
+            # so unverified cards still display as card-backs.
+            seen_down_slots = set(s.rodney_downs.keys()) | set(s.slot_pending.keys())
+            entry["down_count"] = len(seen_down_slots)
             entry["up_cards"] = up_cards
         players.append(entry)
 
     # Console flow doesn't advance game_engine.phase_index, so derive the
     # round counter from console_up_round (confirmed up rounds) + down cards
-    # Rodney has actually received. E.g. Follow the Queen after 4 confirmed
-    # up rounds + 2 scanned downs = Round 6 of 7.
-    current_round = s.console_up_round + len(s.rodney_downs)
+    # Rodney has actually received — including pending scans so a yet-to-be-
+    # verified card still advances the counter.
+    active_down_slots = set(s.rodney_downs.keys()) | set(s.slot_pending.keys())
+    current_round = s.console_up_round + len(active_down_slots)
     total_rounds = _total_card_rounds(ge)
     return {
         "version": s.table_state_version,
@@ -1815,10 +1819,33 @@ header button:hover{background:#1a5a9a}
     <h2>Verify card</h2>
     <div id="verify-body">—</div>
     <div class="guess" id="verify-guess">—</div>
-    <input id="verify-input" placeholder="Or type correct code, e.g. Ac, 10h" />
+    <div style="display:flex;gap:10px;align-items:center;margin:8px 0">
+      <label style="width:60px">Rank</label>
+      <select id="verify-rank" style="flex:1;padding:8px;border-radius:6px;border:1px solid #333;background:#0d1b2a;color:#e0e0e0">
+        <option value="">—</option>
+        <option value="A">Ace</option>
+        <option value="2">2</option><option value="3">3</option>
+        <option value="4">4</option><option value="5">5</option>
+        <option value="6">6</option><option value="7">7</option>
+        <option value="8">8</option><option value="9">9</option>
+        <option value="10">10</option>
+        <option value="J">Jack</option><option value="Q">Queen</option>
+        <option value="K">King</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;margin:8px 0">
+      <label style="width:60px">Suit</label>
+      <select id="verify-suit" style="flex:1;padding:8px;border-radius:6px;border:1px solid #333;background:#0d1b2a;color:#e0e0e0">
+        <option value="">—</option>
+        <option value="clubs">Clubs</option>
+        <option value="diamonds">Diamonds</option>
+        <option value="hearts">Hearts</option>
+        <option value="spades">Spades</option>
+      </select>
+    </div>
     <div class="buttons">
       <button class="btn-green" onclick="confirmVerify()">Accept guess</button>
-      <button class="btn-red" onclick="overrideVerify()">Use my code</button>
+      <button class="btn-red" onclick="overrideVerify()">Use my values</button>
     </div>
   </div>
 </div>
@@ -1882,15 +1909,15 @@ function sortCards(cards, mode) {
 }
 
 function buildCards(p) {
-  // Normalized list of cards for this player.
+  // Downs first (on the left), then up cards, matching Rodney's hand order.
   if (p.is_remote) return (p.hand || []).slice();
   var cards = [];
-  (p.up_cards || []).forEach(function(c){
-    cards.push({type:'up', rank:c.rank, suit:c.suit});
-  });
   for (var i = 0; i < (p.down_count || 0); i++) {
     cards.push({type:'down', hidden:true});
   }
+  (p.up_cards || []).forEach(function(c){
+    cards.push({type:'up', rank:c.rank, suit:c.suit});
+  });
   return cards;
 }
 
@@ -1992,7 +2019,13 @@ function render(state) {
     var gtxt = g.rank ? (g.rank + (SUIT_SYM[g.suit] || '')) : '—';
     if (g.confidence != null) gtxt += ' (' + Math.round(g.confidence * 100) + '%)';
     document.getElementById('verify-guess').textContent = 'Guess: ' + gtxt;
-    document.getElementById('verify-input').value = '';
+    // Pre-populate dropdowns with the guess so a simple correction (e.g.
+    // changing only the suit) takes one tap. Only seed on (re)open, not
+    // every render, so user input isn't clobbered mid-edit.
+    if (!modal.classList.contains('show')) {
+      document.getElementById('verify-rank').value = g.rank || '';
+      document.getElementById('verify-suit').value = g.suit || '';
+    }
     modal.classList.add('show');
   } else {
     modal.classList.remove('show');
@@ -2018,14 +2051,19 @@ function confirmVerify() {
   fetch('/api/table/verify', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({action:'confirm'})
+  }).then(function(r){return r.json()}).then(function(d) {
+    if (!d.ok) alert('Verify failed: ' + (d.error || 'unknown'));
   });
 }
 function overrideVerify() {
-  var code = document.getElementById('verify-input').value.trim();
-  if (!code) return alert('Enter card code (e.g. Ac, 10h)');
+  var rank = document.getElementById('verify-rank').value;
+  var suit = document.getElementById('verify-suit').value;
+  if (!rank || !suit) return alert('Pick both rank and suit');
   fetch('/api/table/verify', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({action:'override', code: code})
+    body: JSON.stringify({action:'override', rank: rank, suit: suit})
+  }).then(function(r){return r.json()}).then(function(d) {
+    if (!d.ok) alert('Override failed: ' + (d.error || 'unknown'));
   });
 }
 
@@ -2256,17 +2294,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p == "/api/table/verify":
             action = data.get("action", "")
             ok = False
+            err = None
             if action == "confirm":
                 pv = s.pending_verify
                 if pv and pv.get("guess"):
                     g = pv["guess"]
                     if g.get("rank") and g.get("suit"):
                         ok = _resolve_verify(s, {"rank": g["rank"], "suit": g["suit"]})
+                    else:
+                        err = "guess missing rank/suit"
+                else:
+                    err = "no active verify"
             elif action == "override":
-                parsed = _parse_card_code(data.get("code", ""))
-                if parsed:
-                    ok = _resolve_verify(s, parsed)
-            self._r(200, "application/json", json.dumps({"ok": ok}))
+                rank = str(data.get("rank", "")).upper()
+                suit = str(data.get("suit", "")).lower()
+                if rank in {"A","2","3","4","5","6","7","8","9","10","J","Q","K"} and \
+                        suit in {"clubs","diamonds","hearts","spades"}:
+                    ok = _resolve_verify(s, {"rank": rank, "suit": suit})
+                else:
+                    # Legacy "code" path (e.g. "Ac" / "10h")
+                    parsed = _parse_card_code(data.get("code", ""))
+                    if parsed:
+                        ok = _resolve_verify(s, parsed)
+                    else:
+                        err = "invalid rank/suit"
+            else:
+                err = "bad action"
+            resp = {"ok": ok}
+            if err:
+                resp["error"] = err
+            self._r(200, "application/json", json.dumps(resp))
 
         # --- Console (dealer phone UI) ---
 
