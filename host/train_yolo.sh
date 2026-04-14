@@ -61,6 +61,7 @@ echo "Base model: $BASE_MODEL"
 
 python3 -c "
 import os
+from pathlib import Path
 from ultralytics import YOLO
 
 base = os.environ.get('BASE_MODEL', 'yolov8s.pt')
@@ -77,18 +78,21 @@ results = model.train(
     exist_ok=True,
 )
 
-best = 'yolo_runs/card_detector/weights/best.pt'
+# Resolve the actual save directory reported by the trainer; newer
+# ultralytics prepends 'runs/detect/' to the project path.
+save_dir = Path(getattr(model.trainer, 'save_dir', 'yolo_runs/card_detector'))
+best = save_dir / 'weights' / 'best.pt'
 print()
 print('=== Training complete ===')
 print(f'Best model: {best}')
 print()
 
-model = YOLO(best)
+model = YOLO(str(best))
 metrics = model.val()
 print(f'mAP50: {metrics.box.map50:.3f}')
 print(f'mAP50-95: {metrics.box.map:.3f}')
 "
 
 echo ""
-echo "Done! Model saved to: yolo_runs/card_detector/weights/best.pt"
+echo "Done! Check training output above for the exact best.pt path."
 echo ""
