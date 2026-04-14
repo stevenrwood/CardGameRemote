@@ -53,6 +53,8 @@ from card_recognition.detector import CardDetector
 FLASH_GPIO = 16  # BCM pin driving the flash MOSFET gate
 FLASH_PULSE_MS = 50
 REFERENCE_DIR = Path(__file__).parent / "card_recognition" / "reference"
+CALIBRATION_FILE = Path(__file__).parent / "slot_calibration.json"
+NUM_SLOTS = 7
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("scan")
@@ -149,8 +151,23 @@ class AppState:
             self.cameras[idx] = Camera(idx)
         self.detector = CardDetector(str(REFERENCE_DIR))
         self.last_frames: dict[int, np.ndarray] = {}
-        self.flash_settle_ms = 50  # ms between flash-on and capture
-        log.info(f"Scan controller ready with {len(self.cameras)} cameras")
+        self.flash_settle_ms = 50
+        self.calibration = self._load_calibration()
+        log.info(f"Scan controller ready with {len(self.cameras)} cameras; "
+                 f"{len(self.calibration.get('slots', []))}/{NUM_SLOTS} slots calibrated")
+
+    def _load_calibration(self) -> dict:
+        if CALIBRATION_FILE.exists():
+            try:
+                return json.loads(CALIBRATION_FILE.read_text())
+            except Exception as e:
+                log.warning(f"Failed to load calibration: {e}")
+        return {"slots": []}
+
+    def save_calibration(self, data: dict):
+        self.calibration = data
+        CALIBRATION_FILE.write_text(json.dumps(data, indent=2))
+        log.info(f"Calibration saved: {len(data.get('slots', []))} slots")
 
     def capture_with_flash(self, camera_idx: int) -> np.ndarray:
         """Turn flash on, capture from specified camera while lit, turn flash off."""
@@ -277,6 +294,247 @@ def camera_settings():
         "gain": any_cam.gain,
         "flash_settle_ms": _state.flash_settle_ms,
     })
+
+
+@app.get("/calibration")
+def get_calibration():
+    assert _state is not None
+    return jsonify(_state.calibration)
+
+
+@app.post("/calibration")
+def save_calibration():
+    assert _state is not None
+    data = request.get_json(silent=True) or {}
+    slots = data.get("slots", [])
+    _state.save_calibration({"slots": slots})
+    return jsonify({"ok": True, "count": len(slots)})
+
+
+@app.get("/slots/image")
+def slots_image():
+    """Capture both cameras and draw calibrated slot rectangles for verification."""
+    assert _state is not None
+    frames = _state.capture_both()
+    ordered_idx = sorted(frames.keys())
+    ordered_frames = [frames[i].copy() for i in ordered_idx]
+
+    # Draw slot rectangles
+    for slot in _state.calibration.get("slots", []):
+        cam_idx = slot.get("camera")
+        if cam_idx not in ordered_idx:
+            continue
+        pos = ordered_idx.index(cam_idx)
+        frame = ordered_frames[pos]
+        x, y, w, h = slot["x"], slot["y"], slot["w"], slot["h"]
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
+        label = f"#{slot['slot']}"
+        cv2.putText(frame, label, (x, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2)
+
+    combined = np.hstack(ordered_frames) if len(ordered_frames) > 1 else ordered_frames[0]
+    ok, buf = cv2.imencode(".jpg", combined, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        return "encode failed", 500
+    return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg")
+
+
+@app.get("/calibrate")
+def calibrate_page():
+    """Serve calibration web UI."""
+    return CALIBRATE_HTML
+
+
+CALIBRATE_HTML = """<!DOCTYPE html>
+<html><head><title>Slot Calibration</title>
+<style>
+body{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:12px;margin:0}
+h1{font-size:1.2em;margin:4px 0}
+#status{font-size:1em;color:#4fc3f7;margin:8px 0;padding:8px;background:#0f3460;border-radius:6px}
+button{padding:8px 14px;background:#0f3460;color:#fff;border:none;border-radius:6px;cursor:pointer;margin:3px;font-size:.95em}
+button:hover{background:#1a5a9a}
+.btn-green{background:#1b5e20}
+.btn-red{background:#b71c1c}
+.cam-box{margin:8px 0;border:1px solid #333;border-radius:6px;padding:6px}
+.cam-title{font-weight:600;margin-bottom:4px}
+canvas{border:1px solid #444;cursor:crosshair;display:block;max-width:100%;height:auto}
+#slots-list{font-size:.85em;margin-top:8px}
+.slot-row{padding:3px 6px;margin:2px 0;background:#16213e;border-radius:4px;display:flex;justify-content:space-between}
+</style></head><body>
+<h1>Scanner Slot Calibration</h1>
+<div id="status">Loading...</div>
+<div>
+  <button onclick="refreshCaptures()">Refresh Images</button>
+  <button class="btn-green" onclick="saveSlots()">Save Calibration</button>
+  <button class="btn-red" onclick="clearSlots()">Clear All</button>
+</div>
+<p style="font-size:.9em;color:#aaa">
+  Currently marking slot <b id="next-slot">1</b> of 7.
+  Click top-left then bottom-right corner of the slot window in the appropriate camera view.
+</p>
+<div class="cam-box">
+  <div class="cam-title">Camera 0 (slots 1-4 area)</div>
+  <canvas id="cam0"></canvas>
+</div>
+<div class="cam-box">
+  <div class="cam-title">Camera 1 (slots 4-7 area)</div>
+  <canvas id="cam1"></canvas>
+</div>
+<div id="slots-list"></div>
+
+<script>
+var slots = [];
+var pendingClick = null;  // {camera, x1, y1} after first click
+
+function refreshCaptures() {
+  [0, 1].forEach(function(camIdx) {
+    var img = new Image();
+    img.onload = function() {
+      var canvas = document.getElementById('cam' + camIdx);
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.dataset.scale = Math.min(window.innerWidth - 60, img.naturalWidth) / img.naturalWidth;
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      drawSlots(canvas, ctx, camIdx);
+    };
+    img.src = '/capture/image?camera=' + camIdx + '&t=' + Date.now();
+  });
+}
+
+function drawSlots(canvas, ctx, camIdx) {
+  slots.filter(function(s){return s.camera === camIdx}).forEach(function(s) {
+    ctx.strokeStyle = '#4caf50';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(s.x, s.y, s.w, s.h);
+    ctx.fillStyle = '#4caf50';
+    ctx.font = 'bold 32px sans-serif';
+    ctx.fillText('#' + s.slot, s.x, s.y - 8);
+  });
+  if (pendingClick && pendingClick.camera === camIdx) {
+    ctx.fillStyle = '#ff9800';
+    ctx.beginPath();
+    ctx.arc(pendingClick.x1, pendingClick.y1, 10, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function attachHandlers() {
+  [0, 1].forEach(function(camIdx) {
+    var canvas = document.getElementById('cam' + camIdx);
+    canvas.onclick = function(ev) {
+      var rect = canvas.getBoundingClientRect();
+      var scale = canvas.width / rect.width;
+      var x = Math.round((ev.clientX - rect.left) * scale);
+      var y = Math.round((ev.clientY - rect.top) * scale);
+      handleClick(camIdx, x, y);
+    };
+  });
+}
+
+function handleClick(camIdx, x, y) {
+  if (!pendingClick) {
+    pendingClick = {camera: camIdx, x1: x, y1: y};
+    updateStatus();
+    redraw();
+    return;
+  }
+  if (pendingClick.camera !== camIdx) {
+    // first click on one camera, second on different — cancel
+    pendingClick = null;
+    updateStatus('Second click must be on same camera. Resetting.');
+    redraw();
+    return;
+  }
+  // Second click — create slot rectangle
+  var x1 = Math.min(pendingClick.x1, x);
+  var y1 = Math.min(pendingClick.y1, y);
+  var x2 = Math.max(pendingClick.x1, x);
+  var y2 = Math.max(pendingClick.y1, y);
+  var nextSlotNum = slots.length + 1;
+  if (nextSlotNum > 7) {
+    pendingClick = null;
+    updateStatus('All 7 slots marked. Click "Save Calibration".');
+    redraw();
+    return;
+  }
+  slots.push({
+    slot: nextSlotNum,
+    camera: camIdx,
+    x: x1, y: y1, w: x2 - x1, h: y2 - y1
+  });
+  pendingClick = null;
+  updateStatus();
+  redraw();
+  updateSlotsList();
+}
+
+function updateStatus(msg) {
+  var s = document.getElementById('status');
+  if (msg) { s.textContent = msg; return; }
+  var next = slots.length + 1;
+  document.getElementById('next-slot').textContent = Math.min(next, 7);
+  if (next > 7) {
+    s.textContent = '✓ All 7 slots marked. Review and Save Calibration.';
+  } else if (pendingClick) {
+    s.textContent = 'Click BOTTOM-RIGHT corner of slot #' + next + ' on camera ' + pendingClick.camera;
+  } else {
+    s.textContent = 'Click TOP-LEFT corner of slot #' + next + ' on the camera that sees it best';
+  }
+}
+
+function redraw() {
+  [0, 1].forEach(function(camIdx) {
+    var canvas = document.getElementById('cam' + camIdx);
+    var ctx = canvas.getContext('2d');
+    var img = new Image();
+    img.onload = function() {
+      ctx.drawImage(img, 0, 0);
+      drawSlots(canvas, ctx, camIdx);
+    };
+    // Keep using last loaded image by reading current frame dimensions — we just redraw overlays
+    // Simpler: reload
+    img.src = '/capture/image?camera=' + camIdx;
+  });
+}
+
+function updateSlotsList() {
+  var list = document.getElementById('slots-list');
+  list.innerHTML = slots.map(function(s) {
+    return '<div class="slot-row"><span>Slot ' + s.slot + ' (cam ' + s.camera + ')</span>' +
+      '<span>' + s.x + ',' + s.y + ' ' + s.w + 'x' + s.h + '</span></div>';
+  }).join('');
+}
+
+function saveSlots() {
+  if (slots.length === 0) { alert('No slots marked'); return; }
+  fetch('/calibration', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({slots: slots})
+  }).then(function(r){return r.json()}).then(function(d) {
+    updateStatus('Saved ' + d.count + ' slots');
+  });
+}
+
+function clearSlots() {
+  if (!confirm('Clear all marked slots?')) return;
+  slots = [];
+  pendingClick = null;
+  updateStatus();
+  updateSlotsList();
+  redraw();
+}
+
+// Load existing calibration on startup
+fetch('/calibration').then(function(r){return r.json()}).then(function(d) {
+  slots = d.slots || [];
+  updateSlotsList();
+  refreshCaptures();
+  updateStatus();
+  attachHandlers();
+});
+</script>
+</body></html>"""
 
 
 @app.post("/flash_test")
