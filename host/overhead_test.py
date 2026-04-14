@@ -841,7 +841,13 @@ def _build_table_state(s):
             if up_cards and not existing_up:
                 entry["hand"].extend([{"type": "up", **c} for c in up_cards])
         else:
-            entry["down_count"] = _down_cards_dealt_so_far(ge)
+            # The console flow doesn't drive game_engine per-card, so
+            # _down_cards_dealt_so_far(ge) always returns 0. Use Rodney's
+            # actual down-card count as the source of truth: the dealer
+            # deals the same card-type to each player in each round, so
+            # every non-folded player holds that many downs.
+            rodney_downs = sum(1 for c in s.rodney_hand if c.get("type") == "down")
+            entry["down_count"] = rodney_downs
             entry["up_cards"] = up_cards
         players.append(entry)
 
@@ -1708,7 +1714,7 @@ header button:hover{background:#1a5a9a}
   cursor:pointer;font-size:.75em}
 .hand-box .sml-btn.active{background:#1b5e20}
 .hand-box .sml-btn.folded{background:#b71c1c}
-.hand-box .cards{flex:1 1 auto;display:flex;gap:4px;align-items:flex-start;min-height:0;overflow:hidden}
+.hand-box .cards{flex:1 1 auto;display:flex;gap:0;align-items:flex-start;min-height:0;overflow:hidden}
 .hand-box.center .cards{justify-content:center}
 .hand-box.folded .cards{opacity:.3;filter:grayscale(60%)}
 
@@ -1891,6 +1897,22 @@ function renderPlayer(p) {
   box.innerHTML = '';
   box.appendChild(head);
   box.appendChild(cardRow);
+
+  // After layout settles, fan the cards: each card after the first
+  // overlaps its neighbor so only ~22px of the underlying card's left
+  // edge (the rank+suit indicator) remains visible. Re-apply on every
+  // render so it tracks row resizes and new cards appearing.
+  requestAnimationFrame(function() {
+    var first = cardRow.querySelector('.card');
+    if (!first) return;
+    var w = first.getBoundingClientRect().width;
+    if (!w) return;
+    var reveal = 22;  // px of underlying card left edge to show
+    var overlap = Math.max(0, w - reveal);
+    Array.prototype.forEach.call(cardRow.querySelectorAll('.card'), function(c, i) {
+      c.style.marginLeft = (i === 0) ? '0' : ('-' + overlap + 'px');
+    });
+  });
 }
 
 function render(state) {
