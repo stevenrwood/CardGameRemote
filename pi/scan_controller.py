@@ -1157,7 +1157,7 @@ var cachedImages = {};     // camIdx -> HTMLImageElement (last loaded)
 var drag = null;           // {camera, x1, y1, x2, y2} while pointer is down
 
 function refreshCaptures() {
-  // Hold the LEDs on for a full 2 seconds so they're at steady brightness,
+  // Hold the LEDs on for a full 4 seconds so they're at steady brightness,
   // then grab a fresh image from each camera, then release.
   fetch('/flash/hold', {method:'POST'}).then(function() {
     setTimeout(function() {
@@ -1184,7 +1184,7 @@ function refreshCaptures() {
         };
         img.src = '/capture/image?camera=' + camIdx + '&focus=1&t=' + Date.now();
       });
-    }, 2000);
+    }, 4000);
   });
 }
 
