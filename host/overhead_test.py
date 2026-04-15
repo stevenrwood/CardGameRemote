@@ -714,6 +714,16 @@ def _console_watch_dealer(s, frame):
     if phase == "settling":
         if time.time() - s.console_settle_time < 2.0:
             return
+        # Re-verify the dealer's zone still has a card. A hand passing over
+        # the zone while dealing to another player triggers an initial
+        # motion event but leaves no card; re-checking at the end of the 2s
+        # settle catches that and puts us back in watching mode without
+        # firing the whole-table scan prematurely.
+        recheck = s.monitor.check_single(frame, dealer_zone)
+        if recheck is None:
+            log.log(f"[CONSOLE] {dealer_name}'s zone empty after settle — false alarm, resuming watch")
+            s.console_scan_phase = "watching"
+            return
         log.log("[CONSOLE] Scanning all active zones")
         zone_crops = {}
         for z in s.cal.zones:
@@ -2623,14 +2633,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     round_cards.append({"player": p2.name, "card": card})
             # Check Follow the Queen wild cards — announce before betting
             _check_follow_the_queen_round(s, round_cards)
-            # Save as last round and accumulate into hand-wide history
+            # Accumulate into hand-wide history, then clear the current-round
+            # data so it stops re-appearing as "just dealt" cards (which were
+            # triggering the duplicate detector against the exact same cards
+            # now in the hand history).
             round_num = s.console_up_round + 1
             if round_cards:
-                s.console_last_round_cards = round_cards
                 for c in round_cards:
                     s.console_hand_cards.append({"player": c["player"], "card": c["card"], "round": round_num})
-            s.console_scan_phase = "confirmed"
-            log.log(f"[CONSOLE] Cards confirmed for up round {round_num}")
+            s.console_last_round_cards = []
+            for z in s.cal.zones:
+                zname = z["name"]
+                s.monitor.zone_state[zname] = "empty"
+                s.monitor.last_card[zname] = ""
+                s.monitor.recognition_details[zname] = {}
+                s.monitor.recognition_crops[zname] = None
+            # If this was the last up-card round, go to idle — there are no
+            # more zones to watch, so don't let watching_missing prompt the
+            # players to adjust non-existent cards.
+            if round_num >= s.console_total_up_rounds:
+                s.console_scan_phase = "idle"
+                log.log(f"[CONSOLE] Final up round ({round_num}) confirmed — idle until End Hand")
+            else:
+                s.console_scan_phase = "confirmed"
+                log.log(f"[CONSOLE] Cards confirmed for up round {round_num}")
             # Once the up-card round is confirmed, check Rodney's down slots
             # for anything below the auto-accept threshold. Those slots get
             # queued and (on LED-equipped hardware) will start blinking; the
@@ -2645,7 +2671,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ge = s.game_engine
             # Advance round counter
             s.console_up_round += 1
-            # Recapture baselines and resume watching dealer
+            beyond_last_up = s.console_up_round >= s.console_total_up_rounds
+            # Recapture baselines and resume watching dealer — but only if
+            # there's still an up round ahead. If we've finished all up
+            # rounds, sit idle so zone watching doesn't fire on games that
+            # have only a trailing down card (FTQ's 7th) left.
             if s.cal.ok and s.latest_frame is not None:
                 s.monitor.capture_baselines(s.latest_frame)
                 for z in s.cal.zones:
@@ -2653,8 +2683,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.monitor.last_card[z["name"]] = ""
                     s.monitor.recognition_details[z["name"]] = {}
                     s.monitor.recognition_crops[z["name"]] = None
-                s.console_scan_phase = "watching"
-                log.log("[CONSOLE] Baselines recaptured, watching dealer zone")
+                s.console_scan_phase = "idle" if beyond_last_up else "watching"
+                if beyond_last_up:
+                    log.log("[CONSOLE] No more up rounds — idle until End Hand")
+                else:
+                    log.log("[CONSOLE] Baselines recaptured, watching dealer zone")
             log.log(f"[CONSOLE] Next Round — up round {s.console_up_round}/{s.console_total_up_rounds}")
             # Also queue any pending down-card scans so games with a final
             # down (no Confirm Cards) still get a chance to verify.
