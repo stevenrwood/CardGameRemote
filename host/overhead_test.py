@@ -744,6 +744,27 @@ def _console_watch_dealer(s, frame):
         return
 
     if phase == "watching":
+        # 7/27 hit rounds: dealer goes around asking each player for a card
+        # or a freeze. Any player's zone — not necessarily the dealer's —
+        # may be the first to change. Skip frozen players (≥3 freezes).
+        is_7_27_hit = (ge.current_game
+                       and ge.current_game.name == "7/27"
+                       and s.console_up_round >= 1)
+        if is_7_27_hit:
+            trigger_zone = None
+            for z in s.cal.zones:
+                if z["name"] not in s.console_active_players:
+                    continue
+                if s.freezes.get(z["name"], 0) >= 3:
+                    continue
+                if s.monitor.check_single(frame, z) is not None:
+                    trigger_zone = z
+                    break
+            if trigger_zone is not None:
+                log.log(f"[CONSOLE] Hit-round card detected in {trigger_zone['name']}'s zone — 2s settle")
+                s.console_scan_phase = "settling"
+                s.console_settle_time = time.time()
+            return
         crop = s.monitor.check_single(frame, dealer_zone)
         if crop is not None:
             log.log(f"[CONSOLE] Dealer card detected in {dealer_name}'s zone — 2s settle")
@@ -831,6 +852,31 @@ def _format_values_phrase(values):
     if len(strs) == 2:
         return f"{strs[0]} or {strs[1]}"
     return ", ".join(strs[:-1]) + f", or {strs[-1]}"
+
+
+def _update_7_27_freezes(s, round_cards):
+    """Apply freeze-count changes for a 7/27 hit round.
+
+    round_cards comes from /api/console/confirm and lists the players
+    who have a recognized up card in this round's Brio scan. Players in
+    that list took a card (freeze reset to 0); players not in it and
+    not already frozen tick up by 1. Three-in-a-row means frozen: no
+    more cards this hand.
+    """
+    took = {c["player"] for c in round_cards}
+    newly_frozen = []
+    for name in s.console_active_players:
+        if s.freezes.get(name, 0) >= 3:
+            continue  # already frozen
+        if name in took:
+            s.freezes[name] = 0
+        else:
+            s.freezes[name] = s.freezes.get(name, 0) + 1
+            if s.freezes[name] >= 3:
+                newly_frozen.append(name)
+    for name in newly_frozen:
+        log.log(f"[7/27] {name} is frozen")
+        speech.say(f"{name} is frozen")
 
 
 def _announce_7_27_hand_values(s):
@@ -974,6 +1020,7 @@ class AppState:
         self._pi_last_logged = {}            # slot_num -> last logged code, throttle log spam
         self.pi_flash_held = False           # tracked so we don't spam hold/release
         self.folded_players = set()     # Rodney's view of who's folded this hand
+        self.freezes = {}               # 7/27: player_name -> freezes in a row
 
 _state = None
 
@@ -1043,12 +1090,15 @@ def _build_table_state(s):
                     cur["confidence"] = round(float(conf), 2)
                 up_cards.append(cur)
 
+        freezes_n = s.freezes.get(p.name, 0)
         entry = {
             "name": p.name,
             "position": p.position,
             "is_dealer": p.is_dealer,
             "is_remote": p.is_remote,
             "folded": p.name in s.folded_players,
+            "freezes": freezes_n,
+            "frozen": freezes_n >= 3,
         }
         if p.is_remote:
             # Rodney's hand = all down-card slots the scanner has seen
@@ -2164,6 +2214,8 @@ header button:hover{background:#1a5a9a}
 .hand-box .sml-btn.active{background:#1b5e20}
 .hand-box .sml-btn.folded{background:#b71c1c}
 .hand-box .values{margin-left:auto;padding:2px 10px;background:#0f3460;color:#ffd54f;border-radius:4px;font-size:.85em;font-weight:600;white-space:nowrap}
+.hand-box .freezes{margin-left:6px;padding:2px 8px;background:#1a5a9a;color:#e0e0e0;border-radius:4px;font-size:.8em;font-weight:600;white-space:nowrap}
+.hand-box .freezes.frozen{background:#0d47a1;color:#bbdefb;outline:1px solid #e3f2fd}
 .hand-box .cards{flex:1 1 auto;display:flex;gap:0;align-items:flex-start;min-height:0;overflow:hidden}
 .hand-box.center .cards{justify-content:center}
 .hand-box.folded .cards{opacity:.3;filter:grayscale(60%)}
@@ -2380,6 +2432,14 @@ function renderPlayer(p) {
     vSpan.className = 'values';
     vSpan.textContent = p.values_7_27.join(' / ');
     head.appendChild(vSpan);
+  }
+
+  // Freeze count for 7/27 hit rounds: ❄︎ N, or "FROZEN" once locked.
+  if (p.freezes != null && p.freezes > 0) {
+    var fSpan = document.createElement('span');
+    fSpan.className = 'freezes' + (p.frozen ? ' frozen' : '');
+    fSpan.textContent = p.frozen ? 'FROZEN' : ('❄ ' + p.freezes);
+    head.appendChild(fSpan);
   }
 
   var cardRow = document.createElement('div');
@@ -2743,6 +2803,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.pending_verify = None
                 s.pi_prev_slots = {}
                 s.folded_players = set()
+                s.freezes = {}
                 _table_log_add(s, "Remote hand cleared")
                 s.table_state_version += 1
             _update_flash_for_deal_state(s)
@@ -2972,6 +3033,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.pending_verify = None
                     s.pi_prev_slots = {}
                     s.folded_players = set()
+                    s.freezes = {name: 0 for name in s.console_active_players}
                     s.table_state_version += 1
                 _update_flash_for_deal_state(s)
                 self._r(200, "application/json", json.dumps(result))
@@ -3001,6 +3063,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # For 7/27, announce each player's hand value(s) after the
             # up-cards have been accumulated + indicate who bets first.
             _announce_7_27_hand_values(s)
+            # 7/27 freeze tracking: on hit rounds (any round after the
+            # first up-card round), a player who didn't take a card this
+            # round increments their freeze count. Three freezes in a row
+            # means they can't take another card this hand.
+            if (ge.current_game and ge.current_game.name == "7/27"
+                    and round_num > 1):
+                _update_7_27_freezes(s, round_cards)
             s.console_last_round_cards = []
             for z in s.cal.zones:
                 zname = z["name"]
@@ -3091,6 +3160,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.pending_verify = None
                 s.pi_prev_slots = {}
                 s.folded_players = set()
+                s.freezes = {}
                 s.table_state_version += 1
             _update_flash_for_deal_state(s)
             self._r(200, "application/json", json.dumps(result))
