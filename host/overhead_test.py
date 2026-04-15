@@ -3046,6 +3046,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     break
             self._r(200, "application/json", json.dumps({"dealer": ge.get_dealer().name}))
 
+        elif p == "/api/console/force_scan":
+            # Dealer clicked "Waiting for cards..." — skip motion detection
+            # and scan every active, non-frozen zone right now.
+            frame = s.latest_frame
+            if frame is None:
+                return self._r(503, "application/json",
+                               '{"ok":false,"error":"no frame yet"}')
+            zone_crops = {}
+            for z in s.cal.zones:
+                name = z["name"]
+                if name not in s.console_active_players:
+                    continue
+                if s.monitor.zone_state.get(name) == "corrected":
+                    continue
+                if s.freezes.get(name, 0) >= 3:
+                    continue
+                crop = s.monitor._crop(frame, z)
+                if crop is None or crop.size == 0:
+                    continue
+                zone_crops[name] = crop.copy()
+                s.monitor.pending[name] = True
+            if not zone_crops:
+                return self._r(200, "application/json",
+                               '{"ok":true,"scanned":0}')
+            s.console_scan_phase = "scanned"
+            Thread(target=s.monitor._recognize_batch,
+                   args=(zone_crops,), daemon=True).start()
+            log.log(f"[CONSOLE] Force scan of {len(zone_crops)} zones")
+            self._r(200, "application/json",
+                    json.dumps({"ok": True, "scanned": len(zone_crops)}))
+
         elif p == "/api/console/deal":
             ge = s.game_engine
             game_name = data.get("game", "")
@@ -4148,10 +4179,17 @@ function render(){
       nextBtn.disabled=true;
       nextBtn.textContent='All up rounds done';
     } else {
-      // watching or settling — no action buttons yet
+      // watching or settling — the "watching" button is clickable to
+      // force an immediate rescan for when the auto-trigger missed the
+      // new cards (e.g. no zone crossed the pixel-diff threshold).
       confirmBtn.style.display='';
-      confirmBtn.disabled=true;
-      confirmBtn.textContent=phase==='settling'?'Scanning...':'Waiting for cards...';
+      if(phase==='settling'){
+        confirmBtn.disabled=true;
+        confirmBtn.textContent='Scanning...';
+      } else {
+        confirmBtn.disabled=false;
+        confirmBtn.textContent='Waiting for cards... (tap to scan)';
+      }
       nextBtn.style.display='none';
     }
 
@@ -4238,8 +4276,14 @@ function doDeal(){
 
 function doConfirm(){
   var btn=document.getElementById('btn-confirm');
+  // In "watching" phase the button is a manual rescan trigger — no zones
+  // have been scanned yet, so /api/console/confirm would just record empty.
+  // Fire a force_scan instead; refresh picks up the 'scanned' phase and
+  // the button morphs into the real "Confirm Cards".
+  var phase=(ST && ST.scan_phase) || 'idle';
+  var endpoint = (phase === 'watching') ? '/api/console/force_scan' : '/api/console/confirm';
   btn.disabled=true;btn.textContent='...';
-  api('/api/console/confirm').then(refresh);
+  api(endpoint).then(refresh);
 }
 
 function doNextRound(){
