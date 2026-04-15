@@ -842,11 +842,26 @@ def _compute_7_27_values(cards):
     return sorted(values)
 
 
+def _speak_value(v):
+    """Render a 7/27 numeric value for speech. Half-integers become '… and a half'.
+
+    Examples:
+      0.5  -> "a half"
+      7.5  -> "7 and a half"
+      12   -> "12"
+    """
+    if isinstance(v, int) or v == int(v):
+        return str(int(v))
+    whole = int(v)
+    frac = v - whole
+    if abs(frac - 0.5) < 1e-6:
+        return "a half" if whole == 0 else f"{whole} and a half"
+    return f"{v:g}"
+
+
 def _format_values_phrase(values):
-    """Turn [2, 12, 22] into '2, 12, or 22' for speech."""
-    strs = []
-    for v in values:
-        strs.append(str(v) if isinstance(v, int) else f"{v:g}")
+    """Turn [2, 12, 22] into '2, 12, or 22' for speech, preserving half-speak."""
+    strs = [_speak_value(v) for v in values]
     if len(strs) == 1:
         return strs[0]
     if len(strs) == 2:
@@ -906,17 +921,17 @@ def _announce_7_27_hand_values(s):
         values = _compute_7_27_values(cards)
         if not values:
             continue
-        phrase = _format_values_phrase(values)
-        log.log(f"[7/27] {name}: {phrase}")
-        speech.say(f"{name}, {phrase}")
+        # Keep a log entry per player for debugging, but only speak the winner.
+        log.log(f"[7/27] {name}: {_format_values_phrase(values)}")
         high = max(values)
         if high > best_high:
             best_high = high
             best_player = name
 
     if best_player is not None:
-        log.log(f"[7/27] Bet first: {best_player} (high {best_high})")
-        speech.say(f"{best_player}, your bet with high of {best_high}")
+        phrase = f"{best_player}, your bet with high of {_speak_value(best_high)}"
+        log.log(f"[7/27] Bet first: {phrase}")
+        speech.say(phrase)
 
 
 def _check_follow_the_queen_round(s, round_cards):
