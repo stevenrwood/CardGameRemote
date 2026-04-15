@@ -658,6 +658,21 @@ def _console_watch_dealer(s, frame):
             if crop is not None:
                 retry_crops[z["name"]] = crop.copy()
                 s.monitor.pending[z["name"]] = True
+        # Watchdog: if no movement was detected for >10s, force a rescan
+        # anyway. The dealer may be adjusting a card that barely moves the
+        # pixel diff (thin edge inside zone). Keeps us from getting stuck
+        # prompting "adjust your card" with nothing happening.
+        if not retry_crops and missing_zones:
+            last = getattr(s, "_missing_prompt_time", 0.0)
+            if last and time.time() - last >= 10.0:
+                for z in missing_zones:
+                    crop = s.monitor._crop(frame, z)
+                    if crop is not None:
+                        retry_crops[z["name"]] = crop.copy()
+                        s.monitor.pending[z["name"]] = True
+                if retry_crops:
+                    log.log(f"[CONSOLE] Watchdog rescan of missing zones: {', '.join(retry_crops.keys())}")
+                    s._missing_prompt_time = time.time()
         if retry_crops:
             log.log(f"[CONSOLE] Movement detected in missing zones: {', '.join(retry_crops.keys())}")
             s.console_scan_phase = "scanned"  # will transition to watching_missing again if still missing
@@ -679,6 +694,7 @@ def _console_watch_dealer(s, frame):
             log.log(f"[CONSOLE] Missing cards: {names} — prompting to adjust")
             speech.say(f"{names}, please adjust your card")
             s.console_scan_phase = "watching_missing"
+            s._missing_prompt_time = time.time()
         return
 
     if dealer_name not in s.console_active_players:
@@ -1087,7 +1103,9 @@ def _pi_flash(s, hold):
         s.pi_flash_held = hold
         log.log(f"[PI] flash {'held' if hold else 'released'}")
     except Exception as e:
-        log.log(f"[PI] {path} error: {e}")
+        # Bare repr(e) catches empty-string errors (URLError / HTTPError).
+        detail = repr(e) if not str(e) else str(e)
+        log.log(f"[PI] {path} error: {type(e).__name__}: {detail}")
 
 
 def _update_flash_for_deal_state(s):
@@ -1109,11 +1127,10 @@ def _pi_poll_loop(s):
     log.log("[PI] poll loop started")
     while s.pi_polling:
         # Only hit the Pi when we're actually expecting a down card to be
-        # in the scanner (pi_flash_held is True whenever the next dealt
-        # card is a down). Otherwise just keep the flash state in sync and
-        # idle — no reason to run the camera + template match every tick.
+        # dealt. Gate on the deal pattern directly (not pi_flash_held) so a
+        # failed /flash/hold call doesn't also stop the scan polling.
         _update_flash_for_deal_state(s)
-        if not s.pi_flash_held:
+        if _next_deal_position_type(s) != "down":
             time.sleep(2.0)
             continue
         doc = _pi_fetch_slots(s)
