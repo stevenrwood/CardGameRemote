@@ -215,6 +215,8 @@ class AppState:
         self.detector = CardDetector(str(REFERENCE_DIR))
         self.last_frames: dict[int, np.ndarray] = {}
         self.flash_settle_ms = 50
+        self.test_slot_crops = {}  # slot_num -> BGR crop from last /test_slots/data
+        self.test_slot_stamp = 0
         self.calibration = self._load_calibration()
         log.info(f"Scan controller ready with {len(self.cameras)} cameras; "
                  f"{len(self.calibration.get('slots', []))}/{NUM_SLOTS} slots calibrated")
@@ -394,17 +396,19 @@ def test_slots_page():
 
 @app.get("/test_slots/data")
 def test_slots_data():
-    """JSON payload for /test_slots. Captures both cameras under a held
-    flash so every slot's scan sees full-brightness lighting, then runs
-    the detector on each."""
+    """JSON payload for /test_slots. Holds the flash for 4 seconds so the
+    LEDs are at fully steady brightness, captures both cameras, crops
+    every calibrated slot, runs recognition, and caches each crop for the
+    per-slot image endpoint to serve without another capture."""
     assert _state is not None
     _state.flash.hold()
     try:
-        time.sleep(0.3)  # extra warmup beyond FLASH_WARMUP_MS
+        time.sleep(4.0)
         frames = _state.capture_both()
     finally:
         _state.flash.release()
     results = []
+    crops_cache = {}
     for slot in _state.calibration.get("slots", []):
         cam_idx = slot.get("camera")
         entry = {
@@ -423,6 +427,7 @@ def test_slots_data():
             entry["error"] = "crop out of bounds"
             results.append(entry)
             continue
+        crops_cache[slot["slot"]] = crop.copy()
         if _state.detector.has_any_slot_templates():
             res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
         else:
@@ -433,30 +438,24 @@ def test_slots_data():
             entry["suit"] = res.suit
             entry["confidence"] = round(float(res.confidence), 3)
         results.append(entry)
-    return jsonify({"slots": results})
+    _state.test_slot_crops = crops_cache
+    _state.test_slot_stamp = int(time.time())
+    return jsonify({"slots": results, "stamp": _state.test_slot_stamp})
 
 
 @app.get("/test_slots/image/<int:slot_num>")
 def test_slots_image(slot_num: int):
-    """Serve a fresh crop of one slot for the /test_slots page."""
+    """Serve the crop cached by the most recent /test_slots/data call.
+
+    Does NOT re-capture; the bulk scan already paid the 4s LED warmup
+    once for all slots. If no cache is present (diagnostic page loaded
+    without scanning), 404.
+    """
     assert _state is not None
-    slot = next((s for s in _state.calibration.get("slots", [])
-                 if s["slot"] == slot_num), None)
-    if slot is None:
-        return f"Slot {slot_num} not calibrated", 404
-    cam_idx = slot["camera"]
-    if cam_idx not in _state.cameras:
-        return "camera not available", 400
-    _state.flash.hold()
-    try:
-        time.sleep(0.3)
-        frame = _state.cameras[cam_idx].capture()
-    finally:
-        _state.flash.release()
-    x, y, w, h = slot["x"], slot["y"], slot["w"], slot["h"]
-    crop = frame[y:y + h, x:x + w]
-    if crop.size == 0:
-        return "crop out of bounds", 400
+    crops = getattr(_state, "test_slot_crops", None) or {}
+    crop = crops.get(slot_num)
+    if crop is None:
+        return f"No cached crop for slot {slot_num}; click Scan All first", 404
     ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
     if not ok:
         return "encode failed", 500
@@ -498,8 +497,16 @@ function confClass(c) {
 }
 
 function run() {
-  document.getElementById('status').textContent = 'Scanning…';
+  var status = document.getElementById('status');
+  var n = 4;
+  status.textContent = 'LEDs on, warming up ' + n + 's…';
+  var tick = setInterval(function() {
+    n--;
+    if (n > 0) status.textContent = 'LEDs on, warming up ' + n + 's…';
+    else { clearInterval(tick); status.textContent = 'Capturing…'; }
+  }, 1000);
   fetch('/test_slots/data').then(function(r){return r.json()}).then(function(d) {
+    clearInterval(tick);
     var tbody = document.getElementById('rows');
     tbody.innerHTML = '';
     (d.slots || []).forEach(function(entry) {
