@@ -1181,8 +1181,10 @@ function updateMarkButton() {
 function toggleMarkFromModal() {
   if (modalSlot == null || !modalCard) return;
   setMarked(modalSlot, modalCard, !isMarked(modalSlot, modalCard));
-  updateMarkButton();
   renderMatrix();
+  // Close the preview modal so the next click can flow straight into
+  // marking another card.
+  closeModal();
 }
 
 // ---- Slot-scoped retrain runner ----
