@@ -1161,6 +1161,7 @@ canvas{border:1px solid #444;cursor:crosshair;display:block;max-width:100%;heigh
 <div>
   <button onclick="refreshCaptures()">Refresh Images</button>
   <button class="btn-green" onclick="saveSlots()">Save Calibration</button>
+  <button onclick="undoLastSlot()" title="Undo last rectangle (⌥Z)">Undo</button>
   <button class="btn-red" onclick="clearSlots()">Clear All</button>
 </div>
 <p style="font-size:.9em;color:#aaa">
@@ -1349,6 +1350,34 @@ function clearSlots() {
   updateSlotsList();
   [0, 1].forEach(redrawCam);
 }
+
+function undoLastSlot() {
+  if (drag) {
+    // Cancel an in-progress drag before touching committed slots.
+    var camIdx = drag.camera;
+    drag = null;
+    updateStatus();
+    redrawCam(camIdx);
+    return;
+  }
+  if (!slots.length) return;
+  var last = slots.pop();
+  // Renumber the remaining slots is unnecessary — they were added
+  // in order and numbered sequentially, so popping the last one
+  // keeps numbers contiguous.
+  updateStatus();
+  updateSlotsList();
+  [0, 1].forEach(redrawCam);
+}
+
+// Option+Z (Alt+Z) anywhere on the page undoes the last rectangle.
+window.addEventListener('keydown', function(ev) {
+  if (ev.altKey && (ev.key === 'z' || ev.key === 'Z' ||
+                    ev.code === 'KeyZ' || ev.code === 'Ω')) {
+    ev.preventDefault();
+    undoLastSlot();
+  }
+});
 
 // Load existing calibration on startup
 fetch('/calibration').then(function(r){return r.json()}).then(function(d) {
