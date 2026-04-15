@@ -964,6 +964,7 @@ table.matrix-table th.slot-header:hover{background:#b71c1c}
 table.matrix-table td.trained{background:#1b5e20;cursor:pointer}
 table.matrix-table td.trained:hover{background:#2e7d32}
 table.matrix-table td.active{outline:2px solid #4fc3f7}
+table.matrix-table td.marked{outline:2px dashed #ff5722;outline-offset:-2px}
 table.matrix-table td.red{color:#ef9a9a}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;z-index:100}
 .modal.show{display:flex}
@@ -1000,8 +1001,9 @@ input[type=number]{padding:8px;background:#0f3460;color:#fff;border:1px solid #3
 <div class="modal" id="slot-menu" onclick="closeSlotMenu(event)">
   <div class="modal-content" onclick="event.stopPropagation()">
     <div class="title" id="slot-menu-title">Slot —</div>
-    <div class="buttons">
+    <div class="buttons" style="flex-direction:column;gap:6px">
       <button class="btn-green" onclick="validateSlot()">Validate (open in new tab)</button>
+      <button onclick="retrainMarkedInSlot()">Retrain marked cards</button>
       <button class="btn-red" onclick="resetSlot()">Reset slot</button>
       <button onclick="closeSlotMenu()">Cancel</button>
     </div>
@@ -1012,7 +1014,7 @@ input[type=number]{padding:8px;background:#0f3460;color:#fff;border:1px solid #3
     <div class="title" id="modal-title">—</div>
     <img id="modal-img" src="" alt="template"/>
     <div class="buttons">
-      <button class="btn-red" onclick="retrainFromModal()">Retrain</button>
+      <button id="mark-btn" class="btn-red" onclick="toggleMarkFromModal()">Mark for retrain</button>
       <button onclick="closeModal()">Close</button>
     </div>
   </div>
@@ -1096,6 +1098,7 @@ function renderMatrix() {
         }
         if (isActive) cls.push('active');
         if (isRed(s)) cls.push('red');
+        if (isMarked(slot, cardCode(r, s))) cls.push('marked');
         html += '<td class="' + cls.join(' ') + '"' + attrs + '>' + (isTrained(step)?'✓':'') + '</td>';
       });
       html += '</tr>';
@@ -1147,31 +1150,174 @@ function showTemplate(slot, card) {
   document.getElementById('modal-img').src =
     '/train/template/' + slot + '/' + card + '?t=' + Date.now();
   document.getElementById('modal').classList.add('show');
+  updateMarkButton();
 }
 function closeModal(ev) {
   if (ev && ev.target !== ev.currentTarget) return;
   document.getElementById('modal').classList.remove('show');
   modalSlot = null; modalCard = null;
 }
-function retrainFromModal() {
+// Client-side mark set: "<slot>/<card>" entries flagged by the user
+// for a future retrain pass (via the slot menu's "Retrain marked cards").
+var marksForRetrain = {};
+
+function markKey(slot, card) { return slot + "/" + card; }
+function isMarked(slot, card) { return !!marksForRetrain[markKey(slot, card)]; }
+function setMarked(slot, card, on) {
+  var k = markKey(slot, card);
+  if (on) marksForRetrain[k] = true;
+  else delete marksForRetrain[k];
+}
+
+function updateMarkButton() {
+  var btn = document.getElementById('mark-btn');
+  if (!btn || modalSlot == null || !modalCard) return;
+  var marked = isMarked(modalSlot, modalCard);
+  btn.textContent = marked ? 'Unmark' : 'Mark for retrain';
+  btn.classList.toggle('btn-red', !marked);
+  btn.classList.toggle('btn-green', marked);
+}
+
+function toggleMarkFromModal() {
   if (modalSlot == null || !modalCard) return;
-  var slot = modalSlot;
-  var card = modalCard;
-  var m = /^(10|[2-9jqka])([hdcs])$/i.exec(card);
-  if (!m) return;
-  var rank = m[1].toUpperCase();
-  var suit = {c:"clubs",d:"diamonds",h:"hearts",s:"spades"}[m[2].toLowerCase()];
-  if (!confirm('Capture a new image for slot ' + slot + ' / ' + card.toUpperCase() +
-               ' now? Make sure the card is in the slot.')) return;
-  closeModal();
+  setMarked(modalSlot, modalCard, !isMarked(modalSlot, modalCard));
+  updateMarkButton();
+  renderMatrix();
+}
+
+// ---- Slot-scoped retrain runner ----
+// Mirrors the main Start/Pause wizard but only walks the cards marked
+// for the selected slot, in rank/suit order. Holds the flash on for the
+// whole run and releases when finished.
+
+var retrainRunning = false;
+var retrainPaused = false;
+var retrainTicker = null;
+var retrainRemainingMs = 0;
+var retrainFlashing = false;
+var retrainSlot = null;
+var retrainQueue = [];
+var retrainIdx = 0;
+
+function retrainMarkedInSlot() {
+  var slot = parseInt(document.getElementById('slot-menu').dataset.slot, 10);
+  closeSlotMenu();
+  // Build the ordered list of marked cards for this slot.
+  var picks = [];
+  RANKS.forEach(function(r) {
+    SUITS.forEach(function(s) {
+      if (isMarked(slot, cardCode(r, s))) {
+        picks.push({rank: r, suit: s, slot: slot});
+      }
+    });
+  });
+  if (!picks.length) {
+    alert('No cards marked for slot ' + slot + '. Open a trained cell and click "Mark for retrain" first.');
+    return;
+  }
+  if (!confirm('Retrain ' + picks.length + ' card(s) in slot ' + slot + '? LEDs will stay on until done.')) return;
+  if (running) {
+    alert('Main training wizard is running. Stop it first.');
+    return;
+  }
+  retrainSlot = slot;
+  retrainQueue = picks;
+  retrainIdx = 0;
+  retrainRunning = true;
+  retrainPaused = false;
+  fetch('/flash/hold', {method:'POST'});
+  updateRetrainDisplay();
+  beginRetrainCountdown();
+}
+
+function stopRetrain() {
+  retrainRunning = false;
+  retrainPaused = false;
+  if (retrainTicker) { clearInterval(retrainTicker); retrainTicker = null; }
+  setCountdown('—');
+  setFlashing(false);
+  fetch('/flash/release', {method:'POST'});
+}
+
+function updateRetrainDisplay() {
+  var step = retrainQueue[retrainIdx];
+  if (!step) return;
+  var cur = document.getElementById('current-card');
+  cur.textContent = step.rank + ' ' + SUIT_SYM[step.suit];
+  cur.className = 'card ' + (isRed(step.suit) ? 'red' : 'black');
+  document.getElementById('current-slot').textContent = 'slot ' + step.slot + ' (retrain)';
+  var nxt = retrainQueue[retrainIdx + 1];
+  var nextSlotEl = document.getElementById('next-slot');
+  nextSlotEl.textContent = nxt ? (describeStep(nxt) + ' (slot ' + step.slot + ')')
+                               : '— (retrain complete)';
+  document.getElementById('next-card').textContent =
+    retrainQueue.length + ' marked card(s); ' + (retrainIdx + 1) + ' of ' + retrainQueue.length;
+  renderMatrix();
+}
+
+function beginRetrainCountdown() {
+  if (retrainIdx >= retrainQueue.length) {
+    stopRetrain();
+    setCountdown('✓ Done');
+    // Clear marks for the cards we just retrained.
+    retrainQueue.forEach(function(step) {
+      setMarked(step.slot, cardCode(step.rank, step.suit), false);
+    });
+    renderMatrix();
+    return;
+  }
+  var secs = Math.max(1, parseInt(document.getElementById('delay').value, 10) || 5);
+  retrainRemainingMs = secs * 1000;
+  setCountdown(secs.toString());
+  if (retrainTicker) clearInterval(retrainTicker);
+  retrainTicker = setInterval(function() {
+    if (retrainPaused || retrainFlashing) return;
+    retrainRemainingMs -= 100;
+    if (retrainRemainingMs <= 0) {
+      clearInterval(retrainTicker); retrainTicker = null;
+      fireRetrainCapture();
+      return;
+    }
+    setCountdown(Math.ceil(retrainRemainingMs / 1000).toString());
+  }, 100);
+}
+
+function fireRetrainCapture() {
+  var step = retrainQueue[retrainIdx];
+  retrainFlashing = true;
+  setFlashing(true);
+  setCountdown('📸');
+  // focus=false — LEDs already held and warm
   fetch('/train/capture', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({rank:rank, suit:suit, slot: slot})
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({rank: step.rank, suit: step.suit, slot: step.slot, focus: false})
   }).then(function(r){return r.json()}).then(function(d) {
-    if (!d.ok) { alert('Capture failed: ' + (d.error || 'unknown')); return; }
-    refreshStatus();
-  }).catch(function(e){ alert('Network error: ' + e); });
+    retrainFlashing = false;
+    setFlashing(false);
+    if (!d.ok) {
+      setCountdown('✗');
+      alert('Retrain capture failed: ' + d.error);
+      stopRetrain();
+      return;
+    }
+    setMarked(step.slot, cardCode(step.rank, step.suit), false);
+    refreshStatus().then(function() {
+      retrainIdx++;
+      if (retrainIdx >= retrainQueue.length) {
+        stopRetrain();
+        setCountdown('✓ Done');
+        renderMatrix();
+        return;
+      }
+      updateRetrainDisplay();
+      beginRetrainCountdown();
+    });
+  }).catch(function(e) {
+    retrainFlashing = false;
+    setFlashing(false);
+    alert('Network error: ' + e);
+    stopRetrain();
+  });
 }
 
 function describeStep(step) {
