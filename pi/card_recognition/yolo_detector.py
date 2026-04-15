@@ -45,7 +45,9 @@ class YoloDetector:
         """
         if self.model is None or crop_bgr is None or crop_bgr.size == 0:
             return None
-        results = self.model.predict(crop_bgr, conf=0.25, imgsz=320, verbose=False)
+        # Low min-conf so marginal detections still come through. Consumers
+        # (e.g. Neo's poller) decide what to do based on confidence tiers.
+        results = self.model.predict(crop_bgr, conf=0.05, imgsz=320, verbose=False)
         if not results:
             return None
         boxes = results[0].boxes
