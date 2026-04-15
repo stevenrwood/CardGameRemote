@@ -1021,6 +1021,9 @@ class AppState:
         self.pi_flash_held = False           # tracked so we don't spam hold/release
         self.folded_players = set()     # Rodney's view of who's folded this hand
         self.freezes = {}               # 7/27: player_name -> freezes in a row
+        # True when Deal pinged the Pi and got no answer; stays set until the
+        # next Deal so we skip hitting the Pi (flash/hold, /slots, LEDs, etc).
+        self.pi_offline = False
 
 _state = None
 
@@ -1323,6 +1326,36 @@ _SIM_RANKS = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"]
 _SIM_SUITS = ["clubs","diamonds","hearts","spades"]
 
 
+def _promote_next_verify(s) -> bool:
+    """If no modal is open and a queued slot has a pending guess, open it.
+
+    Returns True if state changed (pending_verify was set). Caller owns the
+    table_lock.
+    """
+    if s.pending_verify is not None or not s.verify_queue:
+        return False
+    for slot_num in list(s.verify_queue):
+        guess = s.slot_pending.get(slot_num)
+        if not guess:
+            continue
+        s.pending_verify = {
+            "slot": slot_num,
+            "guess": dict(guess),
+            "prompt": (
+                f"Slot {slot_num} needs verification. "
+                f"Remove the card, hold it up for Rodney, "
+                f"then confirm or override."
+            ),
+            "image_url": (
+                None if s.pi_offline
+                else f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/image"
+            ),
+        }
+        _table_log_add(s, f"Slot {slot_num}: modal opened for verify")
+        return True
+    return False
+
+
 def _simulate_offline_slot_scans(s):
     """Fill rodney_downs' expected slots with random low-confidence guesses
     so a hand can be played end-to-end without the Pi. Each missing slot
@@ -1348,12 +1381,28 @@ def _simulate_offline_slot_scans(s):
             s.table_state_version += 1
 
 
+def _pi_ping(s, timeout_s: float = 1.5) -> bool:
+    """One quick GET /ping to test Pi reachability. True on success."""
+    import urllib.request
+    try:
+        url = f"{s.pi_base_url.rstrip('/')}/ping"
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+            resp.read()
+        return True
+    except Exception:
+        return False
+
+
 def _pi_fetch_slots(s):
     """Fetch /slots from the Pi, limiting to the slots our game uses.
 
     Passes max_slot so the Pi skips capturing + matching the unused ones.
-    Returns the parsed dict or None on error.
+    Returns the parsed dict or None on error. If s.pi_offline is set (Deal
+    determined the Pi was unreachable) this returns None without making a
+    network call, so simulation kicks in immediately.
     """
+    if s.pi_offline:
+        return None
     import urllib.request
     max_slot = _total_downs_in_pattern(s.game_engine)
     if max_slot <= 0:
@@ -1369,6 +1418,8 @@ def _pi_fetch_slots(s):
 
 def _pi_flash(s, hold):
     """Hold or release the Pi's flash LEDs. Tracks state to avoid redundant calls."""
+    if s.pi_offline:
+        return
     if s.pi_flash_held == hold:
         return
     import urllib.request
@@ -1418,9 +1469,14 @@ def _pi_poll_loop(s):
             # After two failed fetches, assume the Pi isn't running and
             # simulate slot scans so gameplay is testable without hardware.
             # Each expected slot gets a random low-confidence guess the user
-            # can override in the verify modal.
-            if offline_streak >= 2:
+            # can override in the verify modal. Also promote any queued
+            # verify into pending_verify so the modal actually opens in
+            # offline mode.
+            if offline_streak >= 2 or s.pi_offline:
                 _simulate_offline_slot_scans(s)
+                with s.table_lock:
+                    if _promote_next_verify(s):
+                        s.table_state_version += 1
             time.sleep(2.0)
             continue
         offline_streak = 0
@@ -1491,32 +1547,8 @@ def _pi_poll_loop(s):
                         s.slot_pending[slot_num] = guess
                         changed = True
 
-            # If a modal isn't currently open, promote the first queued
-            # slot into pending_verify. The Pi's template matcher can't
-            # reliably tell "empty" from "low-confidence card" so we don't
-            # wait for the slot to go empty — the user will simply remove
-            # the card, hold it up to the camera, then confirm or override
-            # in the modal.
-            if s.pending_verify is None and s.verify_queue:
-                for slot_num in list(s.verify_queue):
-                    guess = s.slot_pending.get(slot_num)
-                    if not guess:
-                        continue
-                    s.pending_verify = {
-                        "slot": slot_num,
-                        "guess": dict(guess),
-                        "prompt": (
-                            f"Slot {slot_num} needs verification. "
-                            f"Remove the card, hold it up for Rodney, "
-                            f"then confirm or override."
-                        ),
-                        # Direct Pi URL of the slot crop so the modal can
-                        # show the actual scan for diagnostic purposes.
-                        "image_url": f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/image",
-                    }
-                    _table_log_add(s, f"Slot {slot_num}: modal opened for verify")
-                    changed = True
-                    break
+            if _promote_next_verify(s):
+                changed = True
             if changed:
                 s.table_state_version += 1
         time.sleep(1.0)
@@ -1558,6 +1590,10 @@ def _enqueue_down_card_verifies(s):
         if newly_queued:
             for sn in newly_queued:
                 _table_log_add(s, f"Slot {sn}: queued for verify (blink LED)")
+            # Open the modal immediately rather than waiting for the next
+            # poller tick — nicer UX, and in offline mode the poller may
+            # be sleeping between failed fetches.
+            _promote_next_verify(s)
             s.table_state_version += 1
     # TODO: POST to Pi /slots/<n>/led to blink once that endpoint is wired.
     return newly_queued
@@ -2863,19 +2899,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     f"Slot {slot_num}: flipping up ({d['rank']}{d['suit'][0]})",
                 )
                 s.table_state_version += 1
-            # Tell the Pi to blink that slot's LED. Endpoint is a no-op
-            # placeholder until the slot LEDs are physically wired.
-            try:
-                import urllib.request
-                url = f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/led"
-                req = urllib.request.Request(
-                    url, method="POST",
-                    data=json.dumps({"state": "blink"}).encode(),
-                    headers={"Content-Type": "application/json"},
-                )
-                urllib.request.urlopen(req, timeout=2).read()
-            except Exception as e:
-                log.log(f"[PI] slot LED blink error: {type(e).__name__}: {e}")
+            # Tell the Pi to blink that slot's LED. Skipped when offline.
+            if not s.pi_offline:
+                try:
+                    import urllib.request
+                    url = f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/led"
+                    req = urllib.request.Request(
+                        url, method="POST",
+                        data=json.dumps({"state": "blink"}).encode(),
+                        headers={"Content-Type": "application/json"},
+                    )
+                    urllib.request.urlopen(req, timeout=2).read()
+                except Exception as e:
+                    log.log(f"[PI] slot LED blink error: {type(e).__name__}: {e}")
             self._r(200, "application/json", '{"ok":true}')
 
         elif p == "/api/table/fold":
@@ -3023,6 +3059,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 log.log(f"[CONSOLE] New hand: {game_name}, dealer: {result['dealer']}")
                 if result.get("wild_label"):
                     log.log(f"[CONSOLE] {result['wild_label']}")
+                # Quick Pi reachability check. If the Pi's down, set the
+                # pi_offline flag so every Pi call (flash/hold, /slots,
+                # slot LEDs, etc.) short-circuits for the rest of the game.
+                # Flag clears on the next Deal (re-checked below).
+                pi_up = _pi_ping(s)
+                s.pi_offline = not pi_up
+                s.pi_flash_held = False  # reset our tracker regardless
+                log.log(f"[PI] Deal-time ping: {'reachable' if pi_up else 'OFFLINE (suppressing calls)'}")
                 # Start the hand fresh: clear Rodney-side state and turn the
                 # scanner LEDs on so the initial down cards get good scans.
                 with s.table_lock:
