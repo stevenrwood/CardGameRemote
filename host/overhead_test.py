@@ -4218,7 +4218,15 @@ def main():
                              "when auto-selecting the camera")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION)
+    parser.add_argument("--voice", type=str, default=None,
+                        help="Base voice name for `say`. The actual voice used "
+                             "is the highest-quality installed variant "
+                             "(Premium > Enhanced > base). Overrides SPEECH_VOICE env.")
     args = parser.parse_args()
+
+    if args.voice:
+        speech.voice = _resolve_best_voice(args.voice)
+        log.log(f"Speech voice overridden to: {speech.voice}")
 
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
 
