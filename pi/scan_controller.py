@@ -54,7 +54,7 @@ FLASH_GPIO = 16  # BCM pin driving the flash MOSFET gate
 FLASH_PULSE_MS = 50
 REFERENCE_DIR = Path(__file__).parent / "card_recognition" / "reference"
 CALIBRATION_FILE = Path(__file__).parent / "slot_calibration.json"
-NUM_SLOTS = 7
+NUM_SLOTS = 5
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("scan")
@@ -406,7 +406,7 @@ def camera_settings():
 
 @app.get("/test_slots")
 def test_slots_page():
-    """Diagnostic page: captures all 7 slots and shows the crops next to
+    """Diagnostic page: captures every calibrated slot and shows the crops next to
     the detector's rank/suit guess and confidence. No game / deal context,
     just a straight capture-and-recognize for all calibrated slots.
     """
@@ -653,10 +653,10 @@ def slots_state():
         results.append(entry)
     log.info(f"Slots scan: {sum(1 for r in results if r.get('recognized'))}/{len(results)} recognized")
 
-    # Compact slot-1..7 summary: "Qc", "10h", "-" if unrecognized / not calibrated
+    # Compact slot-1..N summary: "Qc", "10h", "-" if unrecognized / not calibrated
     by_slot = {r["slot"]: r for r in results}
     cards = []
-    for n in range(1, 8):
+    for n in range(1, NUM_SLOTS + 1):
         r = by_slot.get(n)
         if r and r.get("recognized"):
             cards.append(f"{r['rank']}{r['suit'][0]}")
@@ -783,14 +783,14 @@ def train_status():
     assert _state is not None
     per_slot = _state.detector.list_slot_templates()  # {slot: [(rank, suit), ...]}
     trained = {}
-    for slot_num in range(1, 8):
+    for slot_num in range(1, NUM_SLOTS + 1):
         have = set(per_slot.get(slot_num, []))
         trained[slot_num] = {
             f"{rank}{suit[0]}": (rank, suit) in have
             for rank in RANKS for suit in SUITS
         }
     total = sum(sum(1 for v in s.values() if v) for s in trained.values())
-    return jsonify({"slots": trained, "count": total, "expected": 7 * 52})
+    return jsonify({"slots": trained, "count": total, "expected": NUM_SLOTS * 52})
 
 
 @app.post("/train/capture")
@@ -812,8 +812,8 @@ def train_capture():
     focus = bool(body.get("focus", False))
     if rank not in RANKS or suit not in SUITS:
         return jsonify({"ok": False, "error": "bad rank/suit"}), 400
-    if slot_num < 1 or slot_num > 7:
-        return jsonify({"ok": False, "error": "slot must be 1..7"}), 400
+    if slot_num < 1 or slot_num > NUM_SLOTS:
+        return jsonify({"ok": False, "error": f"slot must be 1..{NUM_SLOTS}"}), 400
     crop, meta = _slot_crop(slot_num, focus=focus)
     if crop is None:
         return jsonify({"ok": False, "error": meta}), 400
@@ -829,8 +829,8 @@ def train_capture():
 def train_reset_slot(slot_num: int):
     """Delete all templates for a single slot."""
     assert _state is not None
-    if slot_num < 1 or slot_num > 7:
-        return jsonify({"ok": False, "error": "slot must be 1..7"}), 400
+    if slot_num < 1 or slot_num > NUM_SLOTS:
+        return jsonify({"ok": False, "error": f"slot must be 1..{NUM_SLOTS}"}), 400
     d = _state.detector.reference_dir / "slot_templates" / f"slot{slot_num}"
     removed = 0
     if d.exists():
@@ -886,8 +886,8 @@ def train_page():
 def train_validate(slot_num: int):
     """Render a 4x13 grid of all 52 templates for a slot so the user can
     eyeball whether every capture is complete and correct."""
-    if slot_num < 1 or slot_num > 7:
-        return "slot must be 1..7", 400
+    if slot_num < 1 or slot_num > NUM_SLOTS:
+        return f"slot must be 1..{NUM_SLOTS}", 400
     rows = []
     for suit in SUITS:
         cells = []
@@ -1025,7 +1025,7 @@ input[type=number]{padding:8px;background:#0f3460;color:#fff;border:1px solid #3
 var RANKS = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"];
 var SUITS = ["clubs","diamonds","hearts","spades"];
 var SUIT_SYM = {clubs:"♣",diamonds:"♦",hearts:"♥",spades:"♠"};
-var SLOTS = [1,2,3,4,5,6,7];
+var SLOTS = [1,2,3,4,5];  // matches NUM_SLOTS on server
 
 // ORDER is slot-major: finish all 52 cards in slot 1, auto-pause, then
 // slot 2's 52, pause, ... through slot 7. Within a slot the card order is
@@ -1555,7 +1555,7 @@ canvas{border:1px solid #444;cursor:crosshair;display:block;max-width:100%;heigh
   <button class="btn-red" onclick="clearSlots()">Clear All</button>
 </div>
 <p style="font-size:.9em;color:#aaa">
-  Currently marking slot <b id="next-slot">1</b> of 7.
+  Currently marking slot <b id="next-slot">1</b> of 5.
   Press on the top-left corner and drag to the bottom-right of the slot window, then release.
 </p>
 <div class="cam-box">
@@ -1649,7 +1649,7 @@ function attachHandlers() {
     var canvas = document.getElementById('cam' + camIdx);
     canvas.style.touchAction = 'none';  // prevent scroll/zoom on drag
     canvas.addEventListener('pointerdown', function(ev) {
-      if (slots.length >= 7) return;
+      if (slots.length >= NUM_SLOTS) return;
       var p = canvasCoords(canvas, ev);
       drag = {camera: camIdx, x1: p.x, y1: p.y, x2: p.x, y2: p.y};
       canvas.setPointerCapture(ev.pointerId);
@@ -1699,13 +1699,15 @@ function attachHandlers() {
   });
 }
 
+var NUM_SLOTS = 5;  // matches NUM_SLOTS on server
+
 function updateStatus(msg) {
   var s = document.getElementById('status');
   if (msg) { s.textContent = msg; return; }
   var next = slots.length + 1;
-  document.getElementById('next-slot').textContent = Math.min(next, 7);
-  if (next > 7) {
-    s.textContent = '✓ All 7 slots marked. Review and Save Calibration.';
+  document.getElementById('next-slot').textContent = Math.min(next, NUM_SLOTS);
+  if (next > NUM_SLOTS) {
+    s.textContent = '✓ All ' + NUM_SLOTS + ' slots marked. Review and Save Calibration.';
   } else if (drag) {
     s.textContent = 'Drag to bottom-right of slot #' + next + ' and release…';
   } else {
