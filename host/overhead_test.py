@@ -13,6 +13,7 @@ import argparse
 import base64
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -1261,6 +1262,35 @@ def _parse_card_code(code):
     return {"rank": m.group(1).upper(), "suit": _SUIT_LETTER[m.group(2).lower()]}
 
 
+_SIM_RANKS = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"]
+_SIM_SUITS = ["clubs","diamonds","hearts","spades"]
+
+
+def _simulate_offline_slot_scans(s):
+    """Fill rodney_downs' expected slots with random low-confidence guesses
+    so a hand can be played end-to-end without the Pi. Each missing slot
+    (not in rodney_downs, not in slot_pending) gets one random card at
+    conf=0.20 — low enough to queue a verify modal on Confirm Cards where
+    Rodney can override with the actual card.
+    """
+    max_slot = _total_downs_in_pattern(s.game_engine)
+    if max_slot <= 0:
+        return
+    with s.table_lock:
+        added = []
+        for n in range(1, max_slot + 1):
+            if n in s.rodney_downs or n in s.slot_pending:
+                continue
+            rank = random.choice(_SIM_RANKS)
+            suit = random.choice(_SIM_SUITS)
+            s.slot_pending[n] = {"rank": rank, "suit": suit, "confidence": 0.20}
+            added.append((n, f"{rank}{suit[0]}"))
+        if added:
+            for (n, code) in added:
+                _table_log_add(s, f"Slot {n}: simulated {code} (Pi offline, needs verify)")
+            s.table_state_version += 1
+
+
 def _pi_fetch_slots(s):
     """Fetch /slots from the Pi, limiting to the slots our game uses.
 
@@ -1316,6 +1346,7 @@ def _pi_poll_loop(s):
     - Slots that go empty clear their rodney_downs entry too.
     """
     log.log("[PI] poll loop started")
+    offline_streak = 0
     while s.pi_polling:
         # Only hit the Pi when we're actually expecting a down card to be
         # dealt. Gate on the deal pattern directly (not pi_flash_held) so a
@@ -1326,8 +1357,16 @@ def _pi_poll_loop(s):
             continue
         doc = _pi_fetch_slots(s)
         if doc is None:
+            offline_streak += 1
+            # After two failed fetches, assume the Pi isn't running and
+            # simulate slot scans so gameplay is testable without hardware.
+            # Each expected slot gets a random low-confidence guess the user
+            # can override in the verify modal.
+            if offline_streak >= 2:
+                _simulate_offline_slot_scans(s)
             time.sleep(2.0)
             continue
+        offline_streak = 0
         # Only scan slots the current game actually uses (FTQ=3, Hold'em=2).
         max_slot = _total_downs_in_pattern(s.game_engine)
         with s.table_lock:
