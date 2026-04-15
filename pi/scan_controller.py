@@ -32,7 +32,7 @@ from flask import Flask, jsonify, request, send_file
 
 # GPIO — only import on Pi. Fail gracefully when running elsewhere.
 try:
-    from gpiozero import LED
+    from gpiozero import LED, PWMLED
     _GPIO_OK = True
 except Exception as e:
     _GPIO_OK = False
@@ -63,28 +63,47 @@ log = logging.getLogger("scan")
 # ---- Hardware wrappers ----
 
 class Flash:
-    """Flash LED controller. No-op if GPIO unavailable."""
+    """Flash LED controller with PWM brightness. No-op if GPIO unavailable."""
+    BRIGHTNESS_FILE = Path(__file__).parent / "flash_brightness.txt"
+
     def __init__(self, pin: int):
         self.pin = pin
         self.led = None
         self.held = False
+        # Load persisted brightness or default to full.
+        try:
+            self.brightness = float(self.BRIGHTNESS_FILE.read_text().strip())
+        except Exception:
+            self.brightness = 1.0
+        self.brightness = max(0.0, min(1.0, self.brightness))
         if _GPIO_OK:
             try:
-                self.led = LED(pin)
-                self.led.off()
-                log.info(f"Flash LED on GPIO {pin} ready")
+                self.led = PWMLED(pin)
+                self.led.value = 0.0
+                log.info(f"Flash LED on GPIO {pin} ready (brightness={self.brightness:.2f})")
             except Exception as e:
                 log.warning(f"Flash LED init failed: {e}")
 
+    def set_brightness(self, value: float):
+        """Set 0.0–1.0 target brightness. Persists across restarts. If the
+        LED is currently on (or held), the change takes effect immediately."""
+        self.brightness = max(0.0, min(1.0, float(value)))
+        try:
+            self.BRIGHTNESS_FILE.write_text(f"{self.brightness:.3f}\n")
+        except Exception as e:
+            log.warning(f"Could not persist brightness: {e}")
+        if self.led is not None and (self.held or float(self.led.value) > 0):
+            self.led.value = self.brightness
+
     def on(self):
         if self.led is not None:
-            self.led.on()
+            self.led.value = self.brightness
 
     def off(self):
         if self.held:
             return  # held on — ignore transient off requests
         if self.led is not None:
-            self.led.off()
+            self.led.value = 0.0
 
     def hold(self):
         """Force flash on and suppress .off() calls until release()."""
@@ -95,7 +114,7 @@ class Flash:
         """Clear held state and turn flash off."""
         self.held = False
         if self.led is not None:
-            self.led.off()
+            self.led.value = 0.0
 
     def blink_off(self, duration_ms: int):
         """While held, drop the LED for duration_ms then bring it back.
@@ -106,19 +125,19 @@ class Flash:
         if self.led is None or not self.held:
             return
         def run():
-            self.led.off()
+            self.led.value = 0.0
             time.sleep(duration_ms / 1000.0)
             if self.held:
-                self.led.on()
+                self.led.value = self.brightness
         Thread(target=run, daemon=True).start()
 
     def pulse(self, duration_ms: int = FLASH_PULSE_MS):
         if self.led is None:
             log.debug("Flash pulse skipped (no LED)")
             return
-        self.led.on()
+        self.led.value = self.brightness
         time.sleep(duration_ms / 1000.0)
-        self.led.off()
+        self.led.value = 0.0
 
 
 class Camera:
@@ -720,6 +739,24 @@ def flash_release():
     assert _state is not None
     _state.flash.release()
     return jsonify({"ok": True, "held": False})
+
+
+@app.post("/flash/brightness")
+def flash_brightness():
+    """Set PWM brightness (0.0–1.0). Persists across restarts."""
+    assert _state is not None
+    body = request.get_json(silent=True) or {}
+    v = body.get("value")
+    if v is None:
+        return jsonify({"ok": False, "error": "missing value"}), 400
+    _state.flash.set_brightness(float(v))
+    return jsonify({"ok": True, "brightness": _state.flash.brightness})
+
+
+@app.get("/flash/brightness")
+def flash_brightness_get():
+    assert _state is not None
+    return jsonify({"brightness": _state.flash.brightness})
 
 
 # Backward-compat aliases for the old /train/flash/* paths
