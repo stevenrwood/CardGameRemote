@@ -948,6 +948,10 @@ class AppState:
         # fluctuating or re-scanned slot replaces its prior value instead of
         # appending a new entry. Each value is {rank, suit, confidence}.
         self.rodney_downs = {}         # slot_num -> {rank, suit, confidence} (verified / auto-accepted)
+        # 7/27: when Rodney has 2 down cards the UI asks him to pick one to
+        # flip face-up. Once chosen, the card moves here and the LED for
+        # that slot blinks so the dealer knows which to physically lift.
+        self.rodney_flipped_up = None   # None or {rank, suit, slot}
         self.slot_pending = {}         # slot_num -> {rank, suit, confidence} (latest low-conf guess, awaiting confirm)
         self.slot_empty = {}           # slot_num -> True when poller sees no card
         self.verify_queue = []         # FIFO of slot_nums that need manual verify after /api/console/confirm
@@ -1046,14 +1050,23 @@ def _build_table_state(s):
             "folded": p.name in s.folded_players,
         }
         if p.is_remote:
-            # Rodney's hand = down cards from Pi scanner (one per slot)
-            # sorted by slot number, then his up cards.
+            # Rodney's hand = remaining down cards (slot order), then any
+            # card he chose to flip up from a slot, then Brio up cards.
             hand = []
             for slot_num in sorted(s.rodney_downs.keys()):
                 d = s.rodney_downs[slot_num]
                 hand.append({"type": "down", "rank": d["rank"],
                              "suit": d["suit"], "slot": slot_num,
                              "confidence": d.get("confidence")})
+            if s.rodney_flipped_up:
+                fu = s.rodney_flipped_up
+                # Don't duplicate once Brio picks it up via a zone scan.
+                already = any(
+                    c.get("rank") == fu["rank"] and c.get("suit") == fu["suit"]
+                    for c in up_cards
+                )
+                if not already:
+                    hand.append({"type": "up", "rank": fu["rank"], "suit": fu["suit"]})
             for c in up_cards:
                 hand.append({"type": "up", **c})
             entry["hand"] = hand
@@ -1074,6 +1087,21 @@ def _build_table_state(s):
     active_down_slots = set(s.rodney_downs.keys()) | set(s.slot_pending.keys())
     current_round = s.console_up_round + len(active_down_slots)
     total_rounds = _total_card_rounds(ge)
+
+    # 7/27: once Rodney has 2 down cards scanned he needs to pick one to
+    # flip face-up (standard 7/27 start). The /table modal consumes this
+    # field. It stays None if the dealer already flipped one himself.
+    flip_choice = None
+    if ge.current_game is not None and ge.current_game.name == "7/27":
+        if s.rodney_flipped_up is None and len(s.rodney_downs) == 2:
+            downs_sorted = sorted(s.rodney_downs.items())
+            flip_choice = {
+                "prompt": "Pick a card to turn face-up",
+                "options": [
+                    {"slot": sn, "rank": d["rank"], "suit": d["suit"]}
+                    for sn, d in downs_sorted
+                ],
+            }
 
     # 7/27: compute hand values per player. Rodney's value includes both
     # his up and down cards; everyone else's is up-cards-only (we don't
@@ -1121,6 +1149,7 @@ def _build_table_state(s):
         "players": players,
         "log": list(s.table_log[-30:]),
         "pending_verify": s.pending_verify,
+        "flip_choice": flip_choice,
     }
 
 
@@ -2140,6 +2169,13 @@ header button:hover{background:#1a5a9a}
   </div>
 </div>
 
+<div class="modal" id="flip-modal">
+  <div class="modal-inner">
+    <h2 id="flip-title">Pick a card to turn face-up</h2>
+    <div id="flip-options" style="display:flex;gap:12px;justify-content:center;margin-top:12px"></div>
+  </div>
+</div>
+
 <div class="modal" id="verify-modal">
   <div class="modal-inner">
     <h2>Verify card</h2>
@@ -2350,6 +2386,41 @@ function render(state) {
     renderPlayer(p);
   });
 
+  var flip = state.flip_choice;
+  var fmodal = document.getElementById('flip-modal');
+  if (flip && flip.options && flip.options.length) {
+    document.getElementById('flip-title').textContent = flip.prompt || 'Pick a card';
+    var opts = document.getElementById('flip-options');
+    opts.innerHTML = '';
+    flip.options.forEach(function(opt) {
+      var btn = document.createElement('button');
+      btn.style.padding = '0';
+      btn.style.border = '2px solid #333';
+      btn.style.background = '#0d1b2a';
+      btn.style.borderRadius = '6px';
+      btn.style.cursor = 'pointer';
+      var img = document.createElement('img');
+      var url = cardImgUrl(opt.rank, opt.suit);
+      if (url) { img.src = url; img.alt = opt.rank + ' of ' + opt.suit; }
+      img.style.height = '160px';
+      img.style.display = 'block';
+      img.style.background = '#fff';
+      img.style.borderRadius = '4px';
+      btn.appendChild(img);
+      var caption = document.createElement('div');
+      caption.textContent = 'Slot ' + opt.slot;
+      caption.style.color = '#aaa';
+      caption.style.fontSize = '.85em';
+      caption.style.margin = '4px 0';
+      btn.appendChild(caption);
+      btn.onclick = function() { pickFlip(opt.slot); };
+      opts.appendChild(btn);
+    });
+    fmodal.classList.add('show');
+  } else {
+    fmodal.classList.remove('show');
+  }
+
   var pv = state.pending_verify;
   var modal = document.getElementById('verify-modal');
   if (pv) {
@@ -2391,6 +2462,15 @@ function poll() {
     lastVersion = d.version;
     render(d);
   }).catch(function(e) { console.warn('poll failed', e); });
+}
+
+function pickFlip(slot) {
+  fetch('/api/table/flip_up', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({slot: slot})
+  }).then(function(r){return r.json()}).then(function(d) {
+    if (!d.ok) alert('Flip failed: ' + (d.error || 'unknown'));
+  });
 }
 
 function confirmVerify() {
@@ -2610,6 +2690,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p == "/api/table/reset_hand":
             with s.table_lock:
                 s.rodney_downs = {}
+                s.rodney_flipped_up = None
                 s.slot_pending = {}
                 s.slot_empty = {}
                 s.verify_queue = []
@@ -2619,6 +2700,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _table_log_add(s, "Remote hand cleared")
                 s.table_state_version += 1
             _update_flash_for_deal_state(s)
+            self._r(200, "application/json", '{"ok":true}')
+
+        elif p == "/api/table/flip_up":
+            # Rodney picked which of his 2 initial down cards to flip face-up.
+            try:
+                slot_num = int(data.get("slot"))
+            except (TypeError, ValueError):
+                return self._r(400, "application/json", '{"ok":false,"error":"bad slot"}')
+            with s.table_lock:
+                d = s.rodney_downs.pop(slot_num, None)
+                if d is None:
+                    return self._r(400, "application/json",
+                                   '{"ok":false,"error":"slot not in rodney_downs"}')
+                s.rodney_flipped_up = {
+                    "rank": d["rank"], "suit": d["suit"], "slot": slot_num,
+                }
+                s.slot_pending.pop(slot_num, None)
+                s.pi_prev_slots.pop(slot_num, None)
+                _table_log_add(
+                    s,
+                    f"Slot {slot_num}: flipping up ({d['rank']}{d['suit'][0]})",
+                )
+                s.table_state_version += 1
+            # Tell the Pi to blink that slot's LED. Endpoint is a no-op
+            # placeholder until the slot LEDs are physically wired.
+            try:
+                import urllib.request
+                url = f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/led"
+                req = urllib.request.Request(
+                    url, method="POST",
+                    data=json.dumps({"state": "blink"}).encode(),
+                    headers={"Content-Type": "application/json"},
+                )
+                urllib.request.urlopen(req, timeout=2).read()
+            except Exception as e:
+                log.log(f"[PI] slot LED blink error: {type(e).__name__}: {e}")
             self._r(200, "application/json", '{"ok":true}')
 
         elif p == "/api/table/fold":
@@ -2888,6 +3005,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # that no cards are expected.
             with s.table_lock:
                 s.rodney_downs = {}
+                s.rodney_flipped_up = None
                 s.slot_pending = {}
                 s.slot_empty = {}
                 s.verify_queue = []

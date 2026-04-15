@@ -563,6 +563,19 @@ run();
 </body></html>"""
 
 
+@app.post("/slots/<int:slot_num>/led")
+def slot_led(slot_num: int):
+    """Control the per-slot green LED. For now this is a stub — the slot
+    LEDs aren't yet wired. We just log the requested state so Neo's call
+    is visible in the log."""
+    body = request.get_json(silent=True) or {}
+    state = str(body.get("state", "")).lower()
+    if state not in ("on", "off", "blink"):
+        return jsonify({"ok": False, "error": "state must be on/off/blink"}), 400
+    log.info(f"[LED] Slot {slot_num} → {state} (stub — no hardware)")
+    return jsonify({"ok": True, "slot": slot_num, "state": state})
+
+
 @app.get("/calibration")
 def get_calibration():
     assert _state is not None
