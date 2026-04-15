@@ -2748,6 +2748,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             result = ge.end_hand()
             s.console_last_round_cards = []
             s.console_hand_cards = []
+            s.console_up_round = 0
+            s.console_total_up_rounds = 0
             s.monitoring = False
             s.console_scan_phase = "idle"
             # Reset all zone states

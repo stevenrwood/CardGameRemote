@@ -383,6 +383,160 @@ def camera_settings():
     })
 
 
+@app.get("/test_slots")
+def test_slots_page():
+    """Diagnostic page: captures all 7 slots and shows the crops next to
+    the detector's rank/suit guess and confidence. No game / deal context,
+    just a straight capture-and-recognize for all calibrated slots.
+    """
+    return TEST_SLOTS_HTML
+
+
+@app.get("/test_slots/data")
+def test_slots_data():
+    """JSON payload for /test_slots. Captures both cameras under a held
+    flash so every slot's scan sees full-brightness lighting, then runs
+    the detector on each."""
+    assert _state is not None
+    _state.flash.hold()
+    try:
+        time.sleep(0.3)  # extra warmup beyond FLASH_WARMUP_MS
+        frames = _state.capture_both()
+    finally:
+        _state.flash.release()
+    results = []
+    for slot in _state.calibration.get("slots", []):
+        cam_idx = slot.get("camera")
+        entry = {
+            "slot": slot["slot"],
+            "camera": cam_idx,
+            "recognized": False,
+        }
+        if cam_idx not in frames:
+            entry["error"] = "camera not available"
+            results.append(entry)
+            continue
+        frame = frames[cam_idx]
+        x, y, w, h = slot["x"], slot["y"], slot["w"], slot["h"]
+        crop = frame[y:y + h, x:x + w]
+        if crop.size == 0:
+            entry["error"] = "crop out of bounds"
+            results.append(entry)
+            continue
+        if _state.detector.has_any_slot_templates():
+            res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
+        else:
+            res = _state.detector.identify(crop)
+        if res is not None:
+            entry["recognized"] = True
+            entry["rank"] = res.rank
+            entry["suit"] = res.suit
+            entry["confidence"] = round(float(res.confidence), 3)
+        results.append(entry)
+    return jsonify({"slots": results})
+
+
+@app.get("/test_slots/image/<int:slot_num>")
+def test_slots_image(slot_num: int):
+    """Serve a fresh crop of one slot for the /test_slots page."""
+    assert _state is not None
+    slot = next((s for s in _state.calibration.get("slots", [])
+                 if s["slot"] == slot_num), None)
+    if slot is None:
+        return f"Slot {slot_num} not calibrated", 404
+    cam_idx = slot["camera"]
+    if cam_idx not in _state.cameras:
+        return "camera not available", 400
+    _state.flash.hold()
+    try:
+        time.sleep(0.3)
+        frame = _state.cameras[cam_idx].capture()
+    finally:
+        _state.flash.release()
+    x, y, w, h = slot["x"], slot["y"], slot["w"], slot["h"]
+    crop = frame[y:y + h, x:x + w]
+    if crop.size == 0:
+        return "crop out of bounds", 400
+    ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        return "encode failed", 500
+    return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg")
+
+
+TEST_SLOTS_HTML = """<!DOCTYPE html>
+<html><head><title>Slot Scanner Test</title>
+<meta charset="UTF-8">
+<style>
+body{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:14px;margin:0}
+h1{font-size:1.2em;margin:4px 0 10px}
+button{padding:10px 16px;background:#0f3460;color:#fff;border:none;border-radius:6px;
+  cursor:pointer;font-size:1em;margin-right:8px}
+button:hover{background:#1a5a9a}
+table{border-collapse:collapse;margin-top:12px;width:100%}
+th,td{padding:8px 10px;border:1px solid #222;text-align:left;vertical-align:middle}
+th{background:#0f3460}
+td.conf{font-family:monospace}
+td.good{color:#81c784}
+td.med{color:#ffb74d}
+td.bad{color:#ef5350}
+td img{max-width:80px;max-height:140px;border:1px solid #444;border-radius:4px;background:#000;display:block}
+</style></head><body>
+<h1>Slot Scanner Test</h1>
+<div><button onclick="run()">Scan All 7 Slots</button><span id="status" style="color:#aaa;margin-left:12px">—</span></div>
+<table id="tbl">
+  <thead><tr><th>Slot</th><th>Camera</th><th>Crop</th><th>Recognized</th><th>Confidence</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<script>
+var SUIT_SYM = {clubs:"\u2663",diamonds:"\u2666",hearts:"\u2665",spades:"\u2660"};
+
+function confClass(c) {
+  if (c == null) return "";
+  if (c >= 0.70) return "good";
+  if (c >= 0.30) return "med";
+  return "bad";
+}
+
+function run() {
+  document.getElementById('status').textContent = 'Scanning…';
+  fetch('/test_slots/data').then(function(r){return r.json()}).then(function(d) {
+    var tbody = document.getElementById('rows');
+    tbody.innerHTML = '';
+    (d.slots || []).forEach(function(entry) {
+      var tr = document.createElement('tr');
+      var slotTd = document.createElement('td'); slotTd.textContent = entry.slot;
+      var camTd = document.createElement('td'); camTd.textContent = entry.camera != null ? ('cam ' + entry.camera) : '—';
+      var imgTd = document.createElement('td');
+      var img = document.createElement('img');
+      img.src = '/test_slots/image/' + entry.slot + '?t=' + Date.now();
+      img.alt = 'slot ' + entry.slot;
+      imgTd.appendChild(img);
+      var cardTd = document.createElement('td');
+      if (entry.recognized && entry.rank) {
+        cardTd.textContent = entry.rank + (SUIT_SYM[entry.suit] || entry.suit || '');
+      } else if (entry.error) {
+        cardTd.textContent = 'error: ' + entry.error;
+      } else {
+        cardTd.textContent = '—';
+      }
+      var confTd = document.createElement('td');
+      confTd.className = 'conf ' + confClass(entry.confidence);
+      confTd.textContent = (entry.confidence != null)
+        ? (Math.round(entry.confidence * 100) + '%') : '—';
+      tr.appendChild(slotTd); tr.appendChild(camTd); tr.appendChild(imgTd);
+      tr.appendChild(cardTd); tr.appendChild(confTd);
+      tbody.appendChild(tr);
+    });
+    document.getElementById('status').textContent = 'Done';
+  }).catch(function(e) {
+    document.getElementById('status').textContent = 'Error: ' + e;
+  });
+}
+run();
+</script>
+</body></html>"""
+
+
 @app.get("/calibration")
 def get_calibration():
     assert _state is not None

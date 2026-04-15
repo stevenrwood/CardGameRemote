@@ -321,6 +321,13 @@ class GameEngine:
         """End the current hand and rotate dealer."""
         self.state = GameState.HAND_OVER
         self.current_game = None
+        self.phase_index = 0
+        self.card_in_phase = 0
+        self.draw_round = 0
+        self.wild_ranks = []
+        self.wild_label = ""
+        self.last_up_was_queen = False
+        self.slots = []
         self.advance_dealer()
         return {
             "type": "hand_over",
