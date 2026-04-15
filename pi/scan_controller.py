@@ -983,6 +983,7 @@ input[type=number]{padding:8px;background:#0f3460;color:#fff;border:1px solid #3
   <button id="start" class="btn-green" onclick="start()">Start</button>
   <button id="pause" onclick="togglePause()" disabled>Pause</button>
   <button id="skip" onclick="skipCurrent()" disabled>Skip</button>
+  <button id="stop" class="btn-red" onclick="stopAll()">Stop</button>
   <button id="reset" class="btn-red" onclick="resetAll()">Reset All</button>
 </div>
 <div class="now" id="now">
@@ -1484,6 +1485,28 @@ function advance() {
     return;
   }
   beginCountdown();
+}
+
+function stopAll() {
+  // Halt whichever flow is running (main wizard or slot-scoped retrain),
+  // release the flash, and send the UI back to its pre-Start resting state.
+  if (running) stop();
+  if (retrainRunning) stopRetrain();
+  // Reset the preview pointer to the first untrained step — matches what
+  // refreshStatus does when nothing is running.
+  var first = ORDER.findIndex(function(step){ return !isTrained(step); });
+  idx = (first >= 0) ? first : 0;
+  firstStep = true;
+  needsFocus = true;
+  retrainFirstStep = true;
+  retrainQueue = [];
+  retrainIdx = 0;
+  paused = false;
+  retrainPaused = false;
+  setCountdown('—');
+  setFlashing(false);
+  updateDisplay();
+  renderMatrix();
 }
 
 function resetAll() {
