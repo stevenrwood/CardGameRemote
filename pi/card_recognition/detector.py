@@ -165,10 +165,14 @@ class CardDetector:
     def identify_slot(self, crop_bgr: np.ndarray, slot_num: int | None = None) -> CardResult | None:
         """Identify a card from a pre-cropped slot image.
 
+        Templates are captured through the same mirror as the runtime crops,
+        so they share one orientation — we do NOT try a 180° rotated version.
+        Doing so previously caused 6 and 9 to read as each other because a
+        point-reflected 6 is visually identical to a 9.
+
         If slot_num is given and that slot has trained templates, match against
         only those. Otherwise fall back to matching against every loaded
-        template (union across slots) — useful while partial training data
-        exists.
+        template (union across slots).
         """
         if slot_num is not None and slot_num in self.slot_templates:
             templates = self.slot_templates[slot_num]
@@ -179,16 +183,14 @@ class CardDetector:
         if not templates:
             return None
         base = self._prep_slot_crop(crop_bgr)
-        flipped = cv2.rotate(base, cv2.ROTATE_180)
         best = None
         best_score = -1.0
         for (rank, suit), tmpl in templates.items():
-            for candidate in (base, flipped):
-                r = cv2.matchTemplate(candidate, tmpl, cv2.TM_CCOEFF_NORMED)
-                score = float(r[0][0])
-                if score > best_score:
-                    best_score = score
-                    best = (rank, suit)
+            r = cv2.matchTemplate(base, tmpl, cv2.TM_CCOEFF_NORMED)
+            score = float(r[0][0])
+            if score > best_score:
+                best_score = score
+                best = (rank, suit)
         if best is None:
             return None
         return CardResult(rank=best[0], suit=best[1], confidence=max(0.0, best_score))
