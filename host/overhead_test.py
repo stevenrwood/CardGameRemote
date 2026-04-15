@@ -730,6 +730,15 @@ def _console_watch_dealer(s, frame):
                 missing.append(name)
         # Wait until pending is cleared (scan still running) before prompting
         if missing and not any(s.monitor.pending.get(n) for n in s.console_active_players):
+            # In hit rounds (7/27), a missing card means the player chose to
+            # freeze — not an error worth nagging about. Skip the adjust-
+            # prompt and let the dealer click Confirm Cards when ready.
+            is_hit_round = (
+                ge.current_game and ge.current_game.name == "7/27"
+                and s.console_up_round >= 1
+            )
+            if is_hit_round:
+                return
             names = " and ".join(missing)
             log.log(f"[CONSOLE] Missing cards: {names} — prompting to adjust")
             speech.say(f"{names}, please adjust your card")
