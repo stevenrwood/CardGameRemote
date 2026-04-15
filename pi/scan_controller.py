@@ -1198,6 +1198,7 @@ var retrainFlashing = false;
 var retrainSlot = null;
 var retrainQueue = [];
 var retrainIdx = 0;
+var retrainFirstStep = true;
 
 function retrainMarkedInSlot() {
   var slot = parseInt(document.getElementById('slot-menu').dataset.slot, 10);
@@ -1225,6 +1226,7 @@ function retrainMarkedInSlot() {
   retrainIdx = 0;
   retrainRunning = true;
   retrainPaused = false;
+  retrainFirstStep = true;
   fetch('/flash/hold', {method:'POST'});
   updateRetrainDisplay();
   beginRetrainCountdown();
@@ -1266,7 +1268,13 @@ function beginRetrainCountdown() {
     renderMatrix();
     return;
   }
-  var secs = Math.max(1, parseInt(document.getElementById('delay').value, 10) || 5);
+  var secs;
+  if (retrainFirstStep) {
+    secs = FIRST_DELAY_S;
+    retrainFirstStep = false;
+  } else {
+    secs = Math.max(1, parseInt(document.getElementById('delay').value, 10) || 5);
+  }
   retrainRemainingMs = secs * 1000;
   setCountdown(secs.toString());
   if (retrainTicker) clearInterval(retrainTicker);
