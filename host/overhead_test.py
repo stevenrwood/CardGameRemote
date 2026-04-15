@@ -1051,11 +1051,18 @@ def _build_table_state(s):
             "folded": p.name in s.folded_players,
         }
         if p.is_remote:
-            # Rodney's hand = remaining down cards (slot order), then any
-            # card he chose to flip up from a slot, then Brio up cards.
+            # Rodney's hand = all down-card slots the scanner has seen
+            # anything in (verified or awaiting verify), sorted by slot,
+            # then any card he chose to flip up from a slot, then Brio up
+            # cards. slot_pending entries carry the current best guess so
+            # Rodney can see what came in before confirming.
             hand = []
-            for slot_num in sorted(s.rodney_downs.keys()):
-                d = s.rodney_downs[slot_num]
+            all_down_slots = sorted(set(s.rodney_downs.keys()) |
+                                     set(s.slot_pending.keys()))
+            for slot_num in all_down_slots:
+                d = s.rodney_downs.get(slot_num) or s.slot_pending.get(slot_num)
+                if not d:
+                    continue
                 hand.append({"type": "down", "rank": d["rank"],
                              "suit": d["suit"], "slot": slot_num,
                              "confidence": d.get("confidence")})
