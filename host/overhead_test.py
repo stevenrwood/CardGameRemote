@@ -35,7 +35,8 @@ from game_engine import GameEngine
 PLAYER_NAMES = ["Steve", "Bill", "David", "Joe", "Rodney"]
 NUM_ZONES = len(PLAYER_NAMES)
 
-DEFAULT_CAMERA_INDEX = 1  # Brio on the Thunderbolt hub; 0 is the MacBook built-in
+DEFAULT_CAMERA_INDEX = 1  # Fallback if we can't find the Brio by name
+DEFAULT_CAMERA_NAME = "BRIO"  # avfoundation device name substring to prefer
 DEFAULT_THRESHOLD = 30.0
 DEFAULT_RESOLUTION = "auto"
 
@@ -112,6 +113,48 @@ log = LogBuffer()
 # ---------------------------------------------------------------------------
 
 class FrameCapture:
+    @staticmethod
+    def find_index_by_name(prefer_substring):
+        """Scan avfoundation devices and return the index whose name contains
+        `prefer_substring` (case-insensitive). Returns None if not found or
+        if ffmpeg isn't available.
+
+        Example ffmpeg output we're parsing:
+          [AVFoundation indev @ ...] AVFoundation video devices:
+          [AVFoundation indev @ ...] [0] Logitech BRIO
+          [AVFoundation indev @ ...] [1] MacBook Neo Camera
+          [AVFoundation indev @ ...] AVFoundation audio devices:
+          [AVFoundation indev @ ...] [0] ...
+        """
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-f", "avfoundation",
+                 "-list_devices", "true", "-i", ""],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            return None
+        text = (proc.stderr or b"").decode(errors="replace")
+        in_video = False
+        needle = prefer_substring.lower()
+        for line in text.splitlines():
+            if "AVFoundation video devices" in line:
+                in_video = True
+                continue
+            if "AVFoundation audio devices" in line:
+                in_video = False
+                continue
+            if not in_video:
+                continue
+            m = re.search(r"\[(\d+)\]\s+(.+?)\s*$", line)
+            if not m:
+                continue
+            idx, name = int(m.group(1)), m.group(2)
+            if needle in name.lower():
+                log.log(f"Camera: matched '{name}' at index {idx}")
+                return idx
+        return None
+
     def __init__(self, camera_index, resolution="auto"):
         self.camera_index = camera_index
         self._check_ffmpeg()
@@ -3761,15 +3804,28 @@ refresh();
 def main():
     global _state
     parser = argparse.ArgumentParser()
-    parser.add_argument("--camera", type=int, default=DEFAULT_CAMERA_INDEX)
+    parser.add_argument("--camera", type=int, default=None,
+                        help=f"avfoundation camera index; default is auto-detected "
+                             f"by name (looks for '{DEFAULT_CAMERA_NAME}')")
+    parser.add_argument("--camera-name", type=str, default=DEFAULT_CAMERA_NAME,
+                        help="Substring of the avfoundation device name to prefer "
+                             "when auto-selecting the camera")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION)
     args = parser.parse_args()
 
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
 
-    capture = FrameCapture(args.camera, args.resolution)
-    log.log(f"Camera {args.camera}, resolution {capture.resolution}")
+    camera_index = args.camera
+    if camera_index is None:
+        camera_index = FrameCapture.find_index_by_name(args.camera_name)
+        if camera_index is None:
+            camera_index = DEFAULT_CAMERA_INDEX
+            log.log(f"Camera: '{args.camera_name}' not found in avfoundation devices, "
+                    f"falling back to index {camera_index}")
+
+    capture = FrameCapture(camera_index, args.resolution)
+    log.log(f"Camera {camera_index}, resolution {capture.resolution}")
 
     print("  Testing capture...")
     frame = capture.capture()
