@@ -1163,6 +1163,14 @@ def _build_table_state(s):
     active_down_slots = set(s.rodney_downs.keys()) | set(s.slot_pending.keys())
     current_round = s.console_up_round + len(active_down_slots)
     total_rounds = _total_card_rounds(ge)
+    # Open-ended games (e.g. 7/27) report total=0 so the UI drops "of N".
+    if ge.current_game is not None:
+        has_hit_round = any(
+            ph.type.value == "hit_round" and ph.card_type == "up"
+            for ph in ge.current_game.phases
+        )
+        if has_hit_round:
+            total_rounds = 0
 
     # 7/27: once Rodney has 2 down cards scanned he needs to pick one to
     # flip face-up (standard 7/27 start). The /table modal consumes this
@@ -3086,15 +3094,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result = ge.new_hand(game_name)
                 s.console_last_round_cards = []
                 s.console_hand_cards = []
-                # Count total up-card rounds from template
+                # Count total up-card rounds from template. Games with an
+                # open-ended HIT_ROUND (7/27) aren't a fixed count — mark
+                # them as 0 (unbounded) so the UI stays in "confirmed /
+                # Next Round" flow instead of switching to idle.
                 s.console_up_round = 0
                 template = ge.templates[game_name]
-                up_rounds = 0
-                for phase in template.phases:
-                    if phase.type.value == "deal" and "up" in phase.pattern:
-                        up_rounds += 1
-                    elif phase.type.value == "community":
-                        up_rounds += 1
+                has_hit_round = any(
+                    phase.type.value == "hit_round" and phase.card_type == "up"
+                    for phase in template.phases
+                )
+                if has_hit_round:
+                    up_rounds = 0  # 0 = unbounded
+                else:
+                    up_rounds = 0
+                    for phase in template.phases:
+                        if phase.type.value == "deal" and "up" in phase.pattern:
+                            up_rounds += 1
+                        elif phase.type.value == "community":
+                            up_rounds += 1
                 s.console_total_up_rounds = up_rounds
                 # Start watching dealer's zone for card placement
                 if s.cal.ok and s.latest_frame is not None:
@@ -3167,10 +3185,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.monitor.last_card[zname] = ""
                 s.monitor.recognition_details[zname] = {}
                 s.monitor.recognition_crops[zname] = None
-            # If this was the last up-card round, go to idle — there are no
-            # more zones to watch, so don't let watching_missing prompt the
-            # players to adjust non-existent cards.
-            if round_num >= s.console_total_up_rounds:
+            # If this was the last up-card round, go to idle. 0 means
+            # unbounded (games with HIT_ROUND), never idle on count.
+            if (s.console_total_up_rounds > 0
+                    and round_num >= s.console_total_up_rounds):
                 s.console_scan_phase = "idle"
                 log.log(f"[CONSOLE] Final up round ({round_num}) confirmed — idle until End Hand")
             else:
@@ -3190,7 +3208,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ge = s.game_engine
             # Advance round counter
             s.console_up_round += 1
-            beyond_last_up = s.console_up_round >= s.console_total_up_rounds
+            beyond_last_up = (
+                s.console_total_up_rounds > 0
+                and s.console_up_round >= s.console_total_up_rounds
+            )
             # Recapture baselines and resume watching dealer — but only if
             # there's still an up round ahead. If we've finished all up
             # rounds, sit idle so zone watching doesn't fire on games that
