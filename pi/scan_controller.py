@@ -47,12 +47,14 @@ except Exception as e:
     print(f"[WARN] picamera2 unavailable: {e}", file=sys.stderr)
 
 from card_recognition.detector import CardDetector
+from card_recognition.yolo_detector import YoloDetector
 
 # ---- Config ----
 
 FLASH_GPIO = 16  # BCM pin driving the flash MOSFET gate
 FLASH_PULSE_MS = 50
 REFERENCE_DIR = Path(__file__).parent / "card_recognition" / "reference"
+YOLO_MODEL_PATH = Path(__file__).parent / "models" / "pi_card_detector.pt"
 CALIBRATION_FILE = Path(__file__).parent / "slot_calibration.json"
 NUM_SLOTS = 5
 
@@ -232,6 +234,18 @@ class AppState:
         for idx in camera_indices:
             self.cameras[idx] = Camera(idx)
         self.detector = CardDetector(str(REFERENCE_DIR))
+        # Pi-trained YOLO model. Loaded lazily so that if ultralytics isn't
+        # installed or the weights aren't deployed yet, the service still
+        # boots and falls back to template matching for /slots.
+        try:
+            self.yolo = YoloDetector(YOLO_MODEL_PATH)
+            if self.yolo.available:
+                log.info(f"YOLO detector loaded from {YOLO_MODEL_PATH.name}")
+            else:
+                log.info(f"YOLO weights not found at {YOLO_MODEL_PATH}; using templates")
+        except Exception as e:
+            log.warning(f"YOLO detector unavailable: {e}")
+            self.yolo = None
         self.last_frames: dict[int, np.ndarray] = {}
         self.flash_settle_ms = 50
         self.test_slot_crops = {}  # slot_num -> BGR crop from last /test_slots/data
@@ -637,21 +651,32 @@ def slots_state():
             results.append({"slot": slot["slot"], "error": "crop out of bounds"})
             continue
         t0 = time.time()
-        # Prefer real-image slot templates if any have been trained; fall back
-        # to the contour + corner-match path otherwise.
-        if _state.detector.has_any_slot_templates():
-            res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
-        else:
-            res = _state.detector.identify(crop)
+        # Recognition priority:
+        #   1. YOLO (yolov8n trained on Pi scanner crops) if loaded
+        #   2. Real-image slot templates if any trained
+        #   3. Synthetic-corner matcher (last-resort fallback)
+        rank = suit = None
+        conf = 0.0
+        if _state.yolo and _state.yolo.available:
+            pred = _state.yolo.predict(crop)
+            if pred is not None:
+                rank, suit, conf = pred
+        if rank is None:
+            if _state.detector.has_any_slot_templates():
+                res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
+            else:
+                res = _state.detector.identify(crop)
+            if res is not None:
+                rank, suit, conf = res.rank, res.suit, float(res.confidence)
         ms = round((time.time() - t0) * 1000)
         entry = {"slot": slot["slot"], "camera": cam_idx, "ms": ms}
-        if res is None:
+        if rank is None:
             entry["recognized"] = False
         else:
             entry["recognized"] = True
-            entry["rank"] = res.rank
-            entry["suit"] = res.suit
-            entry["confidence"] = round(float(res.confidence), 3)
+            entry["rank"] = rank
+            entry["suit"] = suit
+            entry["confidence"] = round(conf, 3)
         results.append(entry)
     log.info(f"Slots scan: {sum(1 for r in results if r.get('recognized'))}/{len(results)} recognized")
 
