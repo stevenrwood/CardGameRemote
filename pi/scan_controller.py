@@ -429,6 +429,8 @@ def test_slots_data():
     results = []
     crops_cache = {}
     for slot in _state.calibration.get("slots", []):
+        if slot["slot"] > NUM_SLOTS:
+            continue
         cam_idx = slot.get("camera")
         entry = {
             "slot": slot["slot"],
