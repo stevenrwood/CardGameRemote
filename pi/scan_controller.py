@@ -502,7 +502,7 @@ td.bad{color:#ef5350}
 td img{max-width:80px;max-height:140px;border:1px solid #444;border-radius:4px;background:#000;display:block}
 </style></head><body>
 <h1>Slot Scanner Test</h1>
-<div><button onclick="run()">Scan All 7 Slots</button><span id="status" style="color:#aaa;margin-left:12px">—</span></div>
+<div><button onclick="run()">Scan All Slots</button><span id="status" style="color:#aaa;margin-left:12px">—</span></div>
 <table id="tbl">
   <thead><tr><th>Slot</th><th>Camera</th><th>Crop</th><th>Recognized</th><th>Confidence</th></tr></thead>
   <tbody id="rows"></tbody>
