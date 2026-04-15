@@ -2702,6 +2702,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _update_flash_for_deal_state(s)
             self._r(200, "application/json", '{"ok":true}')
 
+        elif p == "/api/yolo/recognize":
+            # Pi scanner sends a batch of slot crops for YOLO inference on Neo's
+            # model + MPS. Body: {"slots": [{"slot": N, "image": "<base64 jpeg>"}, ...]}
+            items = data.get("slots", [])
+            results = []
+            if s.monitor._yolo_model is None:
+                return self._r(503, "application/json",
+                               json.dumps({"error": "YOLO model not loaded"}))
+            for item in items:
+                slot_n = item.get("slot")
+                img_b64 = item.get("image", "")
+                try:
+                    raw = base64.b64decode(img_b64)
+                    arr = np.frombuffer(raw, dtype=np.uint8)
+                    crop = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                except Exception as e:
+                    results.append({"slot": slot_n, "error": f"decode: {e}"})
+                    continue
+                if crop is None or crop.size == 0:
+                    results.append({"slot": slot_n, "error": "empty crop"})
+                    continue
+                label, conf = s.monitor._recognize_yolo(crop)
+                parsed = _parse_card_any(label)
+                entry = {"slot": slot_n, "confidence": round(float(conf), 3)}
+                if parsed and label != "No card":
+                    entry["recognized"] = True
+                    entry["rank"] = parsed["rank"]
+                    entry["suit"] = parsed["suit"]
+                else:
+                    entry["recognized"] = False
+                results.append(entry)
+            self._r(200, "application/json", json.dumps({"slots": results}))
+
         elif p == "/api/table/flip_up":
             # Rodney picked which of his 2 initial down cards to flip face-up.
             try:
