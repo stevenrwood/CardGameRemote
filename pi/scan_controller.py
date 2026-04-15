@@ -463,15 +463,37 @@ def test_slots_data():
             results.append(entry)
             continue
         crops_cache[slot["slot"]] = crop.copy()
-        if _state.detector.has_any_slot_templates():
-            res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
-        else:
-            res = _state.detector.identify(crop)
-        if res is not None:
+        t0 = time.time()
+        rank = suit = None
+        conf = 0.0
+        source = "none"
+        if _state.yolo and _state.yolo.available:
+            pred = _state.yolo.predict(crop)
+            if pred is not None:
+                rank, suit, conf = pred
+                source = "yolo"
+        if rank is None:
+            if _state.detector.has_any_slot_templates():
+                res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
+                fallback_source = "tmpl"
+            else:
+                res = _state.detector.identify(crop)
+                fallback_source = "corner"
+            if res is not None:
+                rank, suit, conf = res.rank, res.suit, float(res.confidence)
+                source = fallback_source
+        ms = round((time.time() - t0) * 1000)
+        code = f"{rank}{suit[0]}" if rank and suit else "-"
+        log.info(
+            f"[SCAN/test] slot{slot['slot']} cam{cam_idx} {source} "
+            f"{code} conf={conf:.2f} {ms}ms"
+        )
+        entry["source"] = source
+        if rank is not None:
             entry["recognized"] = True
-            entry["rank"] = res.rank
-            entry["suit"] = res.suit
-            entry["confidence"] = round(float(res.confidence), 3)
+            entry["rank"] = rank
+            entry["suit"] = suit
+            entry["confidence"] = round(conf, 3)
         results.append(entry)
     _state.test_slot_crops = crops_cache
     _state.test_slot_stamp = int(time.time())
