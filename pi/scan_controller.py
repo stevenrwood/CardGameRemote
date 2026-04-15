@@ -657,19 +657,29 @@ def slots_state():
         #   3. Synthetic-corner matcher (last-resort fallback)
         rank = suit = None
         conf = 0.0
+        source = "none"
         if _state.yolo and _state.yolo.available:
             pred = _state.yolo.predict(crop)
             if pred is not None:
                 rank, suit, conf = pred
+                source = "yolo"
         if rank is None:
             if _state.detector.has_any_slot_templates():
                 res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
+                fallback_source = "tmpl"
             else:
                 res = _state.detector.identify(crop)
+                fallback_source = "corner"
             if res is not None:
                 rank, suit, conf = res.rank, res.suit, float(res.confidence)
+                source = fallback_source
         ms = round((time.time() - t0) * 1000)
-        entry = {"slot": slot["slot"], "camera": cam_idx, "ms": ms}
+        code = f"{rank}{suit[0]}" if rank and suit else "-"
+        log.info(
+            f"[SCAN] slot{slot['slot']} cam{cam_idx} {source} "
+            f"{code} conf={conf:.2f} {ms}ms"
+        )
+        entry = {"slot": slot["slot"], "camera": cam_idx, "ms": ms, "source": source}
         if rank is None:
             entry["recognized"] = False
         else:
