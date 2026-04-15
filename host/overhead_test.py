@@ -878,6 +878,61 @@ def _format_values_phrase(values):
     return ", ".join(strs[:-1]) + f", or {strs[-1]}"
 
 
+_ALL_CARDS = [
+    f"{r_long} of {su.capitalize()}"
+    for r_long in ["Ace", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                   "Jack", "Queen", "King"]
+    for su in ["clubs", "diamonds", "hearts", "spades"]
+]
+
+
+def _dedup_round_cards_against_seen(s, round_cards):
+    """If a recognized up card duplicates a card we've already seen in this
+    hand (prior up rounds, Rodney's scanned down cards, or another player's
+    card in the same round), swap it for a random card that isn't already
+    in play. Operates in place on round_cards.
+
+    The scanner can't distinguish two identical-looking cards, and Claude
+    will sometimes echo back whatever it saw last. Rodney's down cards are
+    invisible to the overhead camera, so a duplicate against one of them
+    is a near-certain misread.
+    """
+    seen = set()
+    # Prior confirmed up cards
+    for c in s.console_hand_cards:
+        seen.add(c["card"])
+    # Rodney's known down cards (verified + pending low-conf guesses)
+    suit_full = {"c": "Clubs", "d": "Diamonds", "h": "Hearts", "s": "Spades"}
+    rank_full = {"A": "Ace", "K": "King", "Q": "Queen", "J": "Jack"}
+    def _canonical(rank, suit):
+        return f"{rank_full.get(rank, rank)} of {suit.capitalize()}"
+    for d in s.rodney_downs.values():
+        seen.add(_canonical(d["rank"], d["suit"]))
+    for d in s.slot_pending.values():
+        seen.add(_canonical(d["rank"], d["suit"]))
+    # Rodney's flipped-up card (revealed from a slot but not yet Brio-scanned)
+    if s.rodney_flipped_up:
+        fu = s.rodney_flipped_up
+        seen.add(_canonical(fu["rank"], fu["suit"]))
+
+    import random as _rand
+    for entry in round_cards:
+        card = entry.get("card", "")
+        if card in seen:
+            # Pick a random unseen card; if everything's seen, bail out.
+            candidates = [c for c in _ALL_CARDS if c not in seen]
+            if not candidates:
+                continue
+            new_card = _rand.choice(candidates)
+            log.log(f"[CONFIRM] {entry['player']}: {card} collides with seen "
+                    f"card — substituting random {new_card}")
+            entry["card"] = new_card
+            # Also update the monitor so downstream code / training-save
+            # sees the substituted card.
+            s.monitor.last_card[entry["player"]] = new_card
+        seen.add(entry["card"])
+
+
 def _update_7_27_freezes(s, round_cards):
     """Apply freeze-count changes for a 7/27 hit round.
 
@@ -3167,6 +3222,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 card = s.monitor.last_card.get(p2.name, "")
                 if card and card != "No card":
                     round_cards.append({"player": p2.name, "card": card})
+            # De-duplicate against previously-seen cards (prior up rounds,
+            # Rodney's down cards) before the round is announced and
+            # accumulated — a duplicate is almost always a misread.
+            _dedup_round_cards_against_seen(s, round_cards)
             # Check Follow the Queen wild cards — announce before betting
             _check_follow_the_queen_round(s, round_cards)
             # Accumulate into hand-wide history, then clear the current-round
