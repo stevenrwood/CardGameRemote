@@ -789,6 +789,89 @@ def _console_rescan_missing(s, zone_crops):
 # Follow the Queen tracking for overhead camera
 # ---------------------------------------------------------------------------
 
+_RANK_TO_7_27_VALUE = {
+    "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7,
+    "8": 8, "9": 9, "10": 10, "J": 0.5, "Q": 0.5, "K": 0.5,
+    # Ace handled separately.
+}
+
+
+def _compute_7_27_values(cards):
+    """Given a list of (rank, suit) tuples, return the sorted list of
+    possible 7/27 hand totals (<=27), one entry per distinct ace
+    assignment. No aces → single-element list.
+    """
+    base = 0.0
+    aces = 0
+    for rank, _suit in cards:
+        if rank == "A":
+            aces += 1
+            continue
+        v = _RANK_TO_7_27_VALUE.get(rank)
+        if v is None:
+            continue
+        base += v
+    values = set()
+    for k in range(aces + 1):
+        total = base + k * 11 + (aces - k) * 1
+        if total <= 27:
+            # Format as int if whole, else keep .5
+            values.add(total if total != int(total) else int(total))
+    return sorted(values)
+
+
+def _format_values_phrase(values):
+    """Turn [2, 12, 22] into '2, 12, or 22' for speech."""
+    strs = []
+    for v in values:
+        strs.append(str(v) if isinstance(v, int) else f"{v:g}")
+    if len(strs) == 1:
+        return strs[0]
+    if len(strs) == 2:
+        return f"{strs[0]} or {strs[1]}"
+    return ", ".join(strs[:-1]) + f", or {strs[-1]}"
+
+
+def _announce_7_27_hand_values(s):
+    """Walk each active player's up cards and announce their 7/27 totals,
+    then announce which player is first-to-bet (highest value)."""
+    ge = s.game_engine
+    if not ge.current_game or ge.current_game.name != "7/27":
+        return
+    RANK_SHORT = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}
+    # Gather up cards per player from the hand-wide history.
+    per_player = {}
+    for entry in s.console_hand_cards:
+        txt = entry.get("card", "")
+        parts = txt.split(" of ")
+        if len(parts) != 2:
+            continue
+        rank_full, suit_full = parts[0].strip(), parts[1].strip().lower()
+        rank = RANK_SHORT.get(rank_full, rank_full)
+        per_player.setdefault(entry["player"], []).append((rank, suit_full))
+
+    best_player = None
+    best_high = -1
+    for name in s.console_active_players:
+        cards = per_player.get(name, [])
+        if not cards:
+            continue
+        values = _compute_7_27_values(cards)
+        if not values:
+            continue
+        phrase = _format_values_phrase(values)
+        log.log(f"[7/27] {name}: {phrase}")
+        speech.say(f"{name}, {phrase}")
+        high = max(values)
+        if high > best_high:
+            best_high = high
+            best_player = name
+
+    if best_player is not None:
+        log.log(f"[7/27] Bet first: {best_player} (high {best_high})")
+        speech.say(f"{best_player}, your bet with high of {best_high}")
+
+
 def _check_follow_the_queen_round(s, round_cards):
     """Check cards for Follow the Queen wild at end of round.
 
@@ -991,6 +1074,36 @@ def _build_table_state(s):
     active_down_slots = set(s.rodney_downs.keys()) | set(s.slot_pending.keys())
     current_round = s.console_up_round + len(active_down_slots)
     total_rounds = _total_card_rounds(ge)
+
+    # 7/27: compute hand values per player. Rodney's value includes both
+    # his up and down cards; everyone else's is up-cards-only (we don't
+    # know their downs).
+    is_7_27 = ge.current_game is not None and ge.current_game.name == "7/27"
+    if is_7_27:
+        RANK_SHORT = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}
+        up_by_player_cards = {}
+        for entry in s.console_hand_cards:
+            parts = entry.get("card", "").split(" of ")
+            if len(parts) != 2:
+                continue
+            rank_full, suit_full = parts[0].strip(), parts[1].strip().lower()
+            rank = RANK_SHORT.get(rank_full, rank_full)
+            up_by_player_cards.setdefault(entry["player"], []).append((rank, suit_full))
+        remote_name = next((p.name for p in ge.players if p.is_remote), None)
+        values_by_player = {}
+        for p in ge.players:
+            pairs = list(up_by_player_cards.get(p.name, []))
+            if p.name == remote_name:
+                for d in s.rodney_downs.values():
+                    if d.get("rank") and d.get("suit"):
+                        pairs.append((d["rank"], d["suit"]))
+            if pairs:
+                values_by_player[p.name] = _compute_7_27_values(pairs)
+        # Write onto each player entry so the UI can render.
+        for entry in players:
+            vals = values_by_player.get(entry["name"])
+            if vals:
+                entry["values_7_27"] = vals
     return {
         "version": s.table_state_version,
         "viewer": next((p.name for p in ge.players if p.is_remote), "Rodney"),
@@ -1975,6 +2088,7 @@ header button:hover{background:#1a5a9a}
   cursor:pointer;font-size:.75em}
 .hand-box .sml-btn.active{background:#1b5e20}
 .hand-box .sml-btn.folded{background:#b71c1c}
+.hand-box .values{margin-left:auto;padding:2px 10px;background:#0f3460;color:#ffd54f;border-radius:4px;font-size:.85em;font-weight:600;white-space:nowrap}
 .hand-box .cards{flex:1 1 auto;display:flex;gap:0;align-items:flex-start;min-height:0;overflow:hidden}
 .hand-box.center .cards{justify-content:center}
 .hand-box.folded .cards{opacity:.3;filter:grayscale(60%)}
@@ -2177,6 +2291,14 @@ function renderPlayer(p) {
   foldBtn.textContent = folded ? 'Folded' : 'Fold';
   foldBtn.onclick = function(){ toggleFold(p.name, folded); };
   head.appendChild(foldBtn);
+
+  // 7/27 hand value(s), if the game engine has computed them.
+  if (p.values_7_27 && p.values_7_27.length) {
+    var vSpan = document.createElement('span');
+    vSpan.className = 'values';
+    vSpan.textContent = p.values_7_27.join(' / ');
+    head.appendChild(vSpan);
+  }
 
   var cardRow = document.createElement('div');
   cardRow.className = 'cards';
@@ -2680,6 +2802,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if round_cards:
                 for c in round_cards:
                     s.console_hand_cards.append({"player": c["player"], "card": c["card"], "round": round_num})
+            # For 7/27, announce each player's hand value(s) after the
+            # up-cards have been accumulated + indicate who bets first.
+            _announce_7_27_hand_values(s)
             s.console_last_round_cards = []
             for z in s.cal.zones:
                 zname = z["name"]
