@@ -1618,11 +1618,11 @@ canvas{border:1px solid #444;cursor:crosshair;display:block;max-width:100%;heigh
   Press on the top-left corner and drag to the bottom-right of the slot window, then release.
 </p>
 <div class="cam-box">
-  <div class="cam-title">Camera 1 (slots 1-4 area)</div>
+  <div class="cam-title">Camera 1 (slots 1-3 area)</div>
   <canvas id="cam1"></canvas>
 </div>
 <div class="cam-box">
-  <div class="cam-title">Camera 0 (slots 4-7 area)</div>
+  <div class="cam-title">Camera 0 (slots 3-5 area)</div>
   <canvas id="cam0"></canvas>
 </div>
 <div id="slots-list"></div>
