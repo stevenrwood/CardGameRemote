@@ -32,7 +32,7 @@ from flask import Flask, jsonify, request, send_file
 
 # GPIO — only import on Pi. Fail gracefully when running elsewhere.
 try:
-    from gpiozero import LED, PWMLED
+    from gpiozero import LED, PWMLED, Buzzer
     _GPIO_OK = True
 except Exception as e:
     _GPIO_OK = False
@@ -57,6 +57,11 @@ REFERENCE_DIR = Path(__file__).parent / "card_recognition" / "reference"
 YOLO_MODEL_PATH = Path(__file__).parent / "models" / "pi_card_detector.pt"
 CALIBRATION_FILE = Path(__file__).parent / "slot_calibration.json"
 NUM_SLOTS = 5
+# Per-slot green status LED (BCM pins). Matches user's Pi 4B pinout diagram.
+SLOT_LED_PINS = {1: 17, 2: 27, 3: 22, 4: 23, 5: 24}
+BUZZER_GPIO = 26  # reserved for future audio feedback
+# Confidence at/above which /test_slots treats a slot as a clean recognition.
+SLOT_LED_GOOD_CONF = 0.50
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("scan")
@@ -140,6 +145,56 @@ class Flash:
         self.led.value = self.brightness
         time.sleep(duration_ms / 1000.0)
         self.led.value = 0.0
+
+
+class Buzz:
+    """Piezo buzzer wrapper. No-op if GPIO unavailable."""
+    def __init__(self, pin: int):
+        self.pin = pin
+        self.buzzer = None
+        if _GPIO_OK:
+            try:
+                self.buzzer = Buzzer(pin)
+                log.info(f"Buzzer on GPIO {pin} ready")
+            except Exception as e:
+                log.warning(f"Buzzer init failed on GPIO {pin}: {e}")
+
+    def beep(self, n: int = 3, on_time: float = 0.12, off_time: float = 0.12):
+        """Beep n times in the background — does not block the caller."""
+        if self.buzzer is not None:
+            self.buzzer.beep(on_time=on_time, off_time=off_time, n=n, background=True)
+
+
+class SlotLed:
+    """Per-slot green status LED.
+
+    States: off (default), on (solid), blink (async, via gpiozero).
+    gpiozero.LED.blink() runs the toggle in its own background thread;
+    a subsequent .on()/.off() stops it cleanly.
+    """
+    def __init__(self, slot_num: int, pin: int):
+        self.slot_num = slot_num
+        self.pin = pin
+        self.led = None
+        if _GPIO_OK:
+            try:
+                self.led = LED(pin)
+                self.led.off()
+                log.info(f"Slot {slot_num} LED on GPIO {pin} ready")
+            except Exception as e:
+                log.warning(f"Slot {slot_num} LED init failed on GPIO {pin}: {e}")
+
+    def on(self):
+        if self.led is not None:
+            self.led.on()
+
+    def off(self):
+        if self.led is not None:
+            self.led.off()
+
+    def blink(self, on_time: float = 0.3, off_time: float = 0.3):
+        if self.led is not None:
+            self.led.blink(on_time=on_time, off_time=off_time, background=True)
 
 
 class Camera:
@@ -230,6 +285,10 @@ class AppState:
     def __init__(self, camera_indices: list[int]):
         self.flash = Flash(FLASH_GPIO)
         self.flash_lock = Lock()
+        self.slot_leds: dict[int, SlotLed] = {
+            n: SlotLed(n, pin) for n, pin in SLOT_LED_PINS.items()
+        }
+        self.buzzer = Buzz(BUZZER_GPIO)
         self.cameras: dict[int, Camera] = {}
         for idx in camera_indices:
             self.cameras[idx] = Camera(idx)
@@ -432,8 +491,17 @@ def test_slots_data():
     """JSON payload for /test_slots. Holds the flash for 4 seconds so the
     LEDs are at fully steady brightness, captures both cameras, crops
     every calibrated slot, runs recognition, and caches each crop for the
-    per-slot image endpoint to serve without another capture."""
+    per-slot image endpoint to serve without another capture.
+
+    Slot LEDs blink while warming up + capturing. Each goes solid green
+    once YOLO recognizes it above SLOT_LED_GOOD_CONF, otherwise stays
+    blinking so the user can see which slot needs attention.
+    """
     assert _state is not None
+    # Start all slot LEDs blinking during warmup + capture.
+    for led in _state.slot_leds.values():
+        led.blink(on_time=0.25, off_time=0.25)
+    any_blinking = False
     _state.flash.hold()
     try:
         time.sleep(4.0)
@@ -494,9 +562,22 @@ def test_slots_data():
             entry["rank"] = rank
             entry["suit"] = suit
             entry["confidence"] = round(conf, 3)
+        # Update this slot's LED based on confidence.
+        slot_led = _state.slot_leds.get(slot["slot"])
+        good = rank is not None and conf >= SLOT_LED_GOOD_CONF
+        if slot_led is not None:
+            if good:
+                slot_led.on()
+            else:
+                slot_led.blink(on_time=0.25, off_time=0.25)
+        if not good:
+            any_blinking = True
         results.append(entry)
     _state.test_slot_crops = crops_cache
     _state.test_slot_stamp = int(time.time())
+    # Audible alert if any slot didn't come back at >= SLOT_LED_GOOD_CONF.
+    if any_blinking:
+        _state.buzzer.beep(n=3)
     return jsonify({"slots": results, "stamp": _state.test_slot_stamp})
 
 
@@ -603,14 +684,22 @@ run();
 
 @app.post("/slots/<int:slot_num>/led")
 def slot_led(slot_num: int):
-    """Control the per-slot green LED. For now this is a stub — the slot
-    LEDs aren't yet wired. We just log the requested state so Neo's call
-    is visible in the log."""
+    """Control the per-slot green LED. Body: {"state": "on"|"off"|"blink"}."""
+    assert _state is not None
     body = request.get_json(silent=True) or {}
     state = str(body.get("state", "")).lower()
     if state not in ("on", "off", "blink"):
         return jsonify({"ok": False, "error": "state must be on/off/blink"}), 400
-    log.info(f"[LED] Slot {slot_num} → {state} (stub — no hardware)")
+    led = _state.slot_leds.get(slot_num)
+    if led is None:
+        return jsonify({"ok": False, "error": f"no LED for slot {slot_num}"}), 404
+    if state == "on":
+        led.on()
+    elif state == "off":
+        led.off()
+    else:
+        led.blink(on_time=0.25, off_time=0.25)
+    log.info(f"[LED] Slot {slot_num} → {state}")
     return jsonify({"ok": True, "slot": slot_num, "state": state})
 
 
