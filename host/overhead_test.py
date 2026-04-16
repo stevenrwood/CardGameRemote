@@ -978,6 +978,7 @@ def _announce_7_27_hand_values(s):
 
     best_player = None
     best_high = -1
+    per_player_values = {}
     for name in s.console_active_players:
         cards = per_player.get(name, [])
         if not cards:
@@ -985,6 +986,7 @@ def _announce_7_27_hand_values(s):
         values = _compute_7_27_values(cards)
         if not values:
             continue
+        per_player_values[name] = values
         # Keep a log entry per player for debugging, but only speak the winner.
         log.log(f"[7/27] {name}: {_format_values_phrase(values)}")
         high = max(values)
@@ -993,7 +995,15 @@ def _announce_7_27_hand_values(s):
             best_player = name
 
     if best_player is not None:
-        phrase = f"{best_player}, your bet with high of {_speak_value(best_high)}"
+        best_values = per_player_values.get(best_player, [best_high])
+        # Descending list — highest first. If the player has aces, include
+        # the other valid totals ("high of 25 or 15").
+        ordered = sorted(set(best_values), reverse=True)
+        if len(ordered) == 1:
+            tail = _speak_value(ordered[0])
+        else:
+            tail = _format_values_phrase(ordered)
+        phrase = f"{best_player}, your bet with high of {tail}"
         log.log(f"[7/27] Bet first: {phrase}")
         speech.say(phrase)
 
@@ -3270,6 +3280,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if queued:
                 log.log(f"[CONSOLE] Down-card verify queued for slots {queued}")
             _update_flash_for_deal_state(s)
+            # /table polls on state version; the hand-wide up-card history
+            # just grew so bump the version or clients 304 and never see
+            # the new up cards.
+            with s.table_lock:
+                s.table_state_version += 1
             self._r(200, "application/json", json.dumps({"ok": True}))
 
         elif p == "/api/console/next_round":
@@ -3306,6 +3321,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # e.g. after the 4th up round the 7th-card down becomes next, so
             # the LEDs need to come back on.
             _update_flash_for_deal_state(s)
+            with s.table_lock:
+                s.table_state_version += 1
             self._r(200, "application/json", json.dumps({
                 "hand": ge.get_hand_state(),
                 "up_round": s.console_up_round,
