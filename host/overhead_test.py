@@ -120,6 +120,7 @@ speech = SpeechQueue()
 # ---------------------------------------------------------------------------
 
 LOG_FILE = Path.home() / "Downloads" / "log.txt"
+LOG_ARCHIVE_DIR = Path.home() / "Downloads"
 
 class LogBuffer:
     def __init__(self, maxlines=500):
@@ -145,6 +146,25 @@ class LogBuffer:
     def get(self, n=50):
         with self._lock:
             return list(self._lines[-n:])
+
+    def start_night(self):
+        """Rotate the working log and start a dated archive for this
+        poker night. Returns the archive filename."""
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        archive = LOG_ARCHIVE_DIR / f"poker_{stamp}.txt"
+        try:
+            LOG_FILE.write_text("")
+        except Exception:
+            pass
+        with self._lock:
+            self._lines = []
+        self.log(f"=== Poker night started {stamp} → {archive.name} ===")
+        return archive.name
+
+    def end_night(self):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.log(f"=== Poker night ended {stamp} ===")
+
 
 log = LogBuffer()
 
@@ -1102,6 +1122,12 @@ class AppState:
         # work while this is set.
         self.guided_deal = None
         self.guided_deal_thread = None
+        # "Poker night" flag — set by Start, cleared by Exit Poker. The
+        # console UI gates the game dropdown + action controls on this.
+        self.night_active = False
+        # High-level console state machine surfaced to the UI.
+        # "idle" | "dealing" | "betting" | "hand_over"
+        self.console_state = "idle"
         self.table_lock = Lock()       # guards rodney_downs / pending_verify / table_log
         self.pi_confidence_threshold = 0.70  # >= this → auto-accept
         # The Pi's template matcher returns low-but-nonzero confidence for
@@ -1765,6 +1791,13 @@ def _guided_deal_loop(s):
             with s.table_lock:
                 s.guided_deal = None
                 s.table_state_version += 1
+            # For all-down games, guided completion means every card is
+            # accounted for — auto-advance the console state to betting so
+            # the UI's next action becomes "Pot is right" without needing
+            # a manual Confirm Cards click.
+            if s.console_state == "dealing" and s.console_total_up_rounds == 0:
+                s.console_state = "betting"
+                log.log("[CONSOLE] All-down deal complete → betting")
             return
 
         # Was this slot's verify modal just resolved? Advance if so.
@@ -3349,6 +3382,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         zone_cards[prior_name]["duplicate"] = True
                 else:
                     seen[card] = name
+            game_in_progress = (
+                ge.current_game is not None
+                and s.console_state != "idle"
+            )
+            has_up = s.console_total_up_rounds > 0
+            # Map console_state -> phase label + action button spec for the UI.
+            if not s.night_active:
+                phase_label = "Night not started"
+                action_label = ""
+                action_endpoint = ""
+                action_enabled = False
+            elif ge.current_game is None or s.console_state == "idle":
+                phase_label = "Choose a game"
+                action_label = ""
+                action_endpoint = ""
+                action_enabled = False
+            elif s.console_state == "dealing":
+                phase_label = "Dealing"
+                action_label = "Confirm Cards"
+                action_endpoint = "/api/console/confirm"
+                # Disabled for all-down rounds — auto-advances when guided
+                # loop finishes. Enabled when up cards are expected.
+                action_enabled = has_up
+            elif s.console_state == "betting":
+                rnd = max(1, s.console_up_round)
+                phase_label = f"Betting (round {rnd})"
+                action_label = "Pot is right"
+                action_endpoint = "/api/console/next_round"
+                action_enabled = True
+            elif s.console_state == "hand_over":
+                phase_label = "Hand over"
+                action_label = "New Hand"
+                action_endpoint = "/api/console/end"
+                action_enabled = True
+            else:
+                phase_label = s.console_state
+                action_label = ""
+                action_endpoint = ""
+                action_enabled = False
             self._r(200, "application/json", json.dumps({
                 "active_players": s.console_active_players,
                 "all_players": PLAYER_NAMES,
@@ -3361,6 +3433,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "up_round": s.console_up_round,
                 "total_up_rounds": s.console_total_up_rounds,
                 "scan_phase": s.console_scan_phase,
+                "night_active": s.night_active,
+                "console_state": s.console_state,
+                "game_in_progress": game_in_progress,
+                "phase_label": phase_label,
+                "action_label": action_label,
+                "action_endpoint": action_endpoint,
+                "action_enabled": action_enabled,
+                "current_game": ge.current_game.name if ge.current_game else "",
             }))
 
         elif p == "/api/console/players":
@@ -3380,6 +3460,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     log.log(f"[CONSOLE] Dealer set to {p2.name}")
                     break
             self._r(200, "application/json", json.dumps({"dealer": ge.get_dealer().name}))
+
+        elif p == "/api/console/start_night":
+            # Start the night: rotate log file, flip night_active, accept
+            # any initial settings (dealer/players/thresholds) at the same
+            # time so the modal submits once.
+            archive = log.start_night()
+            s.night_active = True
+            s.console_state = "idle"
+            self._apply_settings(s, data)
+            log.log("[CONSOLE] Poker night started")
+            self._r(200, "application/json", json.dumps({
+                "ok": True, "archive": archive,
+            }))
+
+        elif p == "/api/console/settings":
+            # Mid-night adjustments: same payload as start_night, but doesn't
+            # rotate the log or toggle night state.
+            self._apply_settings(s, data)
+            self._r(200, "application/json", '{"ok":true}')
+
+        elif p == "/api/console/exit_poker":
+            log.log("[CONSOLE] Exit Poker — closing night")
+            _stop_guided_deal(s)
+            log.end_night()
+            s.night_active = False
+            s.console_state = "idle"
+            self._r(200, "application/json", '{"ok":true,"exiting":true}')
+            # Schedule a brief deferred exit so the response can flush first.
+            def _bye():
+                time.sleep(0.3)
+                os._exit(0)
+            Thread(target=_bye, daemon=True).start()
 
         elif p == "/api/console/force_scan":
             # Dealer clicked "Waiting for cards..." — skip motion detection
@@ -3474,6 +3586,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.table_state_version += 1
                 # Make sure any stale guided session from a prior hand is gone.
                 _stop_guided_deal(s)
+                s.console_state = "dealing"
                 # All-down games (5 Card Draw, 3 Toed Pete) use the slot-by-
                 # slot guided flow instead of polling /slots. Guided mode owns
                 # the Pi scanner until the last slot is filled or End Hand is
@@ -3552,6 +3665,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # the new up cards.
             with s.table_lock:
                 s.table_state_version += 1
+            s.console_state = "betting"
             self._r(200, "application/json", json.dumps({"ok": True}))
 
         elif p == "/api/console/next_round":
@@ -3576,8 +3690,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.console_scan_phase = "idle" if beyond_last_up else "watching"
                 if beyond_last_up:
                     log.log("[CONSOLE] No more up rounds — idle until End Hand")
+                    s.console_state = "hand_over"
                 else:
                     log.log("[CONSOLE] Baselines recaptured, watching dealer zone")
+                    s.console_state = "dealing"
             log.log(f"[CONSOLE] Next Round — up round {s.console_up_round}/{s.console_total_up_rounds}")
             # Also queue any pending down-card scans so games with a final
             # down (no Confirm Cards) still get a chance to verify.
@@ -3606,6 +3722,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s.console_total_up_rounds = 0
             s.monitoring = False
             s.console_scan_phase = "idle"
+            s.console_state = "idle"
             # Reset all zone states
             for z in s.cal.zones:
                 s.monitor.zone_state[z["name"]] = "empty"
@@ -4255,138 +4372,124 @@ refresh();
 
     def _console_page(self, s):
         self._r(200, "text/html", """<!DOCTYPE html>
-<html><head><title>Dealer Console</title>
+<html><head><title>Poker Console</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#1a1a2e;color:#e0e0e0;
-  padding:12px;padding-bottom:80px;-webkit-user-select:none;user-select:none}
-h2{font-size:1.1em;color:#4fc3f7;margin:12px 0 6px}
-button{padding:10px 16px;border:none;border-radius:8px;cursor:pointer;font-size:1em;
+  padding:10px;padding-bottom:24px;-webkit-user-select:none;user-select:none}
+h1{font-size:1.25em;text-align:center;margin:2px 0 8px;color:#e0e0e0}
+button{font-family:inherit;font-weight:600;border:none;border-radius:8px;cursor:pointer;
   -webkit-tap-highlight-color:transparent}
 select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;color:#e0e0e0;
   font-size:1em;width:100%;-webkit-appearance:none;appearance:none}
-.btn{display:block;width:100%;padding:14px;border-radius:10px;font-size:1.1em;font-weight:600;margin:6px 0}
-.btn-deal{background:#1b5e20;color:#fff}
-.btn-deal:active{background:#2e7d32}
-.btn-deal:disabled{background:#333;color:#666}
-.btn-continue{background:#0f3460;color:#fff}
-.btn-continue:active{background:#1a5a9a}
-.btn-end{background:#b71c1c;color:#fff}
-.btn-end:active{background:#d32f2f}
-.btn-sm{display:inline-block;width:auto;padding:8px 14px;font-size:.9em;margin:3px}
-.card-row{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
-.card-chip{padding:8px 12px;border-radius:8px;font-size:.95em;font-weight:600}
-.card-up{background:#1b5e20;color:#fff}
-.status-box{background:#16213e;border-radius:10px;padding:12px;margin:8px 0}
-.status-label{font-size:.8em;color:#888;text-transform:uppercase;letter-spacing:1px}
-.status-value{font-size:1.15em;color:#4fc3f7;margin-top:2px}
-.player-check{display:flex;align-items:center;padding:8px 0;border-bottom:1px solid #222}
-.player-check label{flex:1;font-size:1em;padding-left:8px}
-.player-check input{width:22px;height:22px;accent-color:#4fc3f7}
-.section{margin-bottom:16px}
-.zone-row{display:flex;align-items:center;padding:10px 8px;margin:4px 0;border-radius:8px;
+select:disabled{opacity:.55}
+.hdr{display:flex;gap:8px;margin-bottom:10px}
+.hdr button{flex:1;padding:10px;font-size:.95em}
+.btn-start{background:#1b5e20;color:#fff}
+.btn-setup{background:#0f3460;color:#fff}
+.btn-exit{background:#b71c1c;color:#fff}
+.dim{opacity:.45;pointer-events:none}
+.field{margin:8px 0}
+.status-row{display:flex;gap:8px;align-items:stretch;margin:10px 0}
+.status-label{flex:1.2;background:#16213e;padding:12px;border-radius:8px;font-weight:600;
+  color:#4fc3f7;display:flex;align-items:center}
+.action-btn{flex:1;padding:12px;font-size:1em;background:#1b5e20;color:#fff}
+.action-btn:disabled{background:#333;color:#666}
+h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin:14px 0 6px}
+.zone-row{display:flex;align-items:center;padding:10px;margin:4px 0;border-radius:8px;
   background:#16213e;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .zone-row:active{background:#1a3a6e}
-.zone-name{width:80px;font-weight:600;font-size:1.05em}
-.zone-card{flex:1;font-size:1.1em;color:#4caf50}
+.zone-name{width:80px;font-weight:600}
+.zone-card{flex:1;color:#4caf50}
 .zone-empty{color:#555}
 .zone-dup{color:#e53935 !important}
 .zone-arrow{color:#555;font-size:1.2em}
-#correct-modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.9);
-  z-index:100;overflow-y:auto;padding:12px}
-#correct-content{background:#16213e;border-radius:12px;padding:12px;max-width:400px;
-  margin:0 auto}
-#correct-img{width:50%;border-radius:8px;margin:6px auto;display:block;border:1px solid #333}
-.detail-row{display:flex;justify-content:space-between;padding:4px 0;font-size:.9em;
-  border-bottom:1px solid #222}
-.detail-label{color:#888}
-.detail-value{color:#e0e0e0;font-weight:600}
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:100;
+  overflow-y:auto;padding:16px}
+.modal-inner{background:#16213e;border-radius:12px;padding:14px;max-width:400px;margin:10px auto}
+.modal-inner h2{color:#4fc3f7;font-size:1.1em;letter-spacing:0;text-transform:none;margin:0 0 10px}
+.modal-inner label{display:block;font-size:.85em;color:#aaa;margin-bottom:4px}
+.modal-inner input[type=range]{width:100%;accent-color:#4fc3f7}
+.modal-inner input[type=number]{width:80px;padding:6px;background:#0d1b2a;color:#fff;
+  border:1px solid #333;border-radius:4px}
+.modal-btns{display:flex;gap:8px;margin-top:14px}
+.modal-btns button{flex:1;padding:10px}
+.modal-save{background:#1b5e20;color:#fff}
+.modal-cancel{background:#333;color:#ccc}
+.player-row{display:flex;align-items:center;padding:6px 0;border-bottom:1px solid #222}
+.player-row input{width:22px;height:22px;accent-color:#4fc3f7;margin-right:10px}
+.player-row label{flex:1;font-size:1em}
+#correct-img{width:40%;border-radius:8px;margin:6px auto;display:block;border:1px solid #333;background:#000}
 .picker-row{display:flex;gap:8px;margin:8px 0;align-items:center}
 .picker-row label{width:50px;font-size:.9em;color:#888}
 .picker-row select{flex:1}
+.hint{font-size:.75em;color:#666;margin-top:3px}
 </style></head><body>
 
-<h1 style="font-size:1.3em;text-align:center;padding:8px 0">Dealer Console</h1>
+<h1>Poker Console</h1>
 
-<!-- Players section (collapsible) -->
-<div class="section">
-  <h2 onclick="togglePlayers()" style="cursor:pointer">Players &#9662;</h2>
-  <div id="players-list" style="display:none"></div>
+<div class="hdr">
+  <button id="start-btn" class="btn-start" onclick="onStart()">Start</button>
+  <button id="exit-btn" class="btn-exit" onclick="onExit()" style="display:none">Exit Poker</button>
 </div>
 
-<!-- YOLO confidence slider -->
-<div class="section">
-  <div style="display:flex;align-items:center;gap:8px">
-    <span style="font-size:.85em;color:#888;white-space:nowrap">YOLO min</span>
-    <input type="range" id="yolo-slider" min="0" max="100" value="50"
-      style="flex:1;accent-color:#4fc3f7" oninput="updateYoloLabel()"
-      onchange="setYoloConf()">
-    <span id="yolo-val" style="font-size:.9em;color:#4fc3f7;width:36px;text-align:right">50%</span>
-  </div>
-  <div style="font-size:.75em;color:#555;margin-top:2px">Below this confidence, falls back to Claude AI</div>
-</div>
-
-<!-- Game + Dealer -->
-<div class="section">
-  <h2>Game</h2>
-  <select id="game-select"><option value="">-- choose game --</option></select>
-</div>
-
-<div class="section">
-  <h2>Dealer</h2>
-  <select id="dealer-select" onchange="setDealer()"></select>
-</div>
-
-<!-- Deal button -->
-<button class="btn btn-deal" id="btn-deal" onclick="doDeal()">Deal</button>
-
-<!-- Status -->
-<div id="hand-status" style="display:none">
-  <div class="status-box">
-    <div class="status-label">Game</div>
-    <div class="status-value" id="hand-game">--</div>
-  </div>
-  <div class="status-box">
-    <div class="status-label">Status</div>
-    <div class="status-value" id="hand-phase">--</div>
-  </div>
-  <div class="status-box" id="wild-box" style="display:none">
-    <div class="status-label">Wild</div>
-    <div class="status-value" id="hand-wild">--</div>
+<div id="main" class="dim">
+  <div class="field">
+    <select id="game-select" onchange="onPickGame()" disabled>
+      <option value="">-- choose game --</option>
+    </select>
   </div>
 
-  <!-- Zone recognized cards (live) — tap to correct -->
-  <h2 id="zone-header">Cards dealt</h2>
+  <div class="status-row">
+    <div class="status-label" id="state-text">Night not started</div>
+    <button class="action-btn" id="action-btn" onclick="onAction()" disabled>—</button>
+  </div>
+
+  <h2>Up cards seen</h2>
   <div id="zone-cards"></div>
+</div>
 
-  <!-- Last round cards -->
-  <div id="last-round-section" style="display:none">
-    <h2>Last Round</h2>
-    <div id="last-round-cards" class="card-row"></div>
+<!-- Setup / Adjust modal -->
+<div id="setup-modal" class="modal">
+  <div class="modal-inner">
+    <h2 id="setup-title">Start night</h2>
+    <div class="field">
+      <label>Dealer</label>
+      <select id="setup-dealer"></select>
+    </div>
+    <div class="field">
+      <label>Active players</label>
+      <div id="setup-players"></div>
+    </div>
+    <div class="field">
+      <label>YOLO min confidence: <span id="yolo-val">50%</span></label>
+      <input id="setup-yolo" type="range" min="0" max="100" value="50"
+             oninput="document.getElementById('yolo-val').textContent = this.value + '%'">
+      <div class="hint">Below this, falls back to Claude AI.</div>
+    </div>
+    <div class="field">
+      <label>Pi presence brightness ceiling</label>
+      <input id="setup-presence" type="number" min="0" max="255" step="1" value="125">
+      <div class="hint">Slot is "present" when its brightness falls below this.</div>
+    </div>
+    <div class="modal-btns">
+      <button class="modal-save" onclick="saveSetup()">Save</button>
+      <button class="modal-cancel" onclick="closeModal('setup-modal')">Cancel</button>
+    </div>
   </div>
-
-  <!-- Action buttons -->
-  <button class="btn btn-continue" id="btn-confirm" onclick="doConfirm()">
-    Confirm Cards
-  </button>
-  <button class="btn btn-continue" id="btn-next" onclick="doNextRound()" style="display:none">
-    Next Round
-  </button>
-  <button class="btn btn-end" style="margin-top:8px" onclick="doEnd()">End Hand</button>
 </div>
 
 <!-- Correction modal -->
-<div id="correct-modal" onclick="if(event.target===this)closeCorrect()">
-  <div id="correct-content">
-    <h2 id="correct-title" style="margin-bottom:8px">--</h2>
+<div id="correct-modal" class="modal" onclick="if(event.target===this)closeModal('correct-modal')">
+  <div class="modal-inner">
+    <h2 id="correct-title">—</h2>
     <img id="correct-img" src="">
-    <div id="correct-details"></div>
     <div class="picker-row">
       <label>Rank</label>
       <select id="correct-rank">
-        <option value="">--</option>
+        <option value="">—</option>
         <option value="A">Ace</option>
         <option value="2">2</option><option value="3">3</option>
         <option value="4">4</option><option value="5">5</option>
@@ -4400,27 +4503,25 @@ select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;c
     <div class="picker-row">
       <label>Suit</label>
       <select id="correct-suit">
-        <option value="">--</option>
+        <option value="">—</option>
         <option value="clubs">Clubs</option>
         <option value="diamonds">Diamonds</option>
         <option value="hearts">Hearts</option>
         <option value="spades">Spades</option>
       </select>
     </div>
-    <div style="display:flex;gap:8px;margin-top:12px">
-      <button class="btn btn-sm" style="flex:1;background:#1b5e20;color:#fff" onclick="saveCorrection()">
-        Save</button>
-      <button class="btn btn-sm" style="flex:1;background:#333;color:#ccc" onclick="closeCorrect()">
-        Cancel</button>
+    <div class="modal-btns">
+      <button class="modal-save" onclick="saveCorrection()">Save</button>
+      <button class="modal-cancel" onclick="closeModal('correct-modal')">Cancel</button>
     </div>
   </div>
 </div>
 
 <script>
 var ST=null;
-var dealing=false;
 var correctPlayer=null;
-function dbg(msg){}
+var gameOptionsBuilt=false;
+var zoneBuilt=false;
 
 function api(path,data){
   return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -4428,304 +4529,186 @@ function api(path,data){
 }
 
 function refresh(){
-  api('/api/console/state').then(function(d){
-    ST=d;
-    render();
-  }).catch(function(){});
+  api('/api/console/state').then(function(d){ST=d;render();}).catch(function(){});
 }
 
-var zoneBuilt=false;
+function buildGameOptions(){
+  if(gameOptionsBuilt||!ST||!ST.games) return;
+  var gs=document.getElementById('game-select');
+  ST.games.forEach(function(g){
+    var o=document.createElement('option');o.value=g;o.textContent=g;gs.appendChild(o);
+  });
+  gameOptionsBuilt=true;
+}
 
 function buildZoneRows(){
-  // Build zone rows once with stable event listeners
+  if(zoneBuilt||!ST||!ST.all_players) return;
   var zc=document.getElementById('zone-cards');
   zc.innerHTML='';
   ST.all_players.forEach(function(n){
     var div=document.createElement('div');
-    div.className='zone-row';
-    div.id='zr-'+n;
-    var nameSpan=document.createElement('span');
-    nameSpan.className='zone-name';
-    nameSpan.textContent=n;
-    var cardSpan=document.createElement('span');
-    cardSpan.className='zone-card zone-empty';
-    cardSpan.id='zc-'+n;
-    cardSpan.textContent='--';
-    var arrow=document.createElement('span');
-    arrow.className='zone-arrow';
-    arrow.id='za-'+n;
-    arrow.textContent='\\u25b8';
-    arrow.style.display='none';
-    div.appendChild(nameSpan);
-    div.appendChild(cardSpan);
-    div.appendChild(arrow);
-    div.addEventListener('click',(function(name){return function(){
-      var zi=ST.zone_cards[name]||{};
-      if(zi.card){
-        dbg('TAP: '+name);
-        openCorrect(name);
-      }
-    }})(n));
+    div.className='zone-row';div.id='zr-'+n;
+    div.onclick=(function(player){return function(){openCorrect(player);};})(n);
+    var name=document.createElement('span');name.className='zone-name';name.textContent=n;
+    var card=document.createElement('span');card.className='zone-card zone-empty';card.id='zc-'+n;card.textContent='—';
+    var arr=document.createElement('span');arr.className='zone-arrow';arr.textContent='›';
+    div.appendChild(name);div.appendChild(card);div.appendChild(arr);
     zc.appendChild(div);
   });
   zoneBuilt=true;
-  dbg('zones built: '+ST.all_players.length+' rows');
 }
 
 function render(){
   if(!ST) return;
-  var ge=ST.hand;
+  buildGameOptions();
+  buildZoneRows();
 
-  // Game dropdown (build once)
-  var sel=document.getElementById('game-select');
-  if(sel.options.length<=1){
-    ST.games.forEach(function(g){
-      var o=document.createElement('option');o.value=g;o.textContent=g;
-      sel.appendChild(o);
-    });
-  }
+  var gs=document.getElementById('game-select');
+  gs.value=ST.current_game||'';
+  gs.disabled=!ST.night_active||ST.game_in_progress;
 
-  // Dealer dropdown (build once)
-  var dsel=document.getElementById('dealer-select');
-  if(dsel.options.length===0){
-    ST.all_players.forEach(function(n){
-      var o=document.createElement('option');o.value=n;o.textContent=n;
-      dsel.appendChild(o);
-    });
-    // Sync YOLO slider from server
-    var pct=Math.round((ST.yolo_min_conf||0.5)*100);
-    document.getElementById('yolo-slider').value=pct;
-    document.getElementById('yolo-val').textContent=pct+'%';
-  }
-  dsel.value=ge.dealer;
+  var sbtn=document.getElementById('start-btn');
+  sbtn.textContent=ST.night_active?'Setup':'Start';
+  sbtn.className=ST.night_active?'btn-setup':'btn-start';
 
-  // Players checklist (build once)
-  var pl=document.getElementById('players-list');
-  if(!pl.dataset.built){
-    var h='';
-    ST.all_players.forEach(function(n){
-      var ck=ST.active_players.indexOf(n)>=0?'checked':'';
-      h+='<div class="player-check"><input type="checkbox" id="chk-'+n+'" '+ck
-        +' onchange="updatePlayers()"><label for="chk-'+n+'">'+n+'</label></div>';
-    });
-    pl.innerHTML=h;
-    pl.dataset.built='1';
-  }
+  var ebtn=document.getElementById('exit-btn');
+  ebtn.style.display=ST.night_active?'block':'none';
+  ebtn.textContent=ST.game_in_progress?'Exit Game':'Exit Poker';
 
-  // Zone rows (build once)
-  if(!zoneBuilt) buildZoneRows();
+  var mc=document.getElementById('main');
+  if(ST.night_active) mc.classList.remove('dim'); else mc.classList.add('dim');
 
-  // Hand state
-  var hs=document.getElementById('hand-status');
-  var dealBtn=document.getElementById('btn-deal');
-  var confirmBtn=document.getElementById('btn-confirm');
-  var nextBtn=document.getElementById('btn-next');
-
-  if(ge.game_name){
-    hs.style.display='';
-    document.getElementById('hand-game').textContent=ge.game_name;
-    document.getElementById('hand-phase').textContent=ge.current_phase;
-    dealBtn.disabled=true;
-    dealBtn.textContent='Dealing...';
-    dsel.disabled=true;
-
-    // Wild cards
-    var wb=document.getElementById('wild-box');
-    if(ge.wild_label){wb.style.display='';document.getElementById('hand-wild').textContent=ge.wild_label}
-    else{wb.style.display='none'}
-
-    // Button visibility driven by scan_phase
-    var phase=ST.scan_phase||'idle';
-    var done=(ST.total_up_rounds && ST.up_round>=ST.total_up_rounds);
-    if((phase==='scanned'||phase==='watching_missing') && !done){
-      confirmBtn.style.display='';
-      confirmBtn.disabled=false;
-      confirmBtn.textContent=phase==='watching_missing'?'Confirm Cards (some missing)':'Confirm Cards';
-      nextBtn.style.display='none';
-    } else if(phase==='confirmed' && !done){
-      confirmBtn.style.display='none';
-      nextBtn.style.display='';
-      nextBtn.disabled=false;
-      nextBtn.textContent='Next Round';
-    } else if(done){
-      confirmBtn.style.display='none';
-      nextBtn.style.display='';
-      nextBtn.disabled=true;
-      nextBtn.textContent='All up rounds done';
-    } else {
-      // watching or settling — the "watching" button is clickable to
-      // force an immediate rescan for when the auto-trigger missed the
-      // new cards (e.g. no zone crossed the pixel-diff threshold).
-      confirmBtn.style.display='';
-      if(phase==='settling'){
-        confirmBtn.disabled=true;
-        confirmBtn.textContent='Scanning...';
-      } else {
-        confirmBtn.disabled=false;
-        confirmBtn.textContent='Waiting for cards... (tap to scan)';
-      }
-      nextBtn.style.display='none';
-    }
-
-    // Zone header with round number
-    var roundNum=ST.up_round+1;
-    var zh_title='Cards dealt in round '+roundNum;
-    if(ST.total_up_rounds) zh_title+=' of '+ST.total_up_rounds;
-    zh_title+=' (touch to correct)';
-    document.getElementById('zone-header').textContent=zh_title;
-
-    // Update zone card text (no rebuild — listeners survive)
-    ST.active_players.forEach(function(n){
-      var zi=ST.zone_cards[n]||{};
-      var card=zi.card||'';
-      var dup=zi.duplicate||false;
-      var cs=document.getElementById('zc-'+n);
-      var ar=document.getElementById('za-'+n);
-      if(cs){
-        cs.textContent=card?(dup?card+' DUP!':card):'--';
-        cs.className=card?(dup?'zone-card zone-dup':'zone-card'):'zone-card zone-empty';
-      }
-      if(ar) ar.style.display=card?'':'none';
-    });
-
-    // Last round cards
-    var lrs=document.getElementById('last-round-section');
-    var lrc=document.getElementById('last-round-cards');
-    if(ST.last_round_cards && ST.last_round_cards.length){
-      lrs.style.display='';
-      var lh='';
-      ST.last_round_cards.forEach(function(c){
-        lh+='<span class="card-chip card-up">'+c.player+': '+c.card+'</span>';
-      });
-      lrc.innerHTML=lh;
-    } else {
-      lrs.style.display='none';
-    }
-
+  document.getElementById('state-text').textContent=ST.phase_label||'—';
+  var abtn=document.getElementById('action-btn');
+  if(ST.action_label){
+    abtn.style.visibility='visible';
+    abtn.textContent=ST.action_label;
+    abtn.disabled=!ST.action_enabled;
   } else {
-    hs.style.display='none';
-    dealBtn.disabled=false;
-    dealBtn.textContent='Deal';
-    dsel.disabled=false;
-    dealing=false;
+    abtn.style.visibility='hidden';
+  }
+
+  (ST.all_players||[]).forEach(function(n){
+    var zi=(ST.zone_cards||{})[n]||{};
+    var cs=document.getElementById('zc-'+n);
+    if(!cs) return;
+    var txt=zi.card||'';
+    cs.textContent=txt?(zi.duplicate?txt+' DUP!':txt):'—';
+    cs.className='zone-card'+(txt?'':' zone-empty')+(zi.duplicate?' zone-dup':'');
+  });
+}
+
+function populateSetupModal(){
+  if(!ST) return;
+  var ds=document.getElementById('setup-dealer');
+  ds.innerHTML='';
+  (ST.all_players||[]).forEach(function(n){
+    var o=document.createElement('option');o.value=n;o.textContent=n;
+    if(ST.dealer===n) o.selected=true;
+    ds.appendChild(o);
+  });
+  var pl=document.getElementById('setup-players');
+  pl.innerHTML='';
+  (ST.all_players||[]).forEach(function(n){
+    var active=(ST.active_players||[]).indexOf(n)!==-1;
+    var row=document.createElement('div');row.className='player-row';
+    var cb=document.createElement('input');cb.type='checkbox';cb.id='sp-'+n;cb.checked=active;
+    var lbl=document.createElement('label');lbl.htmlFor='sp-'+n;lbl.textContent=n;
+    row.appendChild(cb);row.appendChild(lbl);
+    pl.appendChild(row);
+  });
+  var yolo=document.getElementById('setup-yolo');
+  yolo.value=Math.round((ST.yolo_min_conf||0.5)*100);
+  document.getElementById('yolo-val').textContent=yolo.value+'%';
+}
+
+function onStart(){
+  populateSetupModal();
+  document.getElementById('setup-title').textContent=
+    (ST&&ST.night_active)?'Adjust settings':'Start night';
+  document.getElementById('setup-modal').style.display='block';
+}
+
+function saveSetup(){
+  var dealer=document.getElementById('setup-dealer').value;
+  var players=[];
+  (ST.all_players||[]).forEach(function(n){
+    if(document.getElementById('sp-'+n).checked) players.push(n);
+  });
+  var yolo=parseInt(document.getElementById('setup-yolo').value,10)/100.0;
+  var presence=parseFloat(document.getElementById('setup-presence').value);
+  var body={dealer:dealer,players:players,yolo_min_conf:yolo,presence_threshold:presence};
+  var path=(ST&&ST.night_active)?'/api/console/settings':'/api/console/start_night';
+  api(path,body).then(function(){closeModal('setup-modal');refresh();});
+}
+
+function onExit(){
+  if(!ST) return;
+  if(ST.game_in_progress){
+    if(!confirm('End current hand?')) return;
+    api('/api/console/end').then(refresh);
+  } else {
+    if(!confirm('Exit poker night?')) return;
+    api('/api/console/exit_poker').then(function(){
+      document.body.innerHTML='<h1 style="text-align:center;margin-top:40vh">Goodnight!</h1>';
+    });
   }
 }
 
-function togglePlayers(){
-  var el=document.getElementById('players-list');
-  el.style.display=el.style.display==='none'?'':'none';
+function onPickGame(){
+  var g=document.getElementById('game-select').value;
+  if(!g) return;
+  api('/api/console/deal',{game:g}).then(refresh);
 }
 
-function updatePlayers(){
-  var names=[];
-  ST.all_players.forEach(function(n){
-    if(document.getElementById('chk-'+n).checked) names.push(n);
-  });
-  api('/api/console/players',{players:names}).then(refresh);
+function onAction(){
+  if(!ST||!ST.action_endpoint) return;
+  var ep=ST.action_endpoint;
+  // Confirm Cards with nothing scanned yet → trigger a force_scan first,
+  // then confirm once recognition has settled.
+  if(ep==='/api/console/confirm' && ST.scan_phase==='watching'){
+    api('/api/console/force_scan').then(function(){
+      setTimeout(function(){ api('/api/console/confirm').then(refresh); },2500);
+    });
+  } else {
+    api(ep).then(refresh);
+  }
 }
-
-function setDealer(){
-  var name=document.getElementById('dealer-select').value;
-  api('/api/console/set_dealer',{dealer:name}).then(refresh);
-}
-
-function updateYoloLabel(){
-  document.getElementById('yolo-val').textContent=document.getElementById('yolo-slider').value+'%';
-}
-function setYoloConf(){
-  var v=parseInt(document.getElementById('yolo-slider').value)/100;
-  api('/api/console/yolo_conf',{value:v});
-}
-
-function doDeal(){
-  if(dealing) return;
-  var game=document.getElementById('game-select').value;
-  if(!game){alert('Pick a game first');return}
-  dealing=true;
-  var btn=document.getElementById('btn-deal');
-  btn.disabled=true;
-  btn.textContent='Starting...';
-  api('/api/console/deal',{game:game}).then(refresh);
-}
-
-function doConfirm(){
-  var btn=document.getElementById('btn-confirm');
-  // In "watching" phase the button is a manual rescan trigger — no zones
-  // have been scanned yet, so /api/console/confirm would just record empty.
-  // Fire a force_scan instead; refresh picks up the 'scanned' phase and
-  // the button morphs into the real "Confirm Cards".
-  var phase=(ST && ST.scan_phase) || 'idle';
-  var endpoint = (phase === 'watching') ? '/api/console/force_scan' : '/api/console/confirm';
-  btn.disabled=true;btn.textContent='...';
-  api(endpoint).then(refresh);
-}
-
-function doNextRound(){
-  var btn=document.getElementById('btn-next');
-  btn.disabled=true;btn.textContent='...';
-  api('/api/console/next_round').then(refresh);
-}
-
-function doEnd(){
-  dealing=false;
-  api('/api/console/end').then(refresh);
-}
-
-// --- Correction popup ---
 
 var RANK_MAP={'Ace':'A','King':'K','Queen':'Q','Jack':'J',
   '2':'2','3':'3','4':'4','5':'5','6':'6','7':'7','8':'8','9':'9','10':'10'};
 var SUIT_MAP={'Clubs':'clubs','Diamonds':'diamonds','Hearts':'hearts','Spades':'spades'};
 
 function parseCard(card){
-  // Parse "King of Clubs" -> {rank:'K', suit:'clubs'}
   if(!card) return {rank:'',suit:''};
   var m=card.match(/^(.+) of (.+)$/);
   if(!m) return {rank:'',suit:''};
-  return {rank:RANK_MAP[m[1]]||'', suit:SUIT_MAP[m[2]]||''};
+  return {rank:RANK_MAP[m[1]]||'',suit:SUIT_MAP[m[2]]||''};
 }
 
 function openCorrect(player){
-  try{
-    correctPlayer=player;
-    var zi=ST.zone_cards[player]||{};
-    document.getElementById('correct-title').textContent=player;
-    document.getElementById('correct-img').src='/zone_snap/'+player+'?'+Date.now();
-    var dh='<div class="detail-row"><span class="detail-label">Recognized</span>'
-      +'<span class="detail-value">'+(zi.card||'--')+'</span></div>'
-      +'<div class="detail-row"><span class="detail-label">YOLO</span>'
-      +'<span class="detail-value">'+(zi.yolo||'--')+' ('+(zi.yolo_conf||0)+'%)</span></div>';
-    if(zi.claude){
-      dh+='<div class="detail-row"><span class="detail-label">Claude AI</span>'
-        +'<span class="detail-value">'+zi.claude+'</span></div>';
-    }
-    document.getElementById('correct-details').innerHTML=dh;
-    // Prepopulate rank/suit from recognized card
-    var parsed=parseCard(zi.card);
-    document.getElementById('correct-rank').value=parsed.rank;
-    document.getElementById('correct-suit').value=parsed.suit;
-    document.getElementById('correct-modal').style.display='block';
-  }catch(err){
-    dbg('openCorrect ERROR: '+err.message);
-  }
-}
-
-function closeCorrect(){
-  document.getElementById('correct-modal').style.display='none';
-  correctPlayer=null;
+  if(!ST) return;
+  correctPlayer=player;
+  var zi=(ST.zone_cards||{})[player]||{};
+  document.getElementById('correct-title').textContent=player+' — tap to correct';
+  document.getElementById('correct-img').src='/zone_snap/'+player+'?t='+Date.now();
+  var parsed=parseCard(zi.card);
+  document.getElementById('correct-rank').value=parsed.rank;
+  document.getElementById('correct-suit').value=parsed.suit;
+  document.getElementById('correct-modal').style.display='block';
 }
 
 function saveCorrection(){
   var rank=document.getElementById('correct-rank').value;
   var suit=document.getElementById('correct-suit').value;
-  if(!rank||!suit){alert('Pick both rank and suit');return}
-  api('/api/console/correct',{corrections:[{player:correctPlayer,rank:rank,suit:suit}]}).then(function(){
-    closeCorrect();
-    refresh();
-  });
+  if(!rank||!suit){alert('Pick both rank and suit');return;}
+  api('/api/console/correct',{corrections:[{player:correctPlayer,rank:rank,suit:suit}]})
+    .then(function(){closeModal('correct-modal');refresh();});
 }
 
-setInterval(refresh,3000);
+function closeModal(id){document.getElementById(id).style.display='none';}
+
+setInterval(refresh,2000);
 refresh();
 </script></body></html>""")
 
@@ -4734,6 +4717,47 @@ refresh();
         if not p.exists(): return self._r(404,"text/plain","Not found")
         self._r(200, "image/jpeg" if p.suffix==".jpg" else "text/plain",
                 p.read_bytes() if p.suffix==".jpg" else p.read_text())
+
+    def _apply_settings(self, s, data):
+        """Apply the Setup modal payload: dealer, players, YOLO min-conf,
+        Pi presence threshold. Every field is optional."""
+        import urllib.request
+        ge = s.game_engine
+        dealer_name = (data.get("dealer") or "").strip()
+        if dealer_name:
+            for i, p2 in enumerate(ge.players):
+                if p2.name.lower() == dealer_name.lower():
+                    ge.dealer_index = i
+                    ge._update_dealer()
+                    log.log(f"[CONSOLE] Dealer set to {p2.name}")
+                    break
+        players = data.get("players")
+        if isinstance(players, list):
+            valid = [n for n in players if n in PLAYER_NAMES]
+            if valid:
+                s.console_active_players = valid
+                log.log(f"[CONSOLE] Active players: {', '.join(valid)}")
+        yolo = data.get("yolo_min_conf")
+        if yolo is not None:
+            try:
+                s.monitor.yolo_min_conf = max(0.0, min(1.0, float(yolo)))
+                log.log(f"[CONSOLE] YOLO min conf → {s.monitor.yolo_min_conf:.2f}")
+            except (TypeError, ValueError):
+                pass
+        presence = data.get("presence_threshold")
+        if presence is not None:
+            try:
+                url = f"{s.pi_base_url.rstrip('/')}/presence_threshold"
+                body = json.dumps({"value": float(presence)}).encode()
+                req = urllib.request.Request(
+                    url, data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=3).read()
+                log.log(f"[CONSOLE] Pi presence_threshold → {presence}")
+            except Exception as e:
+                log.log(f"[CONSOLE] presence_threshold push failed: {e}")
 
     def _proxy_slot_image(self, s, slot_num: int):
         """Proxy the Pi's /slots/<n>/image through Neo so the browser sees
