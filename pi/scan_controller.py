@@ -292,6 +292,9 @@ class AppState:
         # Timer to clear /test_slots feedback LEDs after a few seconds so
         # they don't sit on forever. Each new scan cancels the prior one.
         self._slot_led_off_timer: Timer | None = None
+        # Serialize /test_slots/data so concurrent scans from two browser
+        # tabs don't interleave flash.hold/release or capture_both.
+        self.scan_lock = Lock()
         self.cameras: dict[int, Camera] = {}
         for idx in camera_indices:
             self.cameras[idx] = Camera(idx)
@@ -500,6 +503,15 @@ def test_slots_data():
     once YOLO recognizes it above SLOT_LED_GOOD_CONF, otherwise stays
     blinking so the user can see which slot needs attention.
     """
+    assert _state is not None
+    # Serialize: multiple browser tabs hitting /test_slots at once
+    # would otherwise race on flash.hold()/release() and capture_both().
+    # Second caller just waits for the first scan to finish.
+    with _state.scan_lock:
+        return _test_slots_data_locked()
+
+
+def _test_slots_data_locked():
     assert _state is not None
     # Start all slot LEDs blinking during warmup + capture.
     for led in _state.slot_leds.values():
@@ -1973,7 +1985,7 @@ def main():
     _state = AppState(camera_indices=indices)
 
     log.info(f"Listening on http://{args.host}:{args.port}")
-    app.run(host=args.host, port=args.port, debug=False)
+    app.run(host=args.host, port=args.port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
