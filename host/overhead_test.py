@@ -1686,6 +1686,10 @@ def _pi_poll_stop(s):
 
 GUIDED_GOOD_CONF = 0.50   # at/above this, auto-accept the scan
 GUIDED_POLL_S = 0.6       # interval between /slots/<n>/scan polls
+# Require this many consecutive present=true scans before firing a verify
+# modal. The first presence hit is often a finger or a half-inserted card;
+# YOLO can't see it yet. A high-confidence scan short-circuits this wait.
+GUIDED_STABLE_SCANS = 3
 
 
 def _pi_slot_led(s, slot_num: int, state: str):
@@ -1742,6 +1746,12 @@ def _guided_deal_loop(s):
     for n in range(1, N + 1):
         _pi_slot_led(s, n, "on" if n == 1 else "off")
 
+    # Per-slot debounce state: how many consecutive present=true scans
+    # we've seen, and the best card guess from any of them. Reset on
+    # either present=false (card/finger withdrawn) or after we commit.
+    stable_count = 0
+    best_card = None
+
     while True:
         gd = s.guided_deal
         if gd is None:
@@ -1770,6 +1780,8 @@ def _guided_deal_loop(s):
                 s.table_state_version += 1
             if expecting + 1 <= N:
                 _pi_slot_led(s, expecting + 1, "on")
+            stable_count = 0
+            best_card = None
             continue
 
         if waiting_verify:
@@ -1782,13 +1794,21 @@ def _guided_deal_loop(s):
             continue
 
         if not result.get("present"):
+            stable_count = 0
+            best_card = None
             time.sleep(GUIDED_POLL_S)
             continue
 
+        stable_count += 1
         card = result.get("card")
         if card:
             conf = float(card.get("confidence", 0.0))
+            # Track the best (highest-conf) guess across debounce scans.
+            if best_card is None or conf > float(best_card.get("confidence", 0.0)):
+                best_card = card
             code = f"{card['rank']}{card['suit'][0]}"
+            # Short-circuit: any scan above the auto-accept threshold commits
+            # immediately, no need to wait for more stability.
             if conf >= GUIDED_GOOD_CONF:
                 with s.table_lock:
                     s.rodney_downs[expecting] = {
@@ -1803,38 +1823,49 @@ def _guided_deal_loop(s):
                 _pi_slot_led(s, expecting, "off")
                 if expecting + 1 <= N:
                     _pi_slot_led(s, expecting + 1, "on")
+                stable_count = 0
+                best_card = None
                 continue
-            # Low confidence: blink LED + open the verify modal.
-            with s.table_lock:
-                s.pending_verify = {
-                    "slot": expecting,
-                    "guess": {
-                        "rank": card["rank"],
-                        "suit": card["suit"],
-                        "confidence": round(conf, 2),
-                    },
-                    "prompt": (
-                        f"Slot {expecting}: low confidence ({int(conf*100)}%). "
-                        f"Confirm or correct."
-                    ),
-                    "image_url": f"/api/table/slot_image/{expecting}",
-                }
-                s.slot_pending[expecting] = dict(s.pending_verify["guess"])
-                s.table_state_version += 1
-            _table_log_add(s, f"Slot {expecting}: verify needed ({int(conf*100)}%)")
-            _pi_slot_led(s, expecting, "blink")
+
+        # Low-conf or no-card: give the card time to settle before popping
+        # the verify modal. Early "present" ticks from a finger or a half-
+        # inserted card would otherwise fire the modal with empty fields.
+        if stable_count < GUIDED_STABLE_SCANS:
+            time.sleep(GUIDED_POLL_S)
+            continue
+
+        # Debounce window elapsed without a high-confidence read.
+        if best_card is not None:
+            conf = float(best_card.get("confidence", 0.0))
+            guess = {
+                "rank": best_card["rank"],
+                "suit": best_card["suit"],
+                "confidence": round(conf, 2),
+            }
+            prompt = (
+                f"Slot {expecting}: low confidence ({int(conf*100)}%). "
+                f"Confirm or correct."
+            )
         else:
-            # Present but YOLO returned nothing — manual entry.
-            with s.table_lock:
-                s.pending_verify = {
-                    "slot": expecting,
-                    "guess": {"rank": "", "suit": "", "confidence": 0.0},
-                    "prompt": f"Slot {expecting}: card present, not recognized.",
-                    "image_url": f"/api/table/slot_image/{expecting}",
-                }
-                s.table_state_version += 1
-            _table_log_add(s, f"Slot {expecting}: not recognized — verify needed")
-            _pi_slot_led(s, expecting, "blink")
+            guess = {"rank": "", "suit": "", "confidence": 0.0}
+            prompt = f"Slot {expecting}: card present, not recognized."
+
+        with s.table_lock:
+            s.pending_verify = {
+                "slot": expecting,
+                "guess": guess,
+                "prompt": prompt,
+                "image_url": f"/api/table/slot_image/{expecting}",
+            }
+            if guess["rank"]:
+                s.slot_pending[expecting] = dict(guess)
+            s.table_state_version += 1
+        _table_log_add(
+            s,
+            f"Slot {expecting}: verify needed"
+            + (f" ({int(guess['confidence']*100)}%)" if guess["rank"] else ""),
+        )
+        _pi_slot_led(s, expecting, "blink")
 
 
 def _start_guided_deal(s, num_slots: int):
@@ -4708,6 +4739,7 @@ refresh();
         """Proxy the Pi's /slots/<n>/image through Neo so the browser sees
         a same-origin URL. Avoids cross-origin/HTTPS-upgrade issues that
         leave the verify modal showing a broken-image placeholder."""
+        import urllib.request
         url = f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/image"
         try:
             with urllib.request.urlopen(url, timeout=8) as resp:
