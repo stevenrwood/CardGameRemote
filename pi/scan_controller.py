@@ -62,12 +62,13 @@ SLOT_LED_PINS = {1: 17, 2: 27, 3: 22, 4: 23, 5: 24}
 BUZZER_GPIO = 26  # reserved for future audio feedback
 # Confidence at/above which /test_slots treats a slot as a clean recognition.
 SLOT_LED_GOOD_CONF = 0.50
-# Default stddev threshold (of grayscale crop) for slot-presence detection.
-# Empty slots reflect the flash uniformly → near-zero stddev. A card's
-# pips/rank/suit/borders produce much higher variance. Persisted +
-# runtime-tunable from /test_slots.
+# Presence detection is brightness-based: the scanner box has an open top,
+# so an EMPTY slot shows the bright ceiling and reads high mean grayscale.
+# A card blocks that ceiling light and the slot reads noticeably dimmer.
+# present = mean_brightness < SLOT_PRESENCE_BRIGHTNESS_CEILING.
+# Persisted + runtime-tunable from /test_slots.
 SLOT_PRESENCE_FILE = Path(__file__).parent / "slot_presence.txt"
-DEFAULT_PRESENCE_STDDEV = 25.0
+DEFAULT_PRESENCE_BRIGHTNESS = 125.0
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("scan")
@@ -355,10 +356,10 @@ class AppState:
         try:
             return float(SLOT_PRESENCE_FILE.read_text().strip())
         except Exception:
-            return DEFAULT_PRESENCE_STDDEV
+            return DEFAULT_PRESENCE_BRIGHTNESS
 
     def set_presence_threshold(self, value: float):
-        # stddev of uint8 grayscale is bounded by 127.5, but clamp generously.
+        # uint8 mean grayscale is 0-255.
         self.presence_threshold = max(0.0, min(255.0, float(value)))
         try:
             SLOT_PRESENCE_FILE.write_text(f"{self.presence_threshold:.1f}\n")
@@ -580,7 +581,9 @@ def _test_slots_data_locked():
             continue
         crops_cache[slot["slot"]] = crop.copy()
         brightness, stddev = _slot_metrics(crop)
-        present = stddev >= _state.presence_threshold
+        # Empty slot = bright ceiling visible → brightness high.
+        # Card blocks the ceiling → brightness lower.
+        present = brightness < _state.presence_threshold
         entry["brightness"] = round(brightness, 1)
         entry["stddev"] = round(stddev, 1)
         entry["present"] = present
@@ -696,11 +699,11 @@ td img{max-width:80px;max-height:140px;border:1px solid #444;border-radius:4px;b
 <h1>Slot Scanner Test</h1>
 <div><button onclick="run()">Scan All Slots</button><span id="status" style="color:#aaa;margin-left:12px">—</span></div>
 <div style="margin:10px 0;font-size:.95em">
-  <label>Presence stddev threshold:</label>
-  <input id="thresh" type="number" min="0" max="127" step="1" value="25"
+  <label>Presence brightness ceiling:</label>
+  <input id="thresh" type="number" min="0" max="255" step="1" value="125"
          style="width:70px;padding:4px;background:#0d1b2a;color:#fff;border:1px solid #333;border-radius:4px;margin:0 6px"/>
   <button onclick="saveThresh()">Save</button>
-  <span style="color:#aaa;margin-left:10px">Empty slot = uniform = low stddev. Card = pips/ink = high stddev.</span>
+  <span style="color:#aaa;margin-left:10px">Empty slot = ceiling visible = bright. Card blocks it = dimmer. Present if brightness &lt; threshold.</span>
 </div>
 <table id="tbl">
   <thead><tr>
@@ -861,7 +864,7 @@ def scan_slot(slot_num: int):
     if crop.size == 0:
         return jsonify({"ok": False, "error": "crop out of bounds"}), 500
     brightness, stddev = _slot_metrics(crop)
-    present = stddev >= _state.presence_threshold
+    present = brightness < _state.presence_threshold
     card = None
     if present and _state.yolo and _state.yolo.available:
         pred = _state.yolo.predict(crop)
