@@ -1925,6 +1925,10 @@ def _start_guided_deal(s, num_slots: int):
     with s.table_lock:
         s.guided_deal = {"expecting": 1, "num_slots": num_slots}
         s.table_state_version += 1
+    # Hold the flash on for the whole guided session so every /slots/<n>/scan
+    # runs under steady lighting without the 300ms warmup each pulse. The
+    # Pi's capture_with_flash short-circuits its own warmup when flash.held.
+    _pi_flash(s, True)
     t = Thread(target=_guided_deal_loop, args=(s,), daemon=True)
     s.guided_deal_thread = t
     t.start()
@@ -1941,6 +1945,8 @@ def _stop_guided_deal(s):
         s.table_state_version += 1
     for n in range(1, N + 1):
         _pi_slot_led(s, n, "off")
+    # Release the held flash; regular poller / idle state will manage it.
+    _pi_flash(s, False)
 
 
 def _enqueue_down_card_verifies(s):
