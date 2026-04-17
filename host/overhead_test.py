@@ -1351,11 +1351,22 @@ def _build_table_state(s):
             dict(s.guided_deal) if s.guided_deal is not None else None
         ),
         "draw": {
+            # Can mark during betting round 1 (pre-selection) and during
+            # the draw phase itself (final adjustments).
             "can_mark": (
-                s.console_state == "betting"
-                and _game_has_draw_phase(ge)
+                _game_has_draw_phase(ge)
                 and not s.rodney_drew_this_hand
-                and s.console_betting_round == 1
+                and (
+                    (s.console_state == "betting"
+                     and s.console_betting_round == 1)
+                    or s.console_state == "draw"
+                )
+            ),
+            # Request Cards button only appears in draw state — when the
+            # dealer has pressed "Pot is right" and it's Rodney's turn.
+            "can_request": (
+                s.console_state == "draw"
+                and not s.rodney_drew_this_hand
             ),
             "max_marks": _max_draw_for_game(ge),
             "marked_slots": sorted(s.rodney_marked_slots),
@@ -2035,7 +2046,10 @@ def _guided_replace_loop(s):
                 s.table_state_version += 1
                 if s.console_state == "replacing":
                     s.console_state = "betting"
-                    log.log("[CONSOLE] Draw replacement done → betting")
+                    s.console_betting_round = 2
+                    log.log(
+                        "[CONSOLE] Draw replacement done → betting round 2"
+                    )
             return
         expecting = slots[idx]
 
@@ -3127,18 +3141,18 @@ function renderPlayer(p) {
   box.appendChild(head);
   box.appendChild(cardRow);
 
-  // Request-cards row for Rodney's box while a draw is pending.
-  if (canMark) {
+  // Request-cards row: only visible in the "draw" state once the dealer
+  // has pressed Pot is right. Pre-selection during betting still shows
+  // the mark ✗ badges but the button doesn't appear until it's the draw.
+  if (drawState.can_request && p.is_remote) {
     var row = document.createElement('div');
     row.id = 'draw-request-row';
     var btn = document.createElement('button');
     btn.id = 'draw-request-btn';
     var count = (drawState.marked_slots || []).length;
-    var max = drawState.max_marks || 0;
     btn.textContent = count
       ? ('Request ' + count + ' card' + (count === 1 ? '' : 's'))
-      : ('Tap cards to replace (max ' + max + ')');
-    btn.disabled = count === 0;
+      : 'Stand pat (no cards)';
     btn.onclick = function() { requestCards(); };
     row.appendChild(btn);
     box.appendChild(row);
@@ -3691,14 +3705,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 }))
 
         elif p == "/api/table/request_cards":
-            # Rodney submits his mark list. LEDs light those slots,
-            # rodney_downs cleared for them, guided replace flow starts.
+            # Rodney submits his draw choice. With 0 marks the hand skips
+            # straight to betting round 2; with 1+ marks the slots clear,
+            # LEDs light, and the guided replace flow starts.
             if s.rodney_drew_this_hand:
                 self._r(400, "application/json",
                         '{"ok":false,"error":"draw already taken"}')
-            elif not s.rodney_marked_slots:
-                self._r(400, "application/json",
-                        '{"ok":false,"error":"no cards marked"}')
             else:
                 slots_to_replace = sorted(s.rodney_marked_slots)
                 with s.table_lock:
@@ -3708,12 +3720,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.rodney_marked_slots = set()
                     s.rodney_drew_this_hand = True
                     s.table_state_version += 1
-                _table_log_add(s,
-                    f"Rodney requested {len(slots_to_replace)} card(s): "
-                    f"slots {slots_to_replace}"
-                )
-                log.log(f"[CONSOLE] Rodney draw: replacing slots {slots_to_replace}")
-                _start_guided_replace(s, slots_to_replace)
+                if slots_to_replace:
+                    _table_log_add(s,
+                        f"Rodney requested {len(slots_to_replace)} card(s): "
+                        f"slots {slots_to_replace}"
+                    )
+                    log.log(f"[CONSOLE] Rodney draw: replacing slots "
+                            f"{slots_to_replace}")
+                    _start_guided_replace(s, slots_to_replace)
+                else:
+                    # Rodney stood pat — skip directly to betting round 2.
+                    _table_log_add(s, "Rodney stood pat (no cards replaced)")
+                    log.log("[CONSOLE] Rodney stood pat → betting round 2")
+                    with s.table_lock:
+                        s.console_state = "betting"
+                        s.console_betting_round = 2
+                        s.table_state_version += 1
                 self._r(200, "application/json", json.dumps({
                     "ok": True, "slots": slots_to_replace,
                 }))
@@ -3776,11 +3798,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # loop finishes. Enabled when up cards are expected.
                 action_enabled = has_up
             elif s.console_state == "betting":
-                rnd = max(1, s.console_up_round)
+                rnd = s.console_betting_round or max(1, s.console_up_round)
                 phase_label = f"Betting (round {rnd})"
                 action_label = "Pot is right"
                 action_endpoint = "/api/console/next_round"
                 action_enabled = True
+            elif s.console_state == "draw":
+                phase_label = "Draw — Rodney picking"
+                action_label = ""
+                action_endpoint = ""
+                action_enabled = False
+            elif s.console_state == "replacing":
+                phase_label = "Replacing Rodney's cards"
+                action_label = ""
+                action_endpoint = ""
+                action_enabled = False
             elif s.console_state == "hand_over":
                 phase_label = "Hand over"
                 action_label = "New Hand"
@@ -4045,20 +4077,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ge = s.game_engine
             # All-down games (5 Card Draw, 3 Toed Pete) track betting rounds
             # independently from console_up_round because they have no up
-            # rounds. For 5CD: round 1 Pot-is-right → round 2; round 2
-            # Pot-is-right → hand_over.
+            # rounds. 5CD flow:
+            #   betting round 1 + Pot-is-right → draw state (Rodney's Request
+            #     Cards button appears on /table; marking still enabled)
+            #   replacement completes → betting round 2
+            #   betting round 2 + Pot-is-right → hand_over
             if s.console_total_up_rounds == 0 and s.console_betting_round > 0:
                 has_draw = _game_has_draw_phase(ge)
-                if has_draw and s.console_betting_round == 1:
-                    s.console_betting_round = 2
-                    s.console_state = "betting"
-                    # Rodney can only draw once; block further marks.
-                    s.rodney_drew_this_hand = True
-                    log.log("[CONSOLE] Betting round 1 done → betting round 2")
+                if (has_draw and s.console_betting_round == 1
+                        and not s.rodney_drew_this_hand):
+                    s.console_state = "draw"
+                    log.log("[CONSOLE] Betting round 1 done → draw phase")
                     with s.table_lock:
                         s.table_state_version += 1
                     return self._r(200, "application/json", json.dumps({
-                        "ok": True, "betting_round": 2,
+                        "ok": True, "state": "draw",
                     }))
                 # Round 2 of a draw game, or single-betting all-down game.
                 s.console_state = "hand_over"
