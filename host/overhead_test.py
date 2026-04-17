@@ -802,18 +802,12 @@ def _console_watch_dealer(s, frame):
         return
 
     if phase == "settling":
-        if time.time() - s.console_settle_time < 2.0:
+        if time.time() - s.console_settle_time < CONSOLE_SETTLE_S:
             return
-        # Re-verify the dealer's zone still has a card. A hand passing over
-        # the zone while dealing to another player triggers an initial
-        # motion event but leaves no card; re-checking at the end of the 2s
-        # settle catches that and puts us back in watching mode without
-        # firing the whole-table scan prematurely.
-        recheck = s.monitor.check_single(frame, dealer_zone)
-        if recheck is None:
-            log.log(f"[CONSOLE] {dealer_name}'s zone empty after settle — false alarm, resuming watch")
-            s.console_scan_phase = "watching"
-            return
+        # Trust the initial motion trigger — don't re-verify. The old 2s
+        # re-check rejected real cards when auto-exposure drifted the
+        # per-pixel diff below threshold. YOLO already filters hand-only
+        # pass-overs by returning "No card" for the whole zone.
         log.log("[CONSOLE] Scanning all active zones")
         zone_crops = {}
         for z in s.cal.zones:
@@ -1214,6 +1208,8 @@ def _build_table_state(s):
 
     players = []
     for p in ge.players:
+        if p.name not in s.console_active_players:
+            continue
         up_cards = list(up_by_player.get(p.name, []))
         if not up_cards and s.monitor:
             # Only show latest scan if we don't already have history for this player.
@@ -1788,6 +1784,11 @@ GUIDED_STABLE_SCANS = 3
 # scan reading. Gives the dealer time to fully seat the card so YOLO isn't
 # fighting motion blur on the first capture.
 GUIDED_SETTLE_S = 1.0
+
+# After the overhead (Brio) camera trips a motion event in the dealer zone,
+# wait this long before firing the whole-table scan. Kept short: most cards
+# are dealt with a single flick and settle in well under a second.
+CONSOLE_SETTLE_S = 0.7
 
 
 def _pi_slot_led(s, slot_num: int, state: str):
