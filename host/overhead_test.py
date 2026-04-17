@@ -1128,6 +1128,14 @@ class AppState:
         # High-level console state machine surfaced to the UI.
         # "idle" | "dealing" | "betting" | "hand_over"
         self.console_state = "idle"
+        # 5 Card Draw / draw-phase support: Rodney marks cards during
+        # betting (a set of slot numbers). When he hits "Request cards",
+        # those slots' LEDs light up and guided flow refills them. One
+        # draw per hand. betting_round distinguishes pre-draw vs post-draw
+        # for games with two betting rounds.
+        self.rodney_marked_slots: set[int] = set()
+        self.rodney_drew_this_hand = False
+        self.console_betting_round = 0
         self.table_lock = Lock()       # guards rodney_downs / pending_verify / table_log
         self.pi_confidence_threshold = 0.70  # >= this → auto-accept
         # The Pi's template matcher returns low-but-nonzero confidence for
@@ -1342,6 +1350,17 @@ def _build_table_state(s):
         "guided_deal": (
             dict(s.guided_deal) if s.guided_deal is not None else None
         ),
+        "draw": {
+            "can_mark": (
+                s.console_state == "betting"
+                and _game_has_draw_phase(ge)
+                and not s.rodney_drew_this_hand
+                and s.console_betting_round == 1
+            ),
+            "max_marks": _max_draw_for_game(ge),
+            "marked_slots": sorted(s.rodney_marked_slots),
+            "drew_this_hand": s.rodney_drew_this_hand,
+        },
     }
 
 
@@ -1802,7 +1821,18 @@ def _guided_deal_loop(s):
             # a manual Confirm Cards click.
             if s.console_state == "dealing" and s.console_total_up_rounds == 0:
                 s.console_state = "betting"
-                log.log("[CONSOLE] All-down deal complete → betting")
+                if s.console_betting_round == 0:
+                    s.console_betting_round = 1
+                log.log(
+                    f"[CONSOLE] All-down deal complete → "
+                    f"betting round {s.console_betting_round}"
+                )
+            elif s.console_state == "replacing":
+                # Draw-phase refill just completed — back to the current
+                # betting round (round 1 still — dealer will Pot-is-right
+                # to advance to round 2 once everyone has drawn).
+                s.console_state = "betting"
+                log.log("[CONSOLE] Draw replacement complete → betting")
             return
 
         # Was this slot's verify modal just resolved? Advance if so.
@@ -1939,14 +1969,195 @@ def _stop_guided_deal(s):
     gd = s.guided_deal
     if gd is None:
         return
-    N = gd.get("num_slots", 0)
+    # The guided_deal dict carries either "num_slots" (full deal) or "slots"
+    # (explicit list, used by draw-phase replacement). Turn everything off.
+    slots = gd.get("slots") or list(range(1, gd.get("num_slots", 0) + 1))
     with s.table_lock:
         s.guided_deal = None
         s.table_state_version += 1
-    for n in range(1, N + 1):
+    for n in slots:
         _pi_slot_led(s, n, "off")
     # Release the held flash; regular poller / idle state will manage it.
     _pi_flash(s, False)
+
+
+def _start_guided_replace(s, slots: list[int]):
+    """Kick off the guided loop for a specific slot list (draw-phase
+    replacement). Same as _start_guided_deal but iterates through the
+    supplied slot numbers in order rather than 1..N."""
+    if s.guided_deal is not None:
+        return
+    ordered = [int(x) for x in slots if isinstance(x, int) or str(x).isdigit()]
+    ordered = sorted(set(ordered))
+    if not ordered:
+        return
+    with s.table_lock:
+        s.guided_deal = {"slots": ordered, "index": 0}
+        s.console_state = "replacing"
+        s.table_state_version += 1
+    _pi_flash(s, True)
+    t = Thread(target=_guided_replace_loop, args=(s,), daemon=True)
+    s.guided_deal_thread = t
+    t.start()
+
+
+def _guided_replace_loop(s):
+    """Variant of _guided_deal_loop driven by an explicit slot list.
+    LEDs light in the order given; cleared rodney_downs entries refill
+    as new cards are scanned."""
+    gd = s.guided_deal
+    if gd is None or "slots" not in gd:
+        return
+    slots = list(gd["slots"])
+    log.log(f"[GUIDED/replace] Started — slots {slots}")
+    # Light every slot in the replacement list so the dealer can see
+    # which ones need new cards; current expected slot solid, others
+    # blink so dealer-focus is obvious but remaining slots are still
+    # visible.
+    for i, n in enumerate(slots):
+        _pi_slot_led(s, n, "on" if i == 0 else "blink")
+    stable_count = 0
+    best_card = None
+    settled = False
+
+    while True:
+        gd = s.guided_deal
+        if gd is None:
+            log.log("[GUIDED/replace] Stopped externally")
+            return
+        idx = gd.get("index", 0)
+        if idx >= len(slots):
+            for n in slots:
+                _pi_slot_led(s, n, "off")
+            log.log("[GUIDED/replace] Complete — all replacements in")
+            with s.table_lock:
+                s.guided_deal = None
+                s.table_state_version += 1
+                if s.console_state == "replacing":
+                    s.console_state = "betting"
+                    log.log("[CONSOLE] Draw replacement done → betting")
+            return
+        expecting = slots[idx]
+
+        with s.table_lock:
+            already_filled = expecting in s.rodney_downs
+            pv = s.pending_verify
+            waiting_verify = pv is not None and pv.get("slot") == expecting
+
+        if already_filled:
+            _pi_slot_led(s, expecting, "off")
+            with s.table_lock:
+                gd["index"] = idx + 1
+                s.table_state_version += 1
+            if idx + 1 < len(slots):
+                _pi_slot_led(s, slots[idx + 1], "on")
+            stable_count = 0
+            best_card = None
+            settled = False
+            continue
+
+        if waiting_verify:
+            time.sleep(0.3)
+            continue
+
+        result = _pi_slot_scan(s, expecting)
+        if result is None:
+            time.sleep(1.5)
+            continue
+
+        if not result.get("present"):
+            stable_count = 0
+            best_card = None
+            settled = False
+            time.sleep(GUIDED_POLL_S)
+            continue
+
+        if not settled:
+            time.sleep(GUIDED_SETTLE_S)
+            settled = True
+            continue
+
+        stable_count += 1
+        card = result.get("card")
+        if card:
+            conf = float(card.get("confidence", 0.0))
+            if best_card is None or conf > float(best_card.get("confidence", 0.0)):
+                best_card = card
+            code = f"{card['rank']}{card['suit'][0]}"
+            if conf >= GUIDED_GOOD_CONF:
+                with s.table_lock:
+                    s.rodney_downs[expecting] = {
+                        "rank": card["rank"],
+                        "suit": card["suit"],
+                        "confidence": round(conf, 2),
+                    }
+                    s.pi_prev_slots[expecting] = code
+                    gd["index"] = idx + 1
+                    s.table_state_version += 1
+                _table_log_add(s, f"Slot {expecting} (replace): {code} (auto, {int(conf*100)}%)")
+                _pi_slot_led(s, expecting, "off")
+                if idx + 1 < len(slots):
+                    _pi_slot_led(s, slots[idx + 1], "on")
+                stable_count = 0
+                best_card = None
+                settled = False
+                continue
+
+        if stable_count < GUIDED_STABLE_SCANS:
+            time.sleep(GUIDED_POLL_S)
+            continue
+
+        if best_card is not None:
+            conf = float(best_card.get("confidence", 0.0))
+            guess = {
+                "rank": best_card["rank"],
+                "suit": best_card["suit"],
+                "confidence": round(conf, 2),
+            }
+            prompt = (
+                f"Slot {expecting} (replacement): low confidence "
+                f"({int(conf*100)}%). Confirm or correct."
+            )
+        else:
+            guess = {"rank": "", "suit": "", "confidence": 0.0}
+            prompt = f"Slot {expecting} (replacement): not recognized."
+
+        with s.table_lock:
+            s.pending_verify = {
+                "slot": expecting,
+                "guess": guess,
+                "prompt": prompt,
+                "image_url": f"/api/table/slot_image/{expecting}",
+            }
+            if guess["rank"]:
+                s.slot_pending[expecting] = dict(guess)
+            s.table_state_version += 1
+        _pi_slot_led(s, expecting, "blink")
+
+
+def _game_has_draw_phase(ge) -> bool:
+    """True if the current game has a DRAW phase somewhere in its template."""
+    try:
+        from game_engine import PhaseType
+        if ge.current_game is None:
+            return False
+        return any(ph.type == PhaseType.DRAW for ph in ge.current_game.phases)
+    except Exception:
+        return False
+
+
+def _max_draw_for_game(ge) -> int:
+    """Max cards Rodney can replace in the (first) DRAW phase of this game."""
+    try:
+        from game_engine import PhaseType
+        if ge.current_game is None:
+            return 0
+        for ph in ge.current_game.phases:
+            if ph.type == PhaseType.DRAW:
+                return int(getattr(ph, "max_draw", 0) or 0)
+    except Exception:
+        pass
+    return 0
 
 
 def _enqueue_down_card_verifies(s):
@@ -2641,6 +2852,12 @@ header button:hover{background:#1a5a9a}
 .card img{width:100%;height:100%;display:block;object-fit:contain;background:#fff}
 .card.offset-down{transform:translateY(10px)}
 .card.missing{background:#1a3a5a;display:flex;align-items:center;justify-content:center;color:#eee;font-size:.8em}
+.card.markable{cursor:pointer}
+.card.marked{outline:3px solid #ffb74d;outline-offset:-1px;opacity:.55}
+.card.marked::after{content:'✗';position:absolute;top:4px;right:6px;color:#ffb74d;font-size:1.4em;font-weight:800;text-shadow:0 0 4px #000}
+#draw-request-row{margin:10px 0;text-align:center}
+#draw-request-btn{padding:10px 22px;font-size:1em;font-weight:600;background:#b26b00;color:#fff;border:none;border-radius:8px;cursor:pointer}
+#draw-request-btn:disabled{opacity:.5}
 
 /* Verify modal */
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;
@@ -2757,7 +2974,8 @@ function cardImgUrl(rank, suit) {
   return '/cards/' + r + '_of_' + suit + '.svg';
 }
 
-function cardEl(card) {
+function cardEl(card, opts) {
+  opts = opts || {};
   var el = document.createElement('div');
   el.className = 'card';
   if (card.type === 'down' && (card.hidden || !card.rank)) {
@@ -2775,6 +2993,16 @@ function cardEl(card) {
   img.src = url;
   img.alt = (card.rank || '') + (SUIT_SYM[card.suit] || '');
   el.appendChild(img);
+  // Rodney's draw-phase marking: when can_mark and this is a down card
+  // backed by a slot, tapping toggles the mark.
+  if (opts.markable && card.type === 'down' && card.slot) {
+    el.classList.add('markable');
+    if (opts.marked) el.classList.add('marked');
+    el.onclick = function(ev) {
+      ev.stopPropagation();
+      toggleMark(card.slot, !opts.marked);
+    };
+  }
   return el;
 }
 
@@ -2814,6 +3042,24 @@ function toggleFold(name, currentlyFolded) {
   fetch('/api/table/fold', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({player: name, folded: !currentlyFolded})
+  });
+}
+
+function toggleMark(slot, markOn) {
+  fetch('/api/table/mark', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({slot: slot, marked: markOn})
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if (d && !d.ok && d.error) console.warn('mark failed:', d.error);
+  });
+}
+
+function requestCards() {
+  fetch('/api/table/request_cards', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({})
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if (d && !d.ok && d.error) alert('Request failed: ' + d.error);
   });
 }
 
@@ -2864,11 +3110,39 @@ function renderPlayer(p) {
   var cardRow = document.createElement('div');
   cardRow.className = 'cards';
   var cards = sortCards(buildCards(p), mode);
-  cards.forEach(function(c){ cardRow.appendChild(cardEl(c)); });
+  var drawState = (window._lastState && window._lastState.draw) || {};
+  var canMark = !!drawState.can_mark && p.is_remote;
+  var markedSet = {};
+  (drawState.marked_slots || []).forEach(function(s){ markedSet[s] = true; });
+  cards.forEach(function(c){
+    var opts = {};
+    if (canMark) {
+      opts.markable = true;
+      opts.marked = !!(c.slot && markedSet[c.slot]);
+    }
+    cardRow.appendChild(cardEl(c, opts));
+  });
 
   box.innerHTML = '';
   box.appendChild(head);
   box.appendChild(cardRow);
+
+  // Request-cards row for Rodney's box while a draw is pending.
+  if (canMark) {
+    var row = document.createElement('div');
+    row.id = 'draw-request-row';
+    var btn = document.createElement('button');
+    btn.id = 'draw-request-btn';
+    var count = (drawState.marked_slots || []).length;
+    var max = drawState.max_marks || 0;
+    btn.textContent = count
+      ? ('Request ' + count + ' card' + (count === 1 ? '' : 's'))
+      : ('Tap cards to replace (max ' + max + ')');
+    btn.disabled = count === 0;
+    btn.onclick = function() { requestCards(); };
+    row.appendChild(btn);
+    box.appendChild(row);
+  }
 
   // After layout settles, fan the cards: each card after the first
   // overlaps its neighbor so only ~22px of the underlying card's left
@@ -2906,12 +3180,24 @@ function render(state) {
   var gd = state.guided_deal;
   var banner = document.getElementById('guided-banner');
   if (gd) {
-    var n = gd.expecting;
-    var N = gd.num_slots;
-    if (n <= N) {
-      banner.textContent = 'Dealing: place card in slot ' + n + ' of ' + N;
+    if (gd.slots) {
+      // Replacement flow: explicit slot list + index into it.
+      var idx = gd.index || 0;
+      var slots = gd.slots;
+      if (idx < slots.length) {
+        banner.textContent = 'Replacement: place card in slot ' + slots[idx]
+          + ' (' + (idx + 1) + ' of ' + slots.length + ')';
+      } else {
+        banner.textContent = 'Replacement done';
+      }
     } else {
-      banner.textContent = 'All ' + N + ' cards in';
+      var n = gd.expecting;
+      var N = gd.num_slots;
+      if (n <= N) {
+        banner.textContent = 'Dealing: place card in slot ' + n + ' of ' + N;
+      } else {
+        banner.textContent = 'All ' + N + ' cards in';
+      }
     }
     banner.style.display = 'block';
   } else {
@@ -3370,6 +3656,68 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 resp["error"] = err
             self._r(200, "application/json", json.dumps(resp))
 
+        elif p == "/api/table/mark":
+            # Rodney toggles a slot's "to replace" mark during betting.
+            # Body: {"slot": N, "marked": true/false}
+            try:
+                slot_num = int(data.get("slot", 0))
+            except (TypeError, ValueError):
+                slot_num = 0
+            marked = bool(data.get("marked", False))
+            if slot_num <= 0 or slot_num not in s.rodney_downs:
+                self._r(400, "application/json",
+                        '{"ok":false,"error":"invalid slot"}')
+            elif s.rodney_drew_this_hand:
+                self._r(400, "application/json",
+                        '{"ok":false,"error":"draw already taken this hand"}')
+            else:
+                ge = s.game_engine
+                max_marks = _max_draw_for_game(ge)
+                with s.table_lock:
+                    if marked:
+                        if len(s.rodney_marked_slots) >= max_marks and \
+                                slot_num not in s.rodney_marked_slots:
+                            self._r(400, "application/json",
+                                    json.dumps({"ok": False,
+                                                "error": f"max {max_marks} cards"}))
+                            return
+                        s.rodney_marked_slots.add(slot_num)
+                    else:
+                        s.rodney_marked_slots.discard(slot_num)
+                    s.table_state_version += 1
+                self._r(200, "application/json", json.dumps({
+                    "ok": True,
+                    "marked_slots": sorted(s.rodney_marked_slots),
+                }))
+
+        elif p == "/api/table/request_cards":
+            # Rodney submits his mark list. LEDs light those slots,
+            # rodney_downs cleared for them, guided replace flow starts.
+            if s.rodney_drew_this_hand:
+                self._r(400, "application/json",
+                        '{"ok":false,"error":"draw already taken"}')
+            elif not s.rodney_marked_slots:
+                self._r(400, "application/json",
+                        '{"ok":false,"error":"no cards marked"}')
+            else:
+                slots_to_replace = sorted(s.rodney_marked_slots)
+                with s.table_lock:
+                    for slot in slots_to_replace:
+                        s.rodney_downs.pop(slot, None)
+                        s.pi_prev_slots.pop(slot, None)
+                    s.rodney_marked_slots = set()
+                    s.rodney_drew_this_hand = True
+                    s.table_state_version += 1
+                _table_log_add(s,
+                    f"Rodney requested {len(slots_to_replace)} card(s): "
+                    f"slots {slots_to_replace}"
+                )
+                log.log(f"[CONSOLE] Rodney draw: replacing slots {slots_to_replace}")
+                _start_guided_replace(s, slots_to_replace)
+                self._r(200, "application/json", json.dumps({
+                    "ok": True, "slots": slots_to_replace,
+                }))
+
         # --- Console (dealer phone UI) ---
 
         elif p == "/api/console/state":
@@ -3605,6 +3953,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.pi_prev_slots = {}
                     s.folded_players = set()
                     s.freezes = {name: 0 for name in s.console_active_players}
+                    s.rodney_marked_slots = set()
+                    s.rodney_drew_this_hand = False
+                    s.console_betting_round = 0
                     s.table_state_version += 1
                 # Make sure any stale guided session from a prior hand is gone.
                 _stop_guided_deal(s)
@@ -3692,6 +4043,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/next_round":
             ge = s.game_engine
+            # All-down games (5 Card Draw, 3 Toed Pete) track betting rounds
+            # independently from console_up_round because they have no up
+            # rounds. For 5CD: round 1 Pot-is-right → round 2; round 2
+            # Pot-is-right → hand_over.
+            if s.console_total_up_rounds == 0 and s.console_betting_round > 0:
+                has_draw = _game_has_draw_phase(ge)
+                if has_draw and s.console_betting_round == 1:
+                    s.console_betting_round = 2
+                    s.console_state = "betting"
+                    # Rodney can only draw once; block further marks.
+                    s.rodney_drew_this_hand = True
+                    log.log("[CONSOLE] Betting round 1 done → betting round 2")
+                    with s.table_lock:
+                        s.table_state_version += 1
+                    return self._r(200, "application/json", json.dumps({
+                        "ok": True, "betting_round": 2,
+                    }))
+                # Round 2 of a draw game, or single-betting all-down game.
+                s.console_state = "hand_over"
+                log.log("[CONSOLE] All-down betting complete → hand_over")
+                with s.table_lock:
+                    s.table_state_version += 1
+                return self._r(200, "application/json", json.dumps({
+                    "ok": True, "state": "hand_over",
+                }))
             # Advance round counter
             s.console_up_round += 1
             beyond_last_up = (
