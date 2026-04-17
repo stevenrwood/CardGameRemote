@@ -1883,6 +1883,16 @@ def _guided_deal_loop(s):
                 # to advance to round 2 once everyone has drawn).
                 s.console_state = "betting"
                 log.log("[CONSOLE] Draw replacement complete → betting")
+            elif (s.console_state == "dealing"
+                  and s.console_total_up_rounds > 0
+                  and s.console_scan_phase == "idle"):
+                # Mixed game (7CS, Hold'em, FTQ): initial downs are in,
+                # now hand off to Brio to watch for the up card(s).
+                if s.cal.ok and s.latest_frame is not None:
+                    s.monitor.capture_baselines(s.latest_frame)
+                    s.monitoring = True
+                    s.console_scan_phase = "watching"
+                    log.log("[CONSOLE] Guided downs done → Brio watching dealer zone")
             return
 
         # Was this slot's verify modal just resolved? Advance if so.
@@ -2958,6 +2968,7 @@ header button:hover{background:#1a5a9a}
 .modal button{flex:1;padding:12px;border:none;border-radius:8px;cursor:pointer;font-weight:600}
 .btn-green{background:#1b5e20;color:#fff}
 .btn-red{background:#b71c1c;color:#fff}
+.btn-blue{background:#0f3460;color:#fff}
 </style></head><body>
 <header>
   <div class="group">
@@ -3033,6 +3044,7 @@ header button:hover{background:#1a5a9a}
     <div class="buttons">
       <button class="btn-green" onclick="confirmVerify()">Accept guess</button>
       <button class="btn-red" onclick="overrideVerify()">Use my values</button>
+      <button class="btn-blue" onclick="rescanVerify()">Rescan</button>
     </div>
   </div>
 </div>
@@ -3341,15 +3353,16 @@ function render(state) {
     var gtxt = g.rank ? (g.rank + (SUIT_SYM[g.suit] || '')) : '—';
     if (g.confidence != null) gtxt += ' (' + Math.round(g.confidence * 100) + '%)';
     document.getElementById('verify-guess').textContent = 'Guess: ' + gtxt;
-    // Pre-populate dropdowns with the guess so a simple correction (e.g.
-    // changing only the suit) takes one tap. Only seed on (re)open, not
-    // every render, so user input isn't clobbered mid-edit.
-    if (!modal.classList.contains('show')) {
+    var img = document.getElementById('verify-scan');
+    // Refresh the scan image + seed selects on (re)open and whenever the
+    // backend bumps rescan_id (user pressed Rescan and a new guess arrived).
+    var rkey = (pv.slot || 0) + ':' + (pv.rescan_id || 0);
+    if (modal.dataset.rkey !== rkey) {
+      modal.dataset.rkey = rkey;
       document.getElementById('verify-rank').value = g.rank || '';
       document.getElementById('verify-suit').value = g.suit || '';
-      var img = document.getElementById('verify-scan');
       if (pv.image_url) {
-        img.src = pv.image_url + '?t=' + Date.now();
+        img.src = pv.image_url + '?v=' + rkey + '&t=' + Date.now();
         img.style.display = 'inline-block';
       } else {
         img.style.display = 'none';
@@ -3357,6 +3370,7 @@ function render(state) {
     }
     modal.classList.add('show');
   } else {
+    document.getElementById('verify-modal').dataset.rkey = '';
     modal.classList.remove('show');
   }
 }
@@ -3402,6 +3416,14 @@ function overrideVerify() {
     body: JSON.stringify({action:'override', rank: rank, suit: suit})
   }).then(function(r){return r.json()}).then(function(d) {
     if (!d.ok) alert('Override failed: ' + (d.error || 'unknown'));
+  });
+}
+function rescanVerify() {
+  fetch('/api/table/verify', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({action:'rescan'})
+  }).then(function(r){return r.json()}).then(function(d) {
+    if (!d.ok) alert('Rescan failed: ' + (d.error || 'unknown'));
   });
 }
 
@@ -3735,6 +3757,55 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         ok = _resolve_verify(s, parsed)
                     else:
                         err = "invalid rank/suit"
+            elif action == "rescan":
+                pv = s.pending_verify
+                if not pv:
+                    err = "no active verify"
+                else:
+                    slot = pv.get("slot")
+                    result = _pi_slot_scan(s, slot) if slot else None
+                    if result is None:
+                        err = "pi unreachable"
+                    elif not result.get("present"):
+                        new_guess = {"rank": "", "suit": "", "confidence": 0.0}
+                        new_prompt = f"Slot {slot}: rescan — no card present."
+                        with s.table_lock:
+                            pv["guess"] = new_guess
+                            pv["prompt"] = new_prompt
+                            pv["rescan_id"] = int(pv.get("rescan_id", 0)) + 1
+                            s.slot_pending.pop(slot, None)
+                            s.table_state_version += 1
+                        ok = True
+                    else:
+                        card = result.get("card") or {}
+                        conf = float(card.get("confidence", 0.0))
+                        if card.get("rank") and card.get("suit"):
+                            new_guess = {
+                                "rank": card["rank"],
+                                "suit": card["suit"],
+                                "confidence": round(conf, 2),
+                            }
+                            new_prompt = (
+                                f"Slot {slot} rescan: {int(conf*100)}%. "
+                                f"Confirm or correct."
+                            )
+                            with s.table_lock:
+                                pv["guess"] = new_guess
+                                pv["prompt"] = new_prompt
+                                pv["rescan_id"] = int(pv.get("rescan_id", 0)) + 1
+                                s.slot_pending[slot] = dict(new_guess)
+                                s.table_state_version += 1
+                            ok = True
+                        else:
+                            new_guess = {"rank": "", "suit": "", "confidence": 0.0}
+                            new_prompt = f"Slot {slot}: rescan — card not recognized."
+                            with s.table_lock:
+                                pv["guess"] = new_guess
+                                pv["prompt"] = new_prompt
+                                pv["rescan_id"] = int(pv.get("rescan_id", 0)) + 1
+                                s.slot_pending.pop(slot, None)
+                                s.table_state_version += 1
+                            ok = True
             else:
                 err = "bad action"
             resp = {"ok": ok}
@@ -4029,14 +4100,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         elif phase.type.value == "community":
                             up_rounds += 1
                 s.console_total_up_rounds = up_rounds
-                # Start watching dealer's zone for card placement — but only
-                # if the game has up-card rounds. All-down games (5 Card Draw)
-                # go entirely through the Pi scanner; no overhead monitoring.
-                if up_rounds != 0 and s.cal.ok and s.latest_frame is not None:
-                    s.monitor.capture_baselines(s.latest_frame)
-                    s.monitoring = True
-                    s.console_scan_phase = "watching"
-                    log.log("[CONSOLE] Watching dealer zone for first card")
                 log.log(f"[CONSOLE] New hand: {game_name}, dealer: {result['dealer']}")
                 if result.get("wild_label"):
                     log.log(f"[CONSOLE] {result['wild_label']}")
@@ -4048,6 +4111,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.pi_offline = not pi_up
                 s.pi_flash_held = False  # reset our tracker regardless
                 log.log(f"[PI] Deal-time ping: {'reachable' if pi_up else 'OFFLINE (suppressing calls)'}")
+                # Brio watching starts once every initial down card is in
+                # and validated. While the dealer is still dealing downs,
+                # his hand sweeps over local-player zones and trips false
+                # motion events. Guided-deal completion is the trigger that
+                # hands off to the monitor — here we just flag "monitor
+                # enabled" and idle the scan phase. For games with no
+                # leading downs, or when the Pi is offline (no guided),
+                # start watching immediately.
+                leading_downs = _initial_down_count(ge)
+                will_guide = leading_downs > 0 and not s.pi_offline
+                if up_rounds != 0 and s.cal.ok and s.latest_frame is not None:
+                    s.monitoring = True
+                    if will_guide:
+                        s.console_scan_phase = "idle"
+                        log.log("[CONSOLE] Brio watching deferred until initial down cards are validated")
+                    else:
+                        s.monitor.capture_baselines(s.latest_frame)
+                        s.console_scan_phase = "watching"
+                        log.log("[CONSOLE] Watching dealer zone for first card")
                 # Start the hand fresh: clear Rodney-side state and turn the
                 # scanner LEDs on so the initial down cards get good scans.
                 with s.table_lock:
@@ -4070,10 +4152,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Use the slot-by-slot guided flow for the leading down cards
                 # in the first deal phase — 2 for 7 Card Stud, 2 for Hold'em,
                 # 3 for Follow the Queen, 5 for 5 Card Draw. Games with up
-                # cards in the same phase have the Brio still watching in
-                # parallel; guided just owns the scanner slots for downs.
-                leading_downs = _initial_down_count(ge)
-                if leading_downs > 0 and not s.pi_offline:
+                # cards in the same phase start Brio watching only after
+                # guided completes, so dealer hand motion over local zones
+                # during down-card dealing doesn't trip false alarms.
+                if will_guide:
                     _start_guided_deal(s, leading_downs)
                 else:
                     _update_flash_for_deal_state(s)
