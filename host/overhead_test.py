@@ -1136,6 +1136,12 @@ class AppState:
         self.rodney_marked_slots: set[int] = set()
         self.rodney_drew_this_hand = False
         self.console_betting_round = 0
+        # Games with a trailing down card (7 Card Stud's 7th street, FTQ's
+        # final down): after the last up round's Pot-is-right we run a second
+        # guided session for that down slot. This flag, once set, means the
+        # next Pot-is-right goes straight to hand_over instead of starting
+        # trailing deal again.
+        self.console_trailing_done = False
         self.table_lock = Lock()       # guards rodney_downs / pending_verify / table_log
         self.pi_confidence_threshold = 0.70  # >= this → auto-accept
         # The Pi's template matcher returns low-but-nonzero confidence for
@@ -1465,6 +1471,38 @@ def _total_downs_in_pattern(ge):
         if ph.type in allowed:
             n += sum(1 for t in ph.pattern if t == "down")
     return n
+
+
+def _initial_down_count(ge):
+    """Number of down cards in the FIRST deal phase's pattern.
+
+    7-Card Stud's ['down','down','up'] → 2; Hold'em's ['down','down'] → 2;
+    5 Card Draw's ['down']*5 → 5; Follow the Queen → 3. These are the slots
+    the scanner box guides through at Deal-time. Any remaining downs
+    (7CS/FTQ 7th street) are handled as a trailing guided session after
+    the final up round.
+    """
+    if ge.current_game is None:
+        return 0
+    allowed = _dealing_phase_types()
+    for ph in ge.current_game.phases:
+        if ph.type in allowed:
+            return sum(1 for t in ph.pattern if t == "down")
+    return 0
+
+
+def _trailing_down_slots(ge):
+    """Slot numbers for down cards beyond the initial deal phase.
+
+    For 7CS (3 total downs, 2 initial) → [3]. For FTQ similarly → [4].
+    For 5CD / Hold'em → [] (no trailing downs). These slots are guided
+    after the final up round's Pot-is-right.
+    """
+    total = _total_downs_in_pattern(ge)
+    initial = _initial_down_count(ge)
+    if total <= initial:
+        return []
+    return list(range(initial + 1, total + 1))
 
 
 def _table_log_add(s, msg):
@@ -2003,8 +2041,28 @@ def _start_guided_replace(s, slots: list[int]):
     if not ordered:
         return
     with s.table_lock:
-        s.guided_deal = {"slots": ordered, "index": 0}
+        s.guided_deal = {"slots": ordered, "index": 0, "mode": "replace"}
         s.console_state = "replacing"
+        s.table_state_version += 1
+    _pi_flash(s, True)
+    t = Thread(target=_guided_replace_loop, args=(s,), daemon=True)
+    s.guided_deal_thread = t
+    t.start()
+
+
+def _start_guided_trailing_deal(s, slots: list[int]):
+    """Kick off guided flow for trailing down cards (7 Card Stud's 7th
+    street, Follow the Queen's 7th). Console stays in 'dealing' until the
+    loop finishes, then transitions to 'betting' for one final Pot-is-right
+    before hand_over."""
+    if s.guided_deal is not None:
+        return
+    ordered = sorted(set(int(x) for x in slots if isinstance(x, int) or str(x).isdigit()))
+    if not ordered:
+        return
+    with s.table_lock:
+        s.guided_deal = {"slots": ordered, "index": 0, "mode": "trailing"}
+        s.console_state = "dealing"
         s.table_state_version += 1
     _pi_flash(s, True)
     t = Thread(target=_guided_replace_loop, args=(s,), daemon=True)
@@ -2015,16 +2073,20 @@ def _start_guided_replace(s, slots: list[int]):
 def _guided_replace_loop(s):
     """Variant of _guided_deal_loop driven by an explicit slot list.
     LEDs light in the order given; cleared rodney_downs entries refill
-    as new cards are scanned."""
+    as new cards are scanned.
+
+    Shared by draw-phase replacement (mode='replace') and the trailing-down
+    deal for stud games (mode='trailing'); only the completion transition
+    differs."""
     gd = s.guided_deal
     if gd is None or "slots" not in gd:
         return
     slots = list(gd["slots"])
-    log.log(f"[GUIDED/replace] Started — slots {slots}")
-    # Light every slot in the replacement list so the dealer can see
-    # which ones need new cards; current expected slot solid, others
-    # blink so dealer-focus is obvious but remaining slots are still
-    # visible.
+    mode = gd.get("mode", "replace")
+    log.log(f"[GUIDED/{mode}] Started — slots {slots}")
+    # Light every slot in the list so the dealer can see which ones are
+    # pending; current expected slot solid, others blink. Trailing mode
+    # is usually a single slot so only the solid LED shows.
     for i, n in enumerate(slots):
         _pi_slot_led(s, n, "on" if i == 0 else "blink")
     stable_count = 0
@@ -2034,17 +2096,26 @@ def _guided_replace_loop(s):
     while True:
         gd = s.guided_deal
         if gd is None:
-            log.log("[GUIDED/replace] Stopped externally")
+            log.log(f"[GUIDED/{mode}] Stopped externally")
             return
         idx = gd.get("index", 0)
         if idx >= len(slots):
             for n in slots:
                 _pi_slot_led(s, n, "off")
-            log.log("[GUIDED/replace] Complete — all replacements in")
+            log.log(f"[GUIDED/{mode}] Complete")
             with s.table_lock:
                 s.guided_deal = None
                 s.table_state_version += 1
-                if s.console_state == "replacing":
+                if mode == "trailing":
+                    # 7CS/FTQ 7th street done — one more betting round before
+                    # hand_over. console_trailing_done tells next_round to
+                    # skip the trailing branch second time through.
+                    s.console_state = "betting"
+                    s.console_trailing_done = True
+                    log.log(
+                        "[CONSOLE] Trailing down deal complete → final betting"
+                    )
+                elif s.console_state == "replacing":
                     s.console_state = "betting"
                     s.console_betting_round = 2
                     log.log(
@@ -3794,9 +3865,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 phase_label = "Dealing"
                 action_label = "Confirm Cards"
                 action_endpoint = "/api/console/confirm"
-                # Disabled for all-down rounds — auto-advances when guided
-                # loop finishes. Enabled when up cards are expected.
-                action_enabled = has_up
+                # Disabled for all-down rounds (auto-advances when guided
+                # finishes) and whenever a guided session is in flight so
+                # the dealer can't commit up cards mid-deal for the
+                # leading-down guided flow in stud games.
+                action_enabled = has_up and s.guided_deal is None
             elif s.console_state == "betting":
                 rnd = s.console_betting_round or max(1, s.console_up_round)
                 phase_label = f"Betting (round {rnd})"
@@ -3988,19 +4061,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.rodney_marked_slots = set()
                     s.rodney_drew_this_hand = False
                     s.console_betting_round = 0
+                    s.console_trailing_done = False
                     s.table_state_version += 1
                 # Make sure any stale guided session from a prior hand is gone.
                 _stop_guided_deal(s)
                 s.console_state = "dealing"
-                # All-down games (5 Card Draw, 3 Toed Pete) use the slot-by-
-                # slot guided flow instead of polling /slots. Guided mode owns
-                # the Pi scanner until the last slot is filled or End Hand is
-                # pressed. Games with up-cards or hit-rounds stick with the
-                # existing polling flow since those already work.
-                all_down = up_rounds == 0 and not has_hit_round
-                num_downs = _total_downs_in_pattern(ge)
-                if all_down and num_downs > 0 and not s.pi_offline:
-                    _start_guided_deal(s, num_downs)
+                # Use the slot-by-slot guided flow for the leading down cards
+                # in the first deal phase — 2 for 7 Card Stud, 2 for Hold'em,
+                # 3 for Follow the Queen, 5 for 5 Card Draw. Games with up
+                # cards in the same phase have the Brio still watching in
+                # parallel; guided just owns the scanner slots for downs.
+                leading_downs = _initial_down_count(ge)
+                if leading_downs > 0 and not s.pi_offline:
+                    _start_guided_deal(s, leading_downs)
                 else:
                     _update_flash_for_deal_state(s)
                 self._r(200, "application/json", json.dumps(result))
@@ -4101,16 +4174,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._r(200, "application/json", json.dumps({
                     "ok": True, "state": "hand_over",
                 }))
+            # If trailing guided has already run this hand, this Pot-is-right
+            # is the final betting round's — go to hand_over without touching
+            # up_round / baselines.
+            if s.console_trailing_done:
+                s.console_scan_phase = "idle"
+                s.console_state = "hand_over"
+                log.log("[CONSOLE] Final betting done → hand_over")
+                with s.table_lock:
+                    s.table_state_version += 1
+                return self._r(200, "application/json", json.dumps({
+                    "ok": True, "state": "hand_over",
+                }))
             # Advance round counter
             s.console_up_round += 1
             beyond_last_up = (
                 s.console_total_up_rounds > 0
                 and s.console_up_round >= s.console_total_up_rounds
             )
+            # If we've finished all up rounds AND the game has trailing down
+            # cards (7CS 7th, FTQ 7th), start a guided session for those
+            # slots rather than jumping to hand_over.
+            trailing = _trailing_down_slots(ge) if beyond_last_up else []
+            if beyond_last_up and trailing and not s.pi_offline:
+                s.console_scan_phase = "idle"
+                log.log(
+                    f"[CONSOLE] All up rounds done — starting trailing "
+                    f"down deal for slots {trailing}"
+                )
+                _start_guided_trailing_deal(s, trailing)
+                # State was set to "dealing" inside the starter; bump the
+                # version so /table and /api/console/state re-fetch.
+                with s.table_lock:
+                    s.table_state_version += 1
+                return self._r(200, "application/json", json.dumps({
+                    "hand": ge.get_hand_state(),
+                    "up_round": s.console_up_round,
+                    "total_up_rounds": s.console_total_up_rounds,
+                }))
             # Recapture baselines and resume watching dealer — but only if
             # there's still an up round ahead. If we've finished all up
-            # rounds, sit idle so zone watching doesn't fire on games that
-            # have only a trailing down card (FTQ's 7th) left.
+            # rounds with no trailing downs, the hand is over.
             if s.cal.ok and s.latest_frame is not None:
                 s.monitor.capture_baselines(s.latest_frame)
                 for z in s.cal.zones:
@@ -4151,6 +4255,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s.console_hand_cards = []
             s.console_up_round = 0
             s.console_total_up_rounds = 0
+            s.console_trailing_done = False
             s.monitoring = False
             s.console_scan_phase = "idle"
             s.console_state = "idle"
