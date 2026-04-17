@@ -3188,8 +3188,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         elif phase.type.value == "community":
                             up_rounds += 1
                 s.console_total_up_rounds = up_rounds
-                # Start watching dealer's zone for card placement
-                if s.cal.ok and s.latest_frame is not None:
+                # Start watching dealer's zone for card placement — but only
+                # if the game has up-card rounds. All-down games (5 Card Draw)
+                # go entirely through the Pi scanner; no overhead monitoring.
+                if up_rounds != 0 and s.cal.ok and s.latest_frame is not None:
                     s.monitor.capture_baselines(s.latest_frame)
                     s.monitoring = True
                     s.console_scan_phase = "watching"
