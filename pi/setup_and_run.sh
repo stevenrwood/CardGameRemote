@@ -76,7 +76,8 @@ After=network.target comitup.service
 Type=simple
 User=${RUN_USER}
 WorkingDirectory=${PI_DIR}
-ExecStart=/usr/bin/python3 ${PI_DIR}/scan_controller.py
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u ${PI_DIR}/scan_controller.py
 Restart=always
 RestartSec=3
 StandardOutput=journal
