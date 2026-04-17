@@ -1716,6 +1716,10 @@ GUIDED_POLL_S = 0.6       # interval between /slots/<n>/scan polls
 # modal. The first presence hit is often a finger or a half-inserted card;
 # YOLO can't see it yet. A high-confidence scan short-circuits this wait.
 GUIDED_STABLE_SCANS = 3
+# After first detecting a card in the slot, wait this long before using any
+# scan reading. Gives the dealer time to fully seat the card so YOLO isn't
+# fighting motion blur on the first capture.
+GUIDED_SETTLE_S = 1.0
 
 
 def _pi_slot_led(s, slot_num: int, state: str):
@@ -1777,6 +1781,7 @@ def _guided_deal_loop(s):
     # either present=false (card/finger withdrawn) or after we commit.
     stable_count = 0
     best_card = None
+    settled = False  # True after GUIDED_SETTLE_S has elapsed since first present
 
     while True:
         gd = s.guided_deal
@@ -1815,6 +1820,7 @@ def _guided_deal_loop(s):
                 _pi_slot_led(s, expecting + 1, "on")
             stable_count = 0
             best_card = None
+            settled = False
             continue
 
         if waiting_verify:
@@ -1829,7 +1835,16 @@ def _guided_deal_loop(s):
         if not result.get("present"):
             stable_count = 0
             best_card = None
+            settled = False
             time.sleep(GUIDED_POLL_S)
+            continue
+
+        # First scan that sees "present" — the card may still be sliding
+        # into place. Wait GUIDED_SETTLE_S before trusting any reading so
+        # YOLO isn't hitting motion blur or a half-inserted card.
+        if not settled:
+            time.sleep(GUIDED_SETTLE_S)
+            settled = True
             continue
 
         stable_count += 1
@@ -1858,6 +1873,7 @@ def _guided_deal_loop(s):
                     _pi_slot_led(s, expecting + 1, "on")
                 stable_count = 0
                 best_card = None
+                settled = False
                 continue
 
         # Low-conf or no-card: give the card time to settle before popping
