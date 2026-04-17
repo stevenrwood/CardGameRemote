@@ -57,8 +57,9 @@ REFERENCE_DIR = Path(__file__).parent / "card_recognition" / "reference"
 YOLO_MODEL_PATH = Path(__file__).parent / "models" / "pi_card_detector.pt"
 CALIBRATION_FILE = Path(__file__).parent / "slot_calibration.json"
 NUM_SLOTS = 5
-# Per-slot green status LED (BCM pins). Matches user's Pi 4B pinout diagram.
-SLOT_LED_PINS = {1: 17, 2: 27, 3: 22, 4: 23, 5: 24}
+# Per-slot green status LED (BCM pins). Wired in reverse on the physical
+# scanner box: slot 1 is actually on GPIO 24 and slot 5 on GPIO 17.
+SLOT_LED_PINS = {1: 24, 2: 23, 3: 22, 4: 27, 5: 17}
 BUZZER_GPIO = 26  # reserved for future audio feedback
 # Confidence at/above which /test_slots treats a slot as a clean recognition.
 SLOT_LED_GOOD_CONF = 0.50
