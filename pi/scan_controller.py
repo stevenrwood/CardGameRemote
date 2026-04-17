@@ -62,6 +62,11 @@ SLOT_LED_PINS = {1: 17, 2: 27, 3: 22, 4: 23, 5: 24}
 BUZZER_GPIO = 26  # reserved for future audio feedback
 # Confidence at/above which /test_slots treats a slot as a clean recognition.
 SLOT_LED_GOOD_CONF = 0.50
+# Default brightness threshold (0-255 mean of grayscale crop) for slot-
+# presence detection. A card lit by the flash reads much brighter than the
+# empty slot floor. Persisted + runtime-tunable from the /test_slots page.
+SLOT_PRESENCE_FILE = Path(__file__).parent / "slot_presence.txt"
+DEFAULT_PRESENCE_BRIGHTNESS = 60.0
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("scan")
@@ -281,6 +286,17 @@ class Camera:
 
 # ---- App state ----
 
+def _slot_metrics(crop_bgr: np.ndarray) -> tuple[float, float]:
+    """Return (mean_brightness, stddev) of a slot crop in grayscale.
+    An empty slot under flash reads ~dark + low-variance (just the slot
+    floor); a card reads much brighter + higher variance (pips/ink)."""
+    if crop_bgr is None or crop_bgr.size == 0:
+        return 0.0, 0.0
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+    mean_val, std_val = cv2.meanStdDev(gray)
+    return float(mean_val[0][0]), float(std_val[0][0])
+
+
 class AppState:
     def __init__(self, camera_indices: list[int]):
         self.flash = Flash(FLASH_GPIO)
@@ -316,6 +332,8 @@ class AppState:
         self.test_slot_crops = {}  # slot_num -> BGR crop from last /test_slots/data
         self.test_slot_stamp = 0
         self.calibration = self._load_calibration()
+        self.presence_threshold = self._load_presence_threshold()
+        log.info(f"Slot presence threshold: {self.presence_threshold:.1f}")
         log.info(f"Scan controller ready with {len(self.cameras)} cameras; "
                  f"{len(self.calibration.get('slots', []))}/{NUM_SLOTS} slots calibrated")
 
@@ -331,6 +349,19 @@ class AppState:
         self.calibration = data
         CALIBRATION_FILE.write_text(json.dumps(data, indent=2))
         log.info(f"Calibration saved: {len(data.get('slots', []))} slots")
+
+    def _load_presence_threshold(self) -> float:
+        try:
+            return float(SLOT_PRESENCE_FILE.read_text().strip())
+        except Exception:
+            return DEFAULT_PRESENCE_BRIGHTNESS
+
+    def set_presence_threshold(self, value: float):
+        self.presence_threshold = max(0.0, min(255.0, float(value)))
+        try:
+            SLOT_PRESENCE_FILE.write_text(f"{self.presence_threshold:.1f}\n")
+        except Exception as e:
+            log.warning(f"Could not persist presence threshold: {e}")
 
     # Minimum time the flash needs to be on before the sensor reads a
     # consistently-exposed frame. LED drivers and the rail take a couple of
@@ -546,30 +577,39 @@ def _test_slots_data_locked():
             results.append(entry)
             continue
         crops_cache[slot["slot"]] = crop.copy()
+        brightness, stddev = _slot_metrics(crop)
+        present = brightness >= _state.presence_threshold
+        entry["brightness"] = round(brightness, 1)
+        entry["stddev"] = round(stddev, 1)
+        entry["present"] = present
         t0 = time.time()
         rank = suit = None
         conf = 0.0
         source = "none"
-        if _state.yolo and _state.yolo.available:
-            pred = _state.yolo.predict(crop)
-            if pred is not None:
-                rank, suit, conf = pred
-                source = "yolo"
-        if rank is None:
-            if _state.detector.has_any_slot_templates():
-                res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
-                fallback_source = "tmpl"
-            else:
-                res = _state.detector.identify(crop)
-                fallback_source = "corner"
-            if res is not None:
-                rank, suit, conf = res.rank, res.suit, float(res.confidence)
-                source = fallback_source
+        # Skip YOLO entirely when the crop looks empty — saves inference
+        # time and prevents noisy low-conf detections from polluting state.
+        if present:
+            if _state.yolo and _state.yolo.available:
+                pred = _state.yolo.predict(crop)
+                if pred is not None:
+                    rank, suit, conf = pred
+                    source = "yolo"
+            if rank is None:
+                if _state.detector.has_any_slot_templates():
+                    res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
+                    fallback_source = "tmpl"
+                else:
+                    res = _state.detector.identify(crop)
+                    fallback_source = "corner"
+                if res is not None:
+                    rank, suit, conf = res.rank, res.suit, float(res.confidence)
+                    source = fallback_source
         ms = round((time.time() - t0) * 1000)
         code = f"{rank}{suit[0]}" if rank and suit else "-"
         log.info(
             f"[SCAN/test] slot{slot['slot']} cam{cam_idx} {source} "
-            f"{code} conf={conf:.2f} {ms}ms"
+            f"{code} conf={conf:.2f} bright={brightness:.1f} "
+            f"present={present} {ms}ms"
         )
         entry["source"] = source
         if rank is not None:
@@ -577,15 +617,18 @@ def _test_slots_data_locked():
             entry["rank"] = rank
             entry["suit"] = suit
             entry["confidence"] = round(conf, 3)
-        # Update this slot's LED based on confidence.
+        # LED behavior: empty → off, present+good → solid, present+bad → blink.
         slot_led = _state.slot_leds.get(slot["slot"])
-        good = rank is not None and conf >= SLOT_LED_GOOD_CONF
+        good = present and rank is not None and conf >= SLOT_LED_GOOD_CONF
+        bad = present and not good
         if slot_led is not None:
             if good:
                 slot_led.on()
-            else:
+            elif bad:
                 slot_led.blink(on_time=0.25, off_time=0.25)
-        if not good:
+            else:
+                slot_led.off()
+        if bad:
             any_blinking = True
         results.append(entry)
     _state.test_slot_crops = crops_cache
@@ -604,7 +647,11 @@ def _test_slots_data_locked():
     _state._slot_led_off_timer = Timer(10.0, _clear_slot_leds)
     _state._slot_led_off_timer.daemon = True
     _state._slot_led_off_timer.start()
-    return jsonify({"slots": results, "stamp": _state.test_slot_stamp})
+    return jsonify({
+        "slots": results,
+        "stamp": _state.test_slot_stamp,
+        "presence_threshold": _state.presence_threshold,
+    })
 
 
 @app.get("/test_slots/image/<int:slot_num>")
@@ -646,8 +693,17 @@ td img{max-width:80px;max-height:140px;border:1px solid #444;border-radius:4px;b
 </style></head><body>
 <h1>Slot Scanner Test</h1>
 <div><button onclick="run()">Scan All Slots</button><span id="status" style="color:#aaa;margin-left:12px">—</span></div>
+<div style="margin:10px 0;font-size:.95em">
+  <label>Presence brightness threshold:</label>
+  <input id="thresh" type="number" min="0" max="255" step="1" value="60"
+         style="width:70px;padding:4px;background:#0d1b2a;color:#fff;border:1px solid #333;border-radius:4px;margin:0 6px"/>
+  <button onclick="saveThresh()">Save</button>
+  <span style="color:#aaa;margin-left:10px">0-255; lower = easier to mark a slot "present"</span>
+</div>
 <table id="tbl">
-  <thead><tr><th>Slot</th><th>Camera</th><th>Crop</th><th>Recognized</th><th>Confidence</th></tr></thead>
+  <thead><tr>
+    <th>Slot</th><th>Camera</th><th>Crop</th><th>Brightness</th><th>Present</th><th>Recognized</th><th>Confidence</th>
+  </tr></thead>
   <tbody id="rows"></tbody>
 </table>
 <script>
@@ -671,6 +727,9 @@ function run() {
   }, 1000);
   fetch('/test_slots/data').then(function(r){return r.json()}).then(function(d) {
     clearInterval(tick);
+    if (d.presence_threshold != null) {
+      document.getElementById('thresh').value = Math.round(d.presence_threshold);
+    }
     var tbody = document.getElementById('rows');
     tbody.innerHTML = '';
     (d.slots || []).forEach(function(entry) {
@@ -682,6 +741,12 @@ function run() {
       img.src = '/test_slots/image/' + entry.slot + '?t=' + Date.now();
       img.alt = 'slot ' + entry.slot;
       imgTd.appendChild(img);
+      var brightTd = document.createElement('td');
+      brightTd.className = 'conf';
+      brightTd.textContent = (entry.brightness != null) ? entry.brightness : '—';
+      var presentTd = document.createElement('td');
+      presentTd.className = entry.present ? 'good' : 'bad';
+      presentTd.textContent = entry.present ? 'yes' : 'no';
       var cardTd = document.createElement('td');
       if (entry.recognized && entry.rank) {
         cardTd.textContent = entry.rank + (SUIT_SYM[entry.suit] || entry.suit || '');
@@ -695,6 +760,7 @@ function run() {
       confTd.textContent = (entry.confidence != null)
         ? (Math.round(entry.confidence * 100) + '%') : '—';
       tr.appendChild(slotTd); tr.appendChild(camTd); tr.appendChild(imgTd);
+      tr.appendChild(brightTd); tr.appendChild(presentTd);
       tr.appendChild(cardTd); tr.appendChild(confTd);
       tbody.appendChild(tr);
     });
@@ -703,6 +769,22 @@ function run() {
     document.getElementById('status').textContent = 'Error: ' + e;
   });
 }
+
+function saveThresh() {
+  var v = parseFloat(document.getElementById('thresh').value);
+  fetch('/presence_threshold', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({value:v}),
+  }).then(function(r){return r.json()}).then(function(d) {
+    document.getElementById('status').textContent =
+      'Threshold saved: ' + (d.threshold != null ? d.threshold : v);
+  });
+}
+
+// Load current threshold without scanning so field reflects saved value.
+fetch('/presence_threshold').then(function(r){return r.json()}).then(function(d) {
+  if (d.threshold != null) document.getElementById('thresh').value = Math.round(d.threshold);
+});
 run();
 </script>
 </body></html>"""
@@ -727,6 +809,72 @@ def slot_led(slot_num: int):
         led.blink(on_time=0.25, off_time=0.25)
     log.info(f"[LED] Slot {slot_num} → {state}")
     return jsonify({"ok": True, "slot": slot_num, "state": state})
+
+
+@app.get("/presence_threshold")
+def get_presence_threshold():
+    assert _state is not None
+    return jsonify({"threshold": _state.presence_threshold})
+
+
+@app.post("/presence_threshold")
+def post_presence_threshold():
+    assert _state is not None
+    body = request.get_json(silent=True) or {}
+    if "value" not in body:
+        return jsonify({"ok": False, "error": "missing value"}), 400
+    try:
+        _state.set_presence_threshold(float(body["value"]))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "value must be a number"}), 400
+    log.info(f"[CFG] presence_threshold → {_state.presence_threshold:.1f}")
+    return jsonify({"ok": True, "threshold": _state.presence_threshold})
+
+
+@app.post("/slots/<int:slot_num>/scan")
+def scan_slot(slot_num: int):
+    """Capture one slot (with flash), do brightness-based presence check,
+    then run YOLO only if a card is actually there. Intended for the
+    host's guided-dealing flow where it polls a single slot repeatedly
+    until a card appears and is recognized well enough.
+
+    Returns {present, brightness, stddev, card:{rank,suit,confidence}|null}.
+    """
+    assert _state is not None
+    slot = next(
+        (sl for sl in _state.calibration.get("slots", []) if sl["slot"] == slot_num),
+        None,
+    )
+    if slot is None:
+        return jsonify({"ok": False, "error": "not calibrated"}), 404
+    cam_idx = slot.get("camera")
+    if cam_idx not in _state.cameras:
+        return jsonify({"ok": False, "error": "camera not available"}), 500
+    frame = _state.capture_with_flash(cam_idx)
+    x, y, w, h = slot["x"], slot["y"], slot["w"], slot["h"]
+    crop = frame[y:y + h, x:x + w]
+    if crop.size == 0:
+        return jsonify({"ok": False, "error": "crop out of bounds"}), 500
+    brightness, stddev = _slot_metrics(crop)
+    present = brightness >= _state.presence_threshold
+    card = None
+    if present and _state.yolo and _state.yolo.available:
+        pred = _state.yolo.predict(crop)
+        if pred is not None:
+            rank, suit, conf = pred
+            card = {"rank": rank, "suit": suit, "confidence": round(conf, 3)}
+    log.info(
+        f"[SCAN/slot{slot_num}] bright={brightness:.1f} std={stddev:.1f} "
+        f"present={present} card={card}"
+    )
+    return jsonify({
+        "ok": True,
+        "slot": slot_num,
+        "present": present,
+        "brightness": round(brightness, 1),
+        "stddev": round(stddev, 1),
+        "card": card,
+    })
 
 
 @app.get("/calibration")
