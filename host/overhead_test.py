@@ -1445,7 +1445,7 @@ def _promote_next_verify(s) -> bool:
             ),
             "image_url": (
                 None if s.pi_offline
-                else f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/image"
+                else f"/api/table/slot_image/{slot_num}"
             ),
         }
         _table_log_add(s, f"Slot {slot_num}: modal opened for verify")
@@ -2781,6 +2781,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._training_file(p[10:])
         elif p.startswith("/cards/"):
             self._card_asset(p[7:])
+        elif p.startswith("/api/table/slot_image/"):
+            try:
+                slot_n = int(p[len("/api/table/slot_image/"):])
+            except ValueError:
+                return self._r(404, "text/plain", "bad slot")
+            self._proxy_slot_image(s, slot_n)
         else:
             self._r(404,"text/plain","Not found")
 
@@ -4468,6 +4474,26 @@ refresh();
         if not p.exists(): return self._r(404,"text/plain","Not found")
         self._r(200, "image/jpeg" if p.suffix==".jpg" else "text/plain",
                 p.read_bytes() if p.suffix==".jpg" else p.read_text())
+
+    def _proxy_slot_image(self, s, slot_num: int):
+        """Proxy the Pi's /slots/<n>/image through Neo so the browser sees
+        a same-origin URL. Avoids cross-origin/HTTPS-upgrade issues that
+        leave the verify modal showing a broken-image placeholder."""
+        url = f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/image"
+        try:
+            with urllib.request.urlopen(url, timeout=8) as resp:
+                data = resp.read()
+                ct = resp.headers.get("Content-Type", "image/jpeg")
+            self.send_response(200)
+            self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            log.log(f"[TABLE] slot_image proxy failed for slot {slot_num}: "
+                    f"{type(e).__name__}: {e}")
+            self._r(502, "text/plain", "pi image unavailable")
 
     def _card_asset(self, name):
         """Serve a pretty card image (SVG or PNG) from host/static/cards/.
