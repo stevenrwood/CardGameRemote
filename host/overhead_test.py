@@ -1097,6 +1097,11 @@ class AppState:
         self.pi_polling = False
         self.pi_poll_thread = None
         self.pi_prev_slots = {}        # slot_num -> last-seen card code (e.g. "Ac")
+        # Slot-by-slot guided dealing state. None = not guiding; otherwise
+        # {expecting: int, num_slots: int}. Regular _pi_poll_loop skips its
+        # work while this is set.
+        self.guided_deal = None
+        self.guided_deal_thread = None
         self.table_lock = Lock()       # guards rodney_downs / pending_verify / table_log
         self.pi_confidence_threshold = 0.70  # >= this → auto-accept
         # The Pi's template matcher returns low-but-nonzero confidence for
@@ -1308,6 +1313,9 @@ def _build_table_state(s):
         "log": list(s.table_log[-30:]),
         "pending_verify": s.pending_verify,
         "flip_choice": flip_choice,
+        "guided_deal": (
+            dict(s.guided_deal) if s.guided_deal is not None else None
+        ),
     }
 
 
@@ -1553,6 +1561,11 @@ def _pi_poll_loop(s):
     log.log("[PI] poll loop started")
     offline_streak = 0
     while s.pi_polling:
+        # Guided dealing takes exclusive ownership of the scanner for
+        # all-down games. The regular poller idles until guided completes.
+        if s.guided_deal is not None:
+            time.sleep(0.5)
+            continue
         # Only hit the Pi when we're actually expecting a down card to be
         # dealt. Gate on the deal pattern directly (not pi_flash_held) so a
         # failed /flash/hold call doesn't also stop the scan polling.
@@ -1665,6 +1678,189 @@ def _pi_poll_start(s):
 def _pi_poll_stop(s):
     s.pi_polling = False
     # Don't join — daemon thread will exit on its own
+
+
+# ---------------------------------------------------------------------------
+# Guided dealing for all-down games (5 Card Draw, 3 Toed Pete, etc.)
+# ---------------------------------------------------------------------------
+
+GUIDED_GOOD_CONF = 0.50   # at/above this, auto-accept the scan
+GUIDED_POLL_S = 0.6       # interval between /slots/<n>/scan polls
+
+
+def _pi_slot_led(s, slot_num: int, state: str):
+    """POST /slots/<n>/led with state = on | off | blink."""
+    if s.pi_offline:
+        return
+    import urllib.request
+    url = f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/led"
+    body = json.dumps({"state": state}).encode()
+    try:
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=2).read()
+    except Exception as e:
+        log.log(f"[PI] LED slot {slot_num} {state} failed: "
+                f"{type(e).__name__}: {e}")
+
+
+def _pi_slot_scan(s, slot_num: int):
+    """POST /slots/<n>/scan — returns dict (present/card/...) or None on error."""
+    if s.pi_offline:
+        return None
+    import urllib.request
+    url = f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/scan"
+    try:
+        req = urllib.request.Request(url, data=b"", method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        log.log(f"[PI] slot_scan {slot_num} failed: "
+                f"{type(e).__name__}: {e}")
+        return None
+
+
+def _guided_deal_loop(s):
+    """Slot-by-slot dealing for all-down games.
+
+    Turns slot-1 LED on, polls /slots/1/scan until a card is present:
+    if YOLO conf >= GUIDED_GOOD_CONF, record the card + advance; if lower,
+    blink the LED and open the /table verify modal for Rodney to resolve.
+    Strict 1→N order: never looks at slot N+1 until slot N is resolved.
+
+    External code stops the loop by setting s.guided_deal = None.
+    """
+    gd = s.guided_deal
+    if gd is None:
+        return
+    N = gd["num_slots"]
+    log.log(f"[GUIDED] Started — {N} slots")
+    # Initial LED state: slot 1 solid on, the rest off.
+    for n in range(1, N + 1):
+        _pi_slot_led(s, n, "on" if n == 1 else "off")
+
+    while True:
+        gd = s.guided_deal
+        if gd is None:
+            log.log("[GUIDED] Stopped externally")
+            return
+        expecting = gd["expecting"]
+        if expecting > N:
+            for n in range(1, N + 1):
+                _pi_slot_led(s, n, "off")
+            log.log(f"[GUIDED] Complete — {N} slots filled")
+            with s.table_lock:
+                s.guided_deal = None
+                s.table_state_version += 1
+            return
+
+        # Was this slot's verify modal just resolved? Advance if so.
+        with s.table_lock:
+            already_filled = expecting in s.rodney_downs
+            pv = s.pending_verify
+            waiting_verify = pv is not None and pv.get("slot") == expecting
+
+        if already_filled:
+            _pi_slot_led(s, expecting, "off")
+            with s.table_lock:
+                gd["expecting"] = expecting + 1
+                s.table_state_version += 1
+            if expecting + 1 <= N:
+                _pi_slot_led(s, expecting + 1, "on")
+            continue
+
+        if waiting_verify:
+            time.sleep(0.3)
+            continue
+
+        result = _pi_slot_scan(s, expecting)
+        if result is None:
+            time.sleep(1.5)  # Pi unreachable — back off before retrying
+            continue
+
+        if not result.get("present"):
+            time.sleep(GUIDED_POLL_S)
+            continue
+
+        card = result.get("card")
+        if card:
+            conf = float(card.get("confidence", 0.0))
+            code = f"{card['rank']}{card['suit'][0]}"
+            if conf >= GUIDED_GOOD_CONF:
+                with s.table_lock:
+                    s.rodney_downs[expecting] = {
+                        "rank": card["rank"],
+                        "suit": card["suit"],
+                        "confidence": round(conf, 2),
+                    }
+                    s.pi_prev_slots[expecting] = code
+                    gd["expecting"] = expecting + 1
+                    s.table_state_version += 1
+                _table_log_add(s, f"Slot {expecting}: {code} (auto, {int(conf*100)}%)")
+                _pi_slot_led(s, expecting, "off")
+                if expecting + 1 <= N:
+                    _pi_slot_led(s, expecting + 1, "on")
+                continue
+            # Low confidence: blink LED + open the verify modal.
+            with s.table_lock:
+                s.pending_verify = {
+                    "slot": expecting,
+                    "guess": {
+                        "rank": card["rank"],
+                        "suit": card["suit"],
+                        "confidence": round(conf, 2),
+                    },
+                    "prompt": (
+                        f"Slot {expecting}: low confidence ({int(conf*100)}%). "
+                        f"Confirm or correct."
+                    ),
+                    "image_url": f"/api/table/slot_image/{expecting}",
+                }
+                s.slot_pending[expecting] = dict(s.pending_verify["guess"])
+                s.table_state_version += 1
+            _table_log_add(s, f"Slot {expecting}: verify needed ({int(conf*100)}%)")
+            _pi_slot_led(s, expecting, "blink")
+        else:
+            # Present but YOLO returned nothing — manual entry.
+            with s.table_lock:
+                s.pending_verify = {
+                    "slot": expecting,
+                    "guess": {"rank": "", "suit": "", "confidence": 0.0},
+                    "prompt": f"Slot {expecting}: card present, not recognized.",
+                    "image_url": f"/api/table/slot_image/{expecting}",
+                }
+                s.table_state_version += 1
+            _table_log_add(s, f"Slot {expecting}: not recognized — verify needed")
+            _pi_slot_led(s, expecting, "blink")
+
+
+def _start_guided_deal(s, num_slots: int):
+    """Kick off the guided deal thread. Safe to call again; becomes no-op
+    if a guided deal is already running."""
+    if s.guided_deal is not None:
+        return
+    with s.table_lock:
+        s.guided_deal = {"expecting": 1, "num_slots": num_slots}
+        s.table_state_version += 1
+    t = Thread(target=_guided_deal_loop, args=(s,), daemon=True)
+    s.guided_deal_thread = t
+    t.start()
+
+
+def _stop_guided_deal(s):
+    """Signal the guided loop to exit and clear LEDs."""
+    gd = s.guided_deal
+    if gd is None:
+        return
+    N = gd.get("num_slots", 0)
+    with s.table_lock:
+        s.guided_deal = None
+        s.table_state_version += 1
+    for n in range(1, N + 1):
+        _pi_slot_led(s, n, "off")
 
 
 def _enqueue_down_card_verifies(s):
@@ -2386,6 +2582,10 @@ header button:hover{background:#1a5a9a}
   </div>
 </header>
 
+<div id="guided-banner"
+     style="display:none;background:#1b4d2a;color:#e8f5e9;padding:8px 14px;
+            text-align:center;font-weight:600;letter-spacing:.02em"></div>
+
 <div class="table">
   <div class="row top">
     <div class="hand-box" id="box-Bill"></div>
@@ -2616,6 +2816,21 @@ function render(state) {
     tot ? (cur + ' of ' + tot) : (cur ? String(cur) : '—');
   var wilds = state.game.wild_ranks || [];
   document.getElementById('wilds-info').textContent = wilds.length ? wilds.join(', ') : '—';
+
+  var gd = state.guided_deal;
+  var banner = document.getElementById('guided-banner');
+  if (gd) {
+    var n = gd.expecting;
+    var N = gd.num_slots;
+    if (n <= N) {
+      banner.textContent = 'Dealing: place card in slot ' + n + ' of ' + N;
+    } else {
+      banner.textContent = 'All ' + N + ' cards in';
+    }
+    banner.style.display = 'block';
+  } else {
+    banner.style.display = 'none';
+  }
 
   // Render every configured box; missing players just get cleared.
   ['Bill','David','Steve','Joe','Rodney'].forEach(function(nm) {
@@ -2933,6 +3148,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._r(200, "application/json", '{"ok":true,"polling":false}')
 
         elif p == "/api/table/reset_hand":
+            _stop_guided_deal(s)
             with s.table_lock:
                 s.rodney_downs = {}
                 s.rodney_flipped_up = None
@@ -3225,7 +3441,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.folded_players = set()
                     s.freezes = {name: 0 for name in s.console_active_players}
                     s.table_state_version += 1
-                _update_flash_for_deal_state(s)
+                # Make sure any stale guided session from a prior hand is gone.
+                _stop_guided_deal(s)
+                # All-down games (5 Card Draw, 3 Toed Pete) use the slot-by-
+                # slot guided flow instead of polling /slots. Guided mode owns
+                # the Pi scanner until the last slot is filled or End Hand is
+                # pressed. Games with up-cards or hit-rounds stick with the
+                # existing polling flow since those already work.
+                all_down = up_rounds == 0 and not has_hit_round
+                num_downs = _total_downs_in_pattern(ge)
+                if all_down and num_downs > 0 and not s.pi_offline:
+                    _start_guided_deal(s, num_downs)
+                else:
+                    _update_flash_for_deal_state(s)
                 self._r(200, "application/json", json.dumps(result))
 
         elif p == "/api/console/confirm":
@@ -3338,6 +3566,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             }))
 
         elif p == "/api/console/end":
+            _stop_guided_deal(s)
             ge = s.game_engine
             result = ge.end_hand()
             s.console_last_round_cards = []
