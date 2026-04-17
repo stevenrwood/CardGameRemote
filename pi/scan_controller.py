@@ -24,7 +24,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock, Thread, Timer
 
 import cv2
 import numpy as np
@@ -289,6 +289,9 @@ class AppState:
             n: SlotLed(n, pin) for n, pin in SLOT_LED_PINS.items()
         }
         self.buzzer = Buzz(BUZZER_GPIO)
+        # Timer to clear /test_slots feedback LEDs after a few seconds so
+        # they don't sit on forever. Each new scan cancels the prior one.
+        self._slot_led_off_timer: Timer | None = None
         self.cameras: dict[int, Camera] = {}
         for idx in camera_indices:
             self.cameras[idx] = Camera(idx)
@@ -578,6 +581,17 @@ def test_slots_data():
     # Audible alert if any slot didn't come back at >= SLOT_LED_GOOD_CONF.
     if any_blinking:
         _state.buzzer.beep(n=3)
+    # Clear LED feedback after 10s so the box goes quiet between scans.
+    # Cancel any pending timer from a prior scan and start a fresh one.
+    if _state._slot_led_off_timer is not None:
+        _state._slot_led_off_timer.cancel()
+
+    def _clear_slot_leds():
+        for led in _state.slot_leds.values():
+            led.off()
+    _state._slot_led_off_timer = Timer(10.0, _clear_slot_leds)
+    _state._slot_led_off_timer.daemon = True
+    _state._slot_led_off_timer.start()
     return jsonify({"slots": results, "stamp": _state.test_slot_stamp})
 
 
