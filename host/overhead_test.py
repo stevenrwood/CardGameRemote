@@ -1428,8 +1428,14 @@ def _build_table_state(s):
             # Rodney's hand = only down-card slots that have been recognized
             # and validated (rodney_downs). Tentative slot_pending guesses
             # are shown in the verify modal instead, not as cards in hand.
+            # If Rodney flipped one of his downs face-up (7/27 2-down), the
+            # card remains in rodney_downs (so Pi counting still works) but
+            # we render it here as an up-card instead of a down.
+            flipped_slot = (s.rodney_flipped_up or {}).get("slot")
             hand = []
             for slot_num in sorted(s.rodney_downs.keys()):
+                if slot_num == flipped_slot:
+                    continue
                 d = s.rodney_downs[slot_num]
                 hand.append({"type": "down", "rank": d["rank"],
                              "suit": d["suit"], "slot": slot_num,
@@ -1449,10 +1455,13 @@ def _build_table_state(s):
         else:
             # Dealer deals the same card-type to every player in each round,
             # so every non-folded player holds as many downs as Rodney has
-            # validated. Unverified scans no longer bump the count — that
-            # matched Rodney's view pre-fix but showed extra card-backs for
-            # other players whenever slot_pending had tentative entries.
-            entry["down_count"] = len(s.rodney_downs)
+            # validated. In 7/27 (2-down) once Rodney has flipped, every
+            # local player has also flipped one of their two — subtract the
+            # flipped card from the visible down-count.
+            down_count = len(s.rodney_downs)
+            if s.rodney_flipped_up:
+                down_count = max(0, down_count - 1)
+            entry["down_count"] = down_count
             entry["up_cards"] = up_cards
         players.append(entry)
 
@@ -4007,38 +4016,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/table/flip_up":
             # Rodney picked which of his 2 initial down cards to flip face-up.
+            # Keep the card in rodney_downs — the physical card stays in the
+            # slot and still counts toward the initial deal count. Popping
+            # it made _next_deal_position_type think another down card was
+            # needed, which held the flash and blinked the slot LED.
             try:
                 slot_num = int(data.get("slot"))
             except (TypeError, ValueError):
                 return self._r(400, "application/json", '{"ok":false,"error":"bad slot"}')
             with s.table_lock:
-                d = s.rodney_downs.pop(slot_num, None)
+                d = s.rodney_downs.get(slot_num)
                 if d is None:
                     return self._r(400, "application/json",
                                    '{"ok":false,"error":"slot not in rodney_downs"}')
                 s.rodney_flipped_up = {
                     "rank": d["rank"], "suit": d["suit"], "slot": slot_num,
                 }
-                s.slot_pending.pop(slot_num, None)
-                s.pi_prev_slots.pop(slot_num, None)
                 _table_log_add(
                     s,
                     f"Slot {slot_num}: flipping up ({d['rank']}{d['suit'][0]})",
                 )
                 s.table_state_version += 1
-            # Tell the Pi to blink that slot's LED. Skipped when offline.
-            if not s.pi_offline:
-                try:
-                    import urllib.request
-                    url = f"{s.pi_base_url.rstrip('/')}/slots/{slot_num}/led"
-                    req = urllib.request.Request(
-                        url, method="POST",
-                        data=json.dumps({"state": "blink"}).encode(),
-                        headers={"Content-Type": "application/json"},
-                    )
-                    urllib.request.urlopen(req, timeout=2).read()
-                except Exception as e:
-                    log.log(f"[PI] slot LED blink error: {type(e).__name__}: {e}")
             self._r(200, "application/json", '{"ok":true}')
 
         elif p == "/api/table/fold":
