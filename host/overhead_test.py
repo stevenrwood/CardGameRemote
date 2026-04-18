@@ -239,8 +239,9 @@ class FrameCapture:
         self._latest_frame = None
         self._stop = False
         self._stream_thread = None
-        self._last_sig = 0
+        self._last_sig = -1.0  # any real frame sum differs from this
         self._unique_sigs = 0
+        self._sig_err_logged = False
         self._start_stream()
 
     def _check_ffmpeg(self):
@@ -348,13 +349,17 @@ class FrameCapture:
                         with self._frame_lock:
                             self._latest_frame = frame
                         frame_count += 1
-                        # Cheap change-detection: sum of a stride-32 slice.
-                        # Repeated identical values means the camera is
-                        # handing us the same pixels over and over.
+                        # Cheap change-detection signature. Using float sum
+                        # over the whole frame avoids stride-slice quirks
+                        # and makes it obvious if the frame is actually
+                        # all-zero vs merely identical to the previous one.
                         try:
-                            sig = int(frame[::32, ::32, 0].sum())
-                        except Exception:
-                            sig = 0
+                            sig = float(frame.sum())
+                        except Exception as e:
+                            if not self._sig_err_logged:
+                                log.log(f"[CAPTURE] sig compute failed: {e}")
+                                self._sig_err_logged = True
+                            sig = 0.0
                         if sig != self._last_sig:
                             self._last_sig = sig
                             self._unique_sigs += 1
@@ -364,7 +369,7 @@ class FrameCapture:
                             log.log(
                                 f"[CAPTURE] Brio stream: {frame_count} frames "
                                 f"in {now - last_log:.0f}s ({fps:.1f} fps, "
-                                f"{self._unique_sigs} unique)"
+                                f"{self._unique_sigs} unique, last_sig={sig:.0f})"
                             )
                             frame_count = 0
                             self._unique_sigs = 0
