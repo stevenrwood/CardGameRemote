@@ -2089,18 +2089,27 @@ def _stop_guided_deal(s):
     _pi_flash(s, False)
 
 
-def _start_guided_replace(s, slots: list[int]):
+def _start_guided_replace(s, slots: list[int], previous_cards: dict | None = None):
     """Kick off the guided loop for a specific slot list (draw-phase
     replacement). Same as _start_guided_deal but iterates through the
-    supplied slot numbers in order rather than 1..N."""
+    supplied slot numbers in order rather than 1..N.
+
+    previous_cards maps slot_num → code string ("Ah") for the card that
+    was in each slot before the replace started. The loop uses it to
+    detect "card changed" in case the Pi scan misses the present=false
+    moment between the swap."""
     if s.guided_deal is not None:
         return
     ordered = [int(x) for x in slots if isinstance(x, int) or str(x).isdigit()]
     ordered = sorted(set(ordered))
     if not ordered:
         return
+    prev = {int(k): str(v) for k, v in (previous_cards or {}).items()}
     with s.table_lock:
-        s.guided_deal = {"slots": ordered, "index": 0, "mode": "replace"}
+        s.guided_deal = {
+            "slots": ordered, "index": 0, "mode": "replace",
+            "previous_cards": prev,
+        }
         s.console_state = "replacing"
         s.table_state_version += 1
     _pi_flash(s, True)
@@ -2224,11 +2233,27 @@ def _guided_replace_loop(s):
             time.sleep(GUIDED_POLL_S)
             continue
 
-        # Replace mode: ignore the old card that was still in the slot
-        # when guided started. Wait for the user to remove it first.
+        # Replace mode: the old card may still be in the slot at loop
+        # start. Accept the scan only after either (a) we saw present=
+        # false at some point, or (b) YOLO reads a DIFFERENT card code
+        # than the one that was in the slot before the replace started
+        # — user swapped the card faster than our polling.
         if not saw_empty:
-            time.sleep(GUIDED_POLL_S)
-            continue
+            cur = result.get("card") or {}
+            cur_code = (
+                f"{cur['rank']}{cur['suit'][0]}"
+                if cur.get("rank") and cur.get("suit") else ""
+            )
+            prev_code = gd.get("previous_cards", {}).get(expecting, "")
+            if cur_code and prev_code and cur_code != prev_code:
+                log.log(
+                    f"[GUIDED/{mode}] Slot {expecting}: card changed "
+                    f"{prev_code} → {cur_code} (no empty seen) — accepting"
+                )
+                saw_empty = True
+            else:
+                time.sleep(GUIDED_POLL_S)
+                continue
 
         if not settled:
             time.sleep(GUIDED_SETTLE_S)
@@ -3919,10 +3944,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         '{"ok":false,"error":"draw already taken"}')
             else:
                 slots_to_replace = sorted(s.rodney_marked_slots)
+                # Remember the old card code per slot so the guided loop can
+                # detect "card changed" even when the Pi's /scan polling is
+                # too slow to catch the present=false moment between swap.
+                previous_cards = {}
                 with s.table_lock:
                     for slot in slots_to_replace:
                         s.rodney_downs.pop(slot, None)
-                        s.pi_prev_slots.pop(slot, None)
+                        code = s.pi_prev_slots.pop(slot, None)
+                        if code:
+                            previous_cards[slot] = code
                     s.rodney_marked_slots = set()
                     s.rodney_drew_this_hand = True
                     s.table_state_version += 1
@@ -3933,7 +3964,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     )
                     log.log(f"[CONSOLE] Rodney draw: replacing slots "
                             f"{slots_to_replace}")
-                    _start_guided_replace(s, slots_to_replace)
+                    _start_guided_replace(s, slots_to_replace, previous_cards)
                 else:
                     # Rodney stood pat — skip directly to betting round 2.
                     _table_log_add(s, "Rodney stood pat (no cards replaced)")
