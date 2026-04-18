@@ -226,20 +226,21 @@ class FrameCapture:
 
     def __init__(self, camera_index, resolution="auto"):
         self.camera_index = camera_index
-        self._check_ffmpeg()
+        self._check_ffmpeg()  # only used by _find_best_resolution below
         self.resolution = self._find_best_resolution() if resolution == "auto" else resolution
         w, h = self.resolution.split("x")
         self.width, self.height = int(w), int(h)
-        # Persistent MJPEG stream. AVFoundation takes several seconds to
-        # open the Brio each time ffmpeg launches — previously every frame
-        # paid that cost. Keep ffmpeg running and parse frames from its
-        # stdout so capture() becomes a near-instant latest-frame read.
-        self._proc = None
+        # Persistent stream via OpenCVs AVFoundation backend. Previously
+        # we piped MJPEG from a long-running ffmpeg, but that stalled
+        # on the Brio after the first frame no matter which pixel format
+        # we negotiated. cv2.VideoCapture keeps the camera open and
+        # returns fresh frames on every read().
+        self._stderr_tail = b""
         self._frame_lock = Lock()
         self._latest_frame = None
         self._stop = False
         self._stream_thread = None
-        self._last_sig = -1.0  # any real frame sum differs from this
+        self._last_sig = -1.0
         self._unique_sigs = 0
         self._sig_err_logged = False
         self._start_stream()
@@ -271,129 +272,75 @@ class FrameCapture:
                 log.log(f"  {res} — failed")
         return "1920x1080"
 
-    def _spawn_ffmpeg(self):
-        """Launch ffmpeg in MJPEG-to-stdout streaming mode.
-
-        -pixel_format uyvy422 matches what Brio (and most UVC webcams)
-        natively emit via AVFoundation. Without it, ffmpeg guesses
-        yuv420p, the device rejects the format, and the pipeline stalls
-        producing a single frame forever."""
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-f", "avfoundation",
-            "-framerate", "10",
-            "-video_size", self.resolution,
-            "-pixel_format", "uyvy422",
-            "-i", f"{self.camera_index}:none",
-            "-f", "mjpeg", "-q:v", "3", "-",
-        ]
-        return subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            bufsize=0,
-        )
-
     def _start_stream(self):
-        self._proc = self._spawn_ffmpeg()
-        self._stderr_tail = b""
-        Thread(target=self._drain_stderr, args=(self._proc,), daemon=True).start()
         self._stream_thread = Thread(target=self._read_stream, daemon=True)
         self._stream_thread.start()
 
-    def _drain_stderr(self, proc):
-        """Keep ffmpegs stderr pipe from filling and blocking stdout. Log
-        each line with an [FFMPEG] prefix so problems surface in real time,
-        and retain the last line so the startup timeout message can quote
-        it."""
-        try:
-            for line in iter(proc.stderr.readline, b""):
-                if not line:
-                    break
-                self._stderr_tail = line
-                text = line.decode(errors="replace").rstrip()
-                if text:
-                    log.log(f"[FFMPEG] {text}")
-        except Exception:
-            pass
-
     def _read_stream(self):
-        """Read MJPEG bytes from ffmpeg stdout, decode each JPEG frame,
-        and stash the latest as a BGR numpy array. On ffmpeg death, log
-        whatever it wrote to stderr and attempt a restart with backoff."""
+        """Keep an AVFoundation VideoCapture open and push each decoded
+        BGR frame into self._latest_frame. Much simpler and more stable
+        on the Mac than piping MJPEG through ffmpeg, which stalled after
+        one frame on the Brio."""
         backoff_s = 1.0
         frame_count = 0
         last_log = time.time()
         while not self._stop:
-            proc = self._proc
-            if proc is None or proc.stdout is None:
-                time.sleep(0.5)
-                continue
-            buf = b""
-            while not self._stop:
-                chunk = proc.stdout.read(65536)
-                if not chunk:
-                    break
-                buf += chunk
-                while True:
-                    soi = buf.find(b"\xff\xd8")
-                    if soi < 0:
-                        buf = b""
-                        break
-                    eoi = buf.find(b"\xff\xd9", soi + 2)
-                    if eoi < 0:
-                        buf = buf[soi:]
-                        break
-                    jpeg = buf[soi:eoi + 2]
-                    buf = buf[eoi + 2:]
-                    try:
-                        arr = np.frombuffer(jpeg, dtype=np.uint8)
-                        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                    except Exception:
-                        frame = None
-                    if frame is not None:
-                        with self._frame_lock:
-                            self._latest_frame = frame
-                        frame_count += 1
-                        # Cheap change-detection signature. Using float sum
-                        # over the whole frame avoids stride-slice quirks
-                        # and makes it obvious if the frame is actually
-                        # all-zero vs merely identical to the previous one.
-                        try:
-                            sig = float(frame.sum())
-                        except Exception as e:
-                            if not self._sig_err_logged:
-                                log.log(f"[CAPTURE] sig compute failed: {e}")
-                                self._sig_err_logged = True
-                            sig = 0.0
-                        if sig != self._last_sig:
-                            self._last_sig = sig
-                            self._unique_sigs += 1
-                        now = time.time()
-                        if now - last_log >= 30:
-                            fps = frame_count / max(1e-3, now - last_log)
-                            log.log(
-                                f"[CAPTURE] Brio stream: {frame_count} frames "
-                                f"in {now - last_log:.0f}s ({fps:.1f} fps, "
-                                f"{self._unique_sigs} unique, last_sig={sig:.0f})"
-                            )
-                            frame_count = 0
-                            self._unique_sigs = 0
-                            last_log = now
-            # ffmpeg exited or was stopped.
-            if self._stop:
-                return
-            tail = self._stderr_tail.decode(errors="replace").strip() or "no stderr"
-            log.log(f"[CAPTURE] ffmpeg stream exited — restarting in {backoff_s:.1f}s ({tail})")
-            time.sleep(backoff_s)
-            backoff_s = min(10.0, backoff_s * 2)
+            cap = cv2.VideoCapture(self.camera_index, cv2.CAP_AVFOUNDATION)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            # Smallest internal buffer so read() returns the newest frame
+            # rather than an old queued one.
             try:
-                self._proc = self._spawn_ffmpeg()
-                Thread(target=self._drain_stderr, args=(self._proc,), daemon=True).start()
-                backoff_s = 1.0
-            except Exception as e:
-                log.log(f"[CAPTURE] ffmpeg restart failed: {e}")
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            if not cap.isOpened():
+                log.log("[CAPTURE] VideoCapture failed to open — retrying")
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                time.sleep(backoff_s)
+                backoff_s = min(10.0, backoff_s * 2)
+                continue
+            backoff_s = 1.0
+            log.log(
+                f"[CAPTURE] VideoCapture opened idx={self.camera_index} "
+                f"{self.width}x{self.height}"
+            )
+            while not self._stop:
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    log.log("[CAPTURE] read() failed — reopening capture")
+                    break
+                with self._frame_lock:
+                    self._latest_frame = frame
+                frame_count += 1
+                try:
+                    sig = float(frame.sum())
+                except Exception as e:
+                    if not self._sig_err_logged:
+                        log.log(f"[CAPTURE] sig compute failed: {e}")
+                        self._sig_err_logged = True
+                    sig = 0.0
+                if sig != self._last_sig:
+                    self._last_sig = sig
+                    self._unique_sigs += 1
+                now = time.time()
+                if now - last_log >= 30:
+                    fps = frame_count / max(1e-3, now - last_log)
+                    log.log(
+                        f"[CAPTURE] Brio stream: {frame_count} frames "
+                        f"in {now - last_log:.0f}s ({fps:.1f} fps, "
+                        f"{self._unique_sigs} unique, last_sig={sig:.0f})"
+                    )
+                    frame_count = 0
+                    self._unique_sigs = 0
+                    last_log = now
+            try:
+                cap.release()
+            except Exception:
+                pass
 
     def capture(self):
         with self._frame_lock:
@@ -403,16 +350,6 @@ class FrameCapture:
 
     def close(self):
         self._stop = True
-        proc = self._proc
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
 
 # ---------------------------------------------------------------------------
 # Calibration
