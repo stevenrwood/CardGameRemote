@@ -919,6 +919,30 @@ def _console_watch_dealer(s, frame):
             log.log(f"[CONSOLE] Dealer card detected in {dealer_name}'s zone — 2s settle")
             s.console_scan_phase = "settling"
             s.console_settle_time = time.time()
+            return
+        # Heartbeat diagnostic: once every ~10s while we're stuck in
+        # watching, log the per-zone diff from baseline for every active
+        # zone so the user can tell whether Brio is seeing changes below
+        # the threshold vs. not seeing changes at all (zones miscalibrated).
+        now = time.time()
+        if now - getattr(s, "_watch_diag_time", 0.0) >= 10.0:
+            s._watch_diag_time = now
+            diffs = []
+            for z in s.cal.zones:
+                if z["name"] not in s.console_active_players:
+                    continue
+                bl = s.monitor.baselines.get(z["name"])
+                cur = s.monitor._crop(frame, z)
+                if bl is None or cur is None or cur.shape != bl.shape:
+                    diffs.append(f"{z['name']}=?")
+                    continue
+                d = float(np.mean(cv2.absdiff(cur, bl)))
+                diffs.append(f"{z['name']}={d:.1f}")
+            log.log(
+                f"[CONSOLE] watching {dealer_name}'s zone — "
+                f"diffs vs baseline: {', '.join(diffs)} "
+                f"(threshold {s.monitor.threshold:.0f})"
+            )
         return
 
     if phase == "settling":
