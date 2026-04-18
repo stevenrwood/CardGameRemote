@@ -1387,6 +1387,11 @@ class AppState:
         # for games with two betting rounds.
         self.rodney_marked_slots: set[int] = set()
         self.rodney_drew_this_hand = False
+        # Count of completed draws this hand (3 Toed Pete has 3). Reset on
+        # deal; incremented after each guided replace completes. Used to
+        # index into the games list of DRAW phases for max-marks, and to
+        # decide when to advance to hand_over instead of another draw.
+        self.rodney_draws_done = 0
         self.console_betting_round = 0
         # Games with a trailing down card (7 Card Stud's 7th street, FTQ's
         # final down): after the last up round's Pot-is-right we run a second
@@ -1617,26 +1622,26 @@ def _build_table_state(s):
             dict(s.guided_deal) if s.guided_deal is not None else None
         ),
         "draw": {
-            # Can mark during betting round 1 (pre-selection) and during
-            # the draw phase itself (final adjustments).
+            # Multi-draw games (3 Toed Pete): rodney_draws_done counts how
+            # many draws are behind us; we can mark and request again as
+            # long as more DRAW phases remain and the current draw has not
+            # been taken yet.
             "can_mark": (
                 _game_has_draw_phase(ge)
+                and s.rodney_draws_done < _total_draw_phases(ge)
                 and not s.rodney_drew_this_hand
-                and (
-                    (s.console_state == "betting"
-                     and s.console_betting_round == 1)
-                    or s.console_state == "draw"
-                )
+                and s.console_state in ("betting", "draw")
             ),
-            # Request Cards button only appears in draw state — when the
-            # dealer has pressed "Pot is right" and it's Rodney's turn.
             "can_request": (
                 s.console_state == "draw"
+                and s.rodney_draws_done < _total_draw_phases(ge)
                 and not s.rodney_drew_this_hand
             ),
-            "max_marks": _max_draw_for_game(ge),
+            "max_marks": _max_draw_for_game(ge, s.rodney_draws_done),
             "marked_slots": sorted(s.rodney_marked_slots),
             "drew_this_hand": s.rodney_drew_this_hand,
+            "draws_done": s.rodney_draws_done,
+            "total_draws": _total_draw_phases(ge),
         },
     }
 
@@ -2487,10 +2492,16 @@ def _guided_replace_loop(s):
                         "[CONSOLE] Trailing down deal complete → final betting"
                     )
                 elif s.console_state == "replacing":
+                    # Record this draw as done. Multi-draw games (3 Toed
+                    # Pete) use this to know whether another DRAW phase
+                    # follows; post-draw betting round number is the
+                    # count of draws completed so far + 1.
+                    s.rodney_draws_done += 1
                     s.console_state = "betting"
-                    s.console_betting_round = 2
+                    s.console_betting_round = s.rodney_draws_done + 1
                     log.log(
-                        "[CONSOLE] Draw replacement done → betting round 2"
+                        f"[CONSOLE] Draw {s.rodney_draws_done} replacement "
+                        f"done → betting round {s.console_betting_round}"
                     )
             return
         expecting = slots[idx]
@@ -2643,15 +2654,34 @@ def _game_has_draw_phase(ge) -> bool:
         return False
 
 
-def _max_draw_for_game(ge) -> int:
-    """Max cards Rodney can replace in the (first) DRAW phase of this game."""
+def _total_draw_phases(ge) -> int:
+    """Count of DRAW phases. 5 Card Draw = 1, 3 Toed Pete = 3."""
     try:
         from game_engine import PhaseType
         if ge.current_game is None:
             return 0
+        return sum(1 for ph in ge.current_game.phases if ph.type == PhaseType.DRAW)
+    except Exception:
+        return 0
+
+
+def _max_draw_for_game(ge, draws_done: int = 0) -> int:
+    """Max cards Rodney can replace in the draws_done-th DRAW phase.
+
+    Multi-draw games (3 Toed Pete) shrink the allowance each round: 3, 2,
+    then 1. draws_done is the number of draws already completed — 0 for
+    the first draw, 1 for the second, etc. Returns 0 if no such phase.
+    """
+    try:
+        from game_engine import PhaseType
+        if ge.current_game is None:
+            return 0
+        seen = 0
         for ph in ge.current_game.phases:
             if ph.type == PhaseType.DRAW:
-                return int(getattr(ph, "max_draw", 0) or 0)
+                if seen == draws_done:
+                    return int(getattr(ph, "max_draw", 0) or 0)
+                seen += 1
     except Exception:
         pass
     return 0
@@ -4245,7 +4275,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         '{"ok":false,"error":"draw already taken this hand"}')
             else:
                 ge = s.game_engine
-                max_marks = _max_draw_for_game(ge)
+                max_marks = _max_draw_for_game(ge, s.rodney_draws_done)
                 with s.table_lock:
                     if marked:
                         if len(s.rodney_marked_slots) >= max_marks and \
@@ -4294,13 +4324,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             f"{slots_to_replace}")
                     _start_guided_replace(s, slots_to_replace, previous_cards)
                 else:
-                    # Rodney stood pat — skip directly to betting round 2.
+                    # Rodney stood pat — no cards replaced. Mark the draw
+                    # as done and advance to the post-draw betting round.
                     _table_log_add(s, "Rodney stood pat (no cards replaced)")
-                    log.log("[CONSOLE] Rodney stood pat → betting round 2")
                     with s.table_lock:
+                        s.rodney_draws_done += 1
                         s.console_state = "betting"
-                        s.console_betting_round = 2
+                        s.console_betting_round = s.rodney_draws_done + 1
                         s.table_state_version += 1
+                    log.log(
+                        f"[CONSOLE] Rodney stood pat — draw "
+                        f"{s.rodney_draws_done} done → betting round "
+                        f"{s.console_betting_round}"
+                    )
                 self._r(200, "application/json", json.dumps({
                     "ok": True, "slots": slots_to_replace,
                 }))
@@ -4596,6 +4632,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.freezes = {name: 0 for name in s.console_active_players}
                     s.rodney_marked_slots = set()
                     s.rodney_drew_this_hand = False
+                    s.rodney_draws_done = 0
                     s.console_betting_round = 0
                     s.console_trailing_done = False
                     s.table_state_version += 1
@@ -4699,16 +4736,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             #   betting round 2 + Pot-is-right → hand_over
             if s.console_total_up_rounds == 0 and s.console_betting_round > 0:
                 has_draw = _game_has_draw_phase(ge)
-                if (has_draw and s.console_betting_round == 1
-                        and not s.rodney_drew_this_hand):
-                    s.console_state = "draw"
-                    log.log("[CONSOLE] Betting round 1 done → draw phase")
+                total_draws = _total_draw_phases(ge)
+                # If there are more DRAW phases left (multi-draw games like
+                # 3 Toed Pete, or the single draw in 5 Card Draw), loop back
+                # into a draw state. Reset Rodneys drew flag + marks so the
+                # /table can collect fresh picks for this draw.
+                if has_draw and s.rodney_draws_done < total_draws:
                     with s.table_lock:
+                        s.console_state = "draw"
+                        s.rodney_drew_this_hand = False
+                        s.rodney_marked_slots = set()
                         s.table_state_version += 1
+                    log.log(
+                        f"[CONSOLE] Betting round {s.console_betting_round} "
+                        f"done → draw {s.rodney_draws_done + 1}/{total_draws}"
+                    )
                     return self._r(200, "application/json", json.dumps({
                         "ok": True, "state": "draw",
                     }))
-                # Round 2 of a draw game, or single-betting all-down game.
+                # No draws remain (either a non-draw all-down game or the
+                # last post-draw betting of a multi-draw game).
                 s.console_state = "hand_over"
                 log.log("[CONSOLE] All-down betting complete → hand_over")
                 with s.table_lock:
