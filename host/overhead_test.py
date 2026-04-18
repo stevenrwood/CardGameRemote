@@ -819,6 +819,22 @@ class ZoneMonitor:
 # Console scan trigger — watches dealer's zone, scans all zones when dealer dealt
 # ---------------------------------------------------------------------------
 
+def _brio_player_names(s):
+    """Active players whose Brio zones can actually show a card.
+
+    Excludes remote players (Rodney) — their Brio zone is the physical
+    spot on the table where nothing ever gets placed. Rodney's up cards
+    come from his /table flip choice or the Pi scanner, not the overhead
+    camera. Trying to scan a remote zone produces only 'No card' /
+    'Missing cards — please adjust' false prompts.
+    """
+    ge = s.game_engine
+    if ge is None:
+        return set()
+    remote = {p.name for p in ge.players if p.is_remote}
+    return {n for n in s.console_active_players if n not in remote}
+
+
 def _console_watch_dealer(s, frame):
     """Watch the dealer's zone. When a card appears there, wait for settle then
     scan all active player zones in one batch. Dealer deals to themselves last,
@@ -833,13 +849,14 @@ def _console_watch_dealer(s, frame):
 
     ge = s.game_engine
     dealer_name = ge.get_dealer().name
+    brio_names = _brio_player_names(s)
 
     # Handle missing-card watching: any active player with empty card
     if phase == "watching_missing":
         missing_zones = []
         for z in s.cal.zones:
             name = z["name"]
-            if name not in s.console_active_players:
+            if name not in brio_names:
                 continue
             if s.monitor.zone_state.get(name) == "corrected":
                 continue
@@ -878,14 +895,14 @@ def _console_watch_dealer(s, frame):
     if phase == "scanned":
         # Initial batch scan completed — check if anyone is missing
         missing = []
-        for name in s.console_active_players:
+        for name in brio_names:
             if s.monitor.zone_state.get(name) == "corrected":
                 continue
             card = s.monitor.last_card.get(name, "")
             if not card or card == "No card":
                 missing.append(name)
         # Wait until pending is cleared (scan still running) before prompting
-        if missing and not any(s.monitor.pending.get(n) for n in s.console_active_players):
+        if missing and not any(s.monitor.pending.get(n) for n in brio_names):
             # In hit rounds (7/27), a missing card means the player chose to
             # freeze — not an error worth nagging about. Skip the adjust-
             # prompt and let the dealer click Confirm Cards when ready.
@@ -902,23 +919,30 @@ def _console_watch_dealer(s, frame):
             s._missing_prompt_time = time.time()
         return
 
-    if dealer_name not in s.console_active_players:
-        return
-    dealer_zone = next((z for z in s.cal.zones if z["name"] == dealer_name), None)
+    if dealer_name not in brio_names:
+        # Dealer is remote (Rodney) — nobody is placing cards in the
+        # dealer zone so the regular trigger can't fire. Fall back to
+        # any local brio zone as the motion trigger.
+        alt = next((z for z in s.cal.zones if z["name"] in brio_names), None)
+        if alt is None:
+            return
+        dealer_zone = alt
+    else:
+        dealer_zone = next((z for z in s.cal.zones if z["name"] == dealer_name), None)
     if dealer_zone is None:
         return
 
     if phase == "watching":
         # 7/27 hit rounds: dealer goes around asking each player for a card
-        # or a freeze. Any player's zone — not necessarily the dealer's —
-        # may be the first to change. Skip frozen players (≥3 freezes).
+        # or a freeze. Any LOCAL player's zone — not necessarily the dealer's
+        # — may be the first to change. Skip frozen players (≥3 freezes).
         is_7_27_hit = (ge.current_game
-                       and ge.current_game.name == "7/27"
+                       and ge.current_game.name.startswith("7/27")
                        and s.console_up_round >= 1)
         if is_7_27_hit:
             trigger_zone = None
             for z in s.cal.zones:
-                if z["name"] not in s.console_active_players:
+                if z["name"] not in brio_names:
                     continue
                 if s.freezes.get(z["name"], 0) >= 3:
                     continue
@@ -932,7 +956,7 @@ def _console_watch_dealer(s, frame):
             return
         crop = s.monitor.check_single(frame, dealer_zone)
         if crop is not None:
-            log.log(f"[CONSOLE] Dealer card detected in {dealer_name}'s zone — {s.brio_settle_s:.1f}s settle")
+            log.log(f"[CONSOLE] Dealer card detected in {dealer_zone['name']}'s zone — {s.brio_settle_s:.1f}s settle")
             s.console_scan_phase = "settling"
             s.console_settle_time = time.time()
             return
@@ -945,7 +969,7 @@ def _console_watch_dealer(s, frame):
             s._watch_diag_time = now
             diffs = []
             for z in s.cal.zones:
-                if z["name"] not in s.console_active_players:
+                if z["name"] not in brio_names:
                     continue
                 bl = s.monitor.baselines.get(z["name"])
                 cur = s.monitor._crop(frame, z)
@@ -972,7 +996,7 @@ def _console_watch_dealer(s, frame):
         zone_crops = {}
         for z in s.cal.zones:
             name = z["name"]
-            if name not in s.console_active_players:
+            if name not in brio_names:
                 continue
             if s.monitor.zone_state.get(name) == "corrected":
                 continue
