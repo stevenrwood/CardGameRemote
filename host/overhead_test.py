@@ -1333,18 +1333,12 @@ def _build_table_state(s):
             "frozen": freezes_n >= 3,
         }
         if p.is_remote:
-            # Rodney's hand = all down-card slots the scanner has seen
-            # anything in (verified or awaiting verify), sorted by slot,
-            # then any card he chose to flip up from a slot, then Brio up
-            # cards. slot_pending entries carry the current best guess so
-            # Rodney can see what came in before confirming.
+            # Rodney's hand = only down-card slots that have been recognized
+            # and validated (rodney_downs). Tentative slot_pending guesses
+            # are shown in the verify modal instead, not as cards in hand.
             hand = []
-            all_down_slots = sorted(set(s.rodney_downs.keys()) |
-                                     set(s.slot_pending.keys()))
-            for slot_num in all_down_slots:
-                d = s.rodney_downs.get(slot_num) or s.slot_pending.get(slot_num)
-                if not d:
-                    continue
+            for slot_num in sorted(s.rodney_downs.keys()):
+                d = s.rodney_downs[slot_num]
                 hand.append({"type": "down", "rank": d["rank"],
                              "suit": d["suit"], "slot": slot_num,
                              "confidence": d.get("confidence")})
@@ -1362,11 +1356,11 @@ def _build_table_state(s):
             entry["hand"] = hand
         else:
             # Dealer deals the same card-type to every player in each round,
-            # so every non-folded player holds as many downs as Rodney has.
-            # Count slots that have *any* scan present — verified or pending —
-            # so unverified cards still display as card-backs.
-            seen_down_slots = set(s.rodney_downs.keys()) | set(s.slot_pending.keys())
-            entry["down_count"] = len(seen_down_slots)
+            # so every non-folded player holds as many downs as Rodney has
+            # validated. Unverified scans no longer bump the count — that
+            # matched Rodney's view pre-fix but showed extra card-backs for
+            # other players whenever slot_pending had tentative entries.
+            entry["down_count"] = len(s.rodney_downs)
             entry["up_cards"] = up_cards
         players.append(entry)
 
