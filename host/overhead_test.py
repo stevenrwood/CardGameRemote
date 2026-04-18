@@ -2089,7 +2089,7 @@ def _stop_guided_deal(s):
     _pi_flash(s, False)
 
 
-def _start_guided_replace(s, slots: list[int], previous_cards: dict | None = None):
+def _start_guided_replace(s, slots, previous_cards=None):
     """Kick off the guided loop for a specific slot list (draw-phase
     replacement). Same as _start_guided_deal but iterates through the
     supplied slot numbers in order rather than 1..N.
