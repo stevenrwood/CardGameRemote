@@ -273,18 +273,35 @@ class FrameCapture:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
+            bufsize=0,
         )
 
     def _start_stream(self):
         self._proc = self._spawn_ffmpeg()
+        self._stderr_tail = b""
+        Thread(target=self._drain_stderr, args=(self._proc,), daemon=True).start()
         self._stream_thread = Thread(target=self._read_stream, daemon=True)
         self._stream_thread.start()
+
+    def _drain_stderr(self, proc):
+        """Keep ffmpegs stderr pipe from filling and blocking stdout. Also
+        capture the last few lines so ffmpeg errors are visible when the
+        stream dies."""
+        try:
+            for line in iter(proc.stderr.readline, b""):
+                if not line:
+                    break
+                self._stderr_tail = line
+        except Exception:
+            pass
 
     def _read_stream(self):
         """Read MJPEG bytes from ffmpeg stdout, decode each JPEG frame,
         and stash the latest as a BGR numpy array. On ffmpeg death, log
         whatever it wrote to stderr and attempt a restart with backoff."""
         backoff_s = 1.0
+        frame_count = 0
+        last_log = time.time()
         while not self._stop:
             proc = self._proc
             if proc is None or proc.stdout is None:
@@ -307,29 +324,31 @@ class FrameCapture:
                         break
                     jpeg = buf[soi:eoi + 2]
                     buf = buf[eoi + 2:]
-                    arr = np.frombuffer(jpeg, dtype=np.uint8)
-                    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    try:
+                        arr = np.frombuffer(jpeg, dtype=np.uint8)
+                        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    except Exception:
+                        frame = None
                     if frame is not None:
                         with self._frame_lock:
                             self._latest_frame = frame
-            # ffmpeg exited or was stopped. Drain stderr for a hint, then
-            # back off before relaunching. A common cause is another app
-            # (Teams) holding the Brio exclusively.
+                        frame_count += 1
+                        now = time.time()
+                        if now - last_log >= 30:
+                            fps = frame_count / max(1e-3, now - last_log)
+                            log.log(f"[CAPTURE] Brio stream: {frame_count} frames in {now - last_log:.0f}s ({fps:.1f} fps)")
+                            frame_count = 0
+                            last_log = now
+            # ffmpeg exited or was stopped.
             if self._stop:
                 return
-            err = b""
-            try:
-                if proc.stderr is not None:
-                    err = proc.stderr.read() or b""
-            except Exception:
-                pass
-            msg = err.decode(errors="replace").strip().splitlines()
-            tail = msg[-1] if msg else "no stderr"
+            tail = self._stderr_tail.decode(errors="replace").strip() or "no stderr"
             log.log(f"[CAPTURE] ffmpeg stream exited — restarting in {backoff_s:.1f}s ({tail})")
             time.sleep(backoff_s)
             backoff_s = min(10.0, backoff_s * 2)
             try:
                 self._proc = self._spawn_ffmpeg()
+                Thread(target=self._drain_stderr, args=(self._proc,), daemon=True).start()
                 backoff_s = 1.0
             except Exception as e:
                 log.log(f"[CAPTURE] ffmpeg restart failed: {e}")
