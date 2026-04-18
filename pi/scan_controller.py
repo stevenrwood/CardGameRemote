@@ -214,8 +214,14 @@ class Camera:
         if not _CAMERA_OK:
             raise RuntimeError("picamera2 not available — cannot initialize camera")
         self.cam = Picamera2(camera_num=camera_index)
-        cfg = self.cam.create_still_configuration(
+        # Video configuration keeps the pipeline continuously streaming
+        # with multiple buffers, so capture_array() grabs the latest frame
+        # instantly instead of blocking for a full still-capture cycle.
+        # At 2304x1296 the IMX708 comfortably runs at 25-30 fps with our
+        # 40 ms exposure.
+        cfg = self.cam.create_video_configuration(
             main={"size": (2304, 1296), "format": "RGB888"},
+            buffer_count=4,
         )
         self.cam.configure(cfg)
         # Runtime-tunable settings (defaults tuned for scanner box LEDs)
@@ -224,7 +230,7 @@ class Camera:
         self._apply_controls()
         self.cam.start()
         time.sleep(0.5)  # warmup + AF settle
-        log.info(f"Camera {camera_index} started at {cfg['main']['size']}")
+        log.info(f"Camera {camera_index} started at {cfg['main']['size']} (video mode)")
 
     def _apply_controls(self):
         controls = {
