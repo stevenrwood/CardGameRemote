@@ -3095,12 +3095,20 @@ def bg_loop():
         frame = _state.capture.capture()
         if frame is not None:
             _state.latest_frame = frame
-            disp = crop_circle(frame, _state.cal).copy()
-            draw_overlay(disp, _state.cal, _state.monitor)
-            _state.latest_jpg = to_jpeg(disp)
-
+            # Recognition/motion detection runs FIRST so card arrival
+            # doesn't wait on the display-JPEG encode below. On a 4K
+            # Brio frame to_jpeg was eating 0.5-1.5s per bg_loop pass.
             if _state.monitoring and _state.cal.ok:
                 _console_watch_dealer(_state, frame)
+
+            # Display JPEG is cheap once we downscale — the UI renders
+            # it inside a small iframe anyway. Keep the overlay drawn
+            # on the full frame (zone coordinates are in 4K space),
+            # then scale the encoded output.
+            disp = crop_circle(frame, _state.cal).copy()
+            draw_overlay(disp, _state.cal, _state.monitor)
+            small = cv2.resize(disp, (1280, 720), interpolation=cv2.INTER_AREA)
+            _state.latest_jpg = to_jpeg(small, 70)
 
             # Data collection auto-cycle
             if _state.collect_mode:
