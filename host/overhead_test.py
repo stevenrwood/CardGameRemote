@@ -1094,19 +1094,21 @@ def _dedup_round_cards_against_seen(s, round_cards):
     # Prior confirmed up cards
     for c in s.console_hand_cards:
         seen.add(c["card"])
-    # Rodney's known down cards (verified + pending low-conf guesses)
+    # Rodney's known down cards (verified + pending low-conf guesses).
+    # Skip his flipped slot — the flipped card IS this round's up card
+    # for Rodney, so including it in seen would flag his own scan as a
+    # self-collision and trigger a random substitution.
     suit_full = {"c": "Clubs", "d": "Diamonds", "h": "Hearts", "s": "Spades"}
     rank_full = {"A": "Ace", "K": "King", "Q": "Queen", "J": "Jack"}
     def _canonical(rank, suit):
         return f"{rank_full.get(rank, rank)} of {suit.capitalize()}"
-    for d in s.rodney_downs.values():
+    flipped_slot = (s.rodney_flipped_up or {}).get("slot")
+    for slot_num, d in s.rodney_downs.items():
+        if slot_num == flipped_slot:
+            continue
         seen.add(_canonical(d["rank"], d["suit"]))
     for d in s.slot_pending.values():
         seen.add(_canonical(d["rank"], d["suit"]))
-    # Rodney's flipped-up card (revealed from a slot but not yet Brio-scanned)
-    if s.rodney_flipped_up:
-        fu = s.rodney_flipped_up
-        seen.add(_canonical(fu["rank"], fu["suit"]))
 
     import random as _rand
     for entry in round_cards:
@@ -4042,7 +4044,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     rank_nm = RANK_TO_NAME.get(d["rank"], d["rank"])
                     suit_nm = SUIT_TO_NAME.get(d["suit"], d["suit"])
                     s.monitor.last_card[rodney.name] = f"{rank_nm} of {suit_nm}"
-                    s.monitor.zone_state[rodney.name] = "recognized"
+                    # "corrected" tells the Brio batch scan + missing-card
+                    # check to skip Rodney — we already know his flipped-up
+                    # card from the Pi slot, no need for YOLO on his zone.
+                    s.monitor.zone_state[rodney.name] = "corrected"
                 _table_log_add(
                     s,
                     f"Slot {slot_num}: flipping up ({d['rank']}{d['suit'][0]})",
