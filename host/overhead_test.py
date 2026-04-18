@@ -2067,11 +2067,7 @@ def _guided_deal_loop(s):
             with s.table_lock:
                 s.guided_deal = None
                 s.table_state_version += 1
-            # For all-down games (5CD, 3 Toed Pete, 7/27 2-down variant),
-            # guided completion means every card is accounted for — auto-
-            # advance to betting. For games whose first deal phase mixes
-            # downs with an up card (7/27 1d+1u), stay in "dealing" so the
-            # user can press Confirm Cards once Brio catches the up card.
+            # Per-game post-guided transitions.
             ge = s.game_engine
             first_deal_phase = next(
                 (ph for ph in (ge.current_game.phases if ge.current_game else [])
@@ -2081,15 +2077,36 @@ def _guided_deal_loop(s):
             first_phase_has_up = bool(
                 first_deal_phase and "up" in first_deal_phase.pattern
             )
+            has_hit_round_game = bool(
+                ge.current_game and any(
+                    ph.type.value == "hit_round"
+                    for ph in ge.current_game.phases
+                )
+            )
             if (s.console_state == "dealing"
                     and s.console_total_up_rounds == 0
-                    and not first_phase_has_up):
+                    and not first_phase_has_up
+                    and not has_hit_round_game):
+                # Truly all-down games (5CD, 3 Toed Pete): every card is in,
+                # auto-advance to betting so next action is Pot is right.
                 s.console_state = "betting"
                 if s.console_betting_round == 0:
                     s.console_betting_round = 1
                 log.log(
                     f"[CONSOLE] All-down deal complete → "
                     f"betting round {s.console_betting_round}"
+                )
+            elif s.console_state == "dealing" and has_hit_round_game:
+                # 7/27 (either variant): the local players still need to
+                # flip/reveal an up card onto the table for Brio to scan.
+                # Keep state in "dealing" with Brio watching; user presses
+                # Confirm Cards once every player's up card is in.
+                s.monitoring = True
+                s.console_scan_phase = "watching"
+                dname = ge.get_dealer().name if ge.current_game else "dealer"
+                log.log(
+                    f"[CONSOLE] 7/27 guided downs done → Brio watching "
+                    f"{dname}'s zone for flipped-up cards"
                 )
             elif s.console_state == "replacing":
                 # Draw-phase refill just completed — back to the current
