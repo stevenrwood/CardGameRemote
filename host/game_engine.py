@@ -595,12 +595,13 @@ def _default_templates() -> list[GameTemplate]:
         GameTemplate(
             name="7/27",
             phases=[
-                Phase(type=PhaseType.DEAL, pattern=["down", "up"]),
+                Phase(type=PhaseType.DEAL, pattern=["down", "down"]),
                 Phase(type=PhaseType.BETTING),
                 Phase(type=PhaseType.HIT_ROUND, card_type="up"),
             ],
-            notes="Each player dealt 1 down + 1 up initially, then hit rounds "
-                  "(card or freeze). Freeze 3x → frozen.",
+            notes="Each player dealt 2 down initially; Rodney flips one of "
+                  "the two face-up, then hit rounds (card or freeze). "
+                  "Freeze 3x → frozen.",
         ),
         GameTemplate(
             name="Texas Hold'em",
