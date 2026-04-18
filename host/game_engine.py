@@ -33,7 +33,13 @@ class Phase:
 @dataclass
 class GameTemplate:
     name: str
-    phases: list[Phase]
+    phases: list[Phase] = field(default_factory=list)
+    # When set, copy phases from the named template at engine-init time.
+    # Mutually exclusive with phases=. Used to declare 7 Card Stud variants
+    # (Deuces Wild, Follow the Queen, High Chicago, Eight or Better) that
+    # share the stud deal/bet cadence but differ only in wild-card or
+    # winning-hand rules.
+    phases_from: str = ""
     wild_cards: dict = field(default_factory=dict)  # {"ranks": ["2"], "label": "..."}
     dynamic_wild: str = ""  # e.g., "follow_the_queen"
     repeatable: bool = False
@@ -106,8 +112,39 @@ class GameEngine:
         self._update_dealer()
 
     def _load_default_templates(self):
-        """Load the built-in game templates."""
+        """Load the built-in game templates and resolve phases_from refs."""
         self.templates = {t.name: t for t in _default_templates()}
+        self._resolve_phases_from()
+
+    def _resolve_phases_from(self):
+        """For any template with phases_from set, copy phases from the
+        referenced template. Validates that each template has exactly one
+        of phases / phases_from. Raises on unknown parent or cycle."""
+        for name, t in self.templates.items():
+            has_phases = bool(t.phases)
+            has_parent = bool(t.phases_from)
+            if has_phases and has_parent:
+                raise ValueError(
+                    f"Template {name!r} sets both phases and phases_from — pick one"
+                )
+            if not has_phases and not has_parent:
+                raise ValueError(
+                    f"Template {name!r} has neither phases nor phases_from"
+                )
+        for name, t in self.templates.items():
+            if not t.phases_from:
+                continue
+            parent = self.templates.get(t.phases_from)
+            if parent is None:
+                raise ValueError(
+                    f"Template {name!r} references unknown parent {t.phases_from!r}"
+                )
+            if parent.phases_from:
+                raise ValueError(
+                    f"Template {name!r} parents {parent.name!r} which itself "
+                    f"uses phases_from — chained inheritance not supported"
+                )
+            t.phases = list(parent.phases)
 
     def _update_dealer(self):
         """Set the is_dealer flag on the current dealer."""
@@ -148,6 +185,31 @@ class GameEngine:
     def get_game_list(self) -> list[str]:
         """Return list of available game names."""
         return sorted(self.templates.keys())
+
+    def get_game_groups(self) -> list[dict]:
+        """Return games grouped by the template their phases came from.
+
+        A template that defines its own phases is a group leader; any
+        templates pointing to it via phases_from are listed as variants
+        under that leader. Games with no variants still appear as a
+        leader with an empty variants list.
+
+        [{"name": "7 Card Stud", "variants": [...]}, ...] sorted by name.
+        """
+        variants_of: dict[str, list[str]] = {}
+        for t in self.templates.values():
+            if t.phases_from:
+                variants_of.setdefault(t.phases_from, []).append(t.name)
+        out = []
+        for name in sorted(self.templates.keys()):
+            t = self.templates[name]
+            if t.phases_from:
+                continue  # appears as a variant under its parent
+            out.append({
+                "name": name,
+                "variants": sorted(variants_of.get(name, [])),
+            })
+        return out
 
     def new_hand(self, game_name: str) -> dict:
         """Start a new hand with the specified game."""
@@ -495,52 +557,25 @@ def _default_templates() -> list[GameTemplate]:
         ),
         GameTemplate(
             name="7 Stud Deuces Wild",
-            phases=[
-                Phase(type=PhaseType.DEAL, pattern=["down", "down", "up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["down"]),
-                Phase(type=PhaseType.BETTING),
-            ],
+            phases_from="7 Card Stud",
             wild_cards={"ranks": ["2"], "label": "Deuces Wild"},
         ),
         GameTemplate(
             name="Follow the Queen",
-            phases=[
-                Phase(type=PhaseType.DEAL, pattern=["down", "down", "up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["down"]),
-                Phase(type=PhaseType.BETTING),
-            ],
+            phases_from="7 Card Stud",
             wild_cards={"ranks": ["Q"], "label": "Queens wild"},
             dynamic_wild="follow_the_queen",
         ),
         GameTemplate(
             name="High Chicago",
-            phases=[
-                Phase(type=PhaseType.DEAL, pattern=["down", "down", "up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["up"]),
-                Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.DEAL, pattern=["down"]),
-                Phase(type=PhaseType.BETTING),
-            ],
+            phases_from="7 Card Stud",
             notes="Split pot: best poker hand + highest spade in the hole",
+        ),
+        GameTemplate(
+            name="Eight or Better",
+            phases_from="7 Card Stud",
+            notes="Split pot: best high hand + best low hand (highest card "
+                  "8 or under, no pair) qualifies for the low half",
         ),
         GameTemplate(
             name="High/Low/High Challenge",

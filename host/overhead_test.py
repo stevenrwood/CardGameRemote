@@ -3994,6 +3994,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "active_players": s.console_active_players,
                 "all_players": PLAYER_NAMES,
                 "games": ge.get_game_list(),
+                "game_groups": ge.get_game_groups(),
                 "dealer": ge.get_dealer().name,
                 "hand": ge.get_hand_state(),
                 "last_round_cards": s.console_last_round_cards,
@@ -5176,10 +5177,19 @@ function refresh(){
 }
 
 function buildGameOptions(){
-  if(gameOptionsBuilt||!ST||!ST.games) return;
+  if(gameOptionsBuilt||!ST||!ST.game_groups) return;
   var gs=document.getElementById('game-select');
-  ST.games.forEach(function(g){
-    var o=document.createElement('option');o.value=g;o.textContent=g;gs.appendChild(o);
+  // Keep the placeholder, if any, that the HTML already rendered.
+  ST.game_groups.forEach(function(g){
+    if(g.variants && g.variants.length){
+      var og=document.createElement('optgroup');og.label=g.name;
+      [g.name].concat(g.variants).forEach(function(v){
+        var o=document.createElement('option');o.value=v;o.textContent=v;og.appendChild(o);
+      });
+      gs.appendChild(og);
+    } else {
+      var o=document.createElement('option');o.value=g.name;o.textContent=g.name;gs.appendChild(o);
+    }
   });
   gameOptionsBuilt=true;
 }
