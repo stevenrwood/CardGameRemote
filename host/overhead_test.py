@@ -221,6 +221,16 @@ class FrameCapture:
         self.resolution = self._find_best_resolution() if resolution == "auto" else resolution
         w, h = self.resolution.split("x")
         self.width, self.height = int(w), int(h)
+        # Persistent MJPEG stream. AVFoundation takes several seconds to
+        # open the Brio each time ffmpeg launches — previously every frame
+        # paid that cost. Keep ffmpeg running and parse frames from its
+        # stdout so capture() becomes a near-instant latest-frame read.
+        self._proc = None
+        self._frame_lock = Lock()
+        self._latest_frame = None
+        self._stop = False
+        self._stream_thread = None
+        self._start_stream()
 
     def _check_ffmpeg(self):
         try:
@@ -248,18 +258,100 @@ class FrameCapture:
                 log.log(f"  {res} — failed")
         return "1920x1080"
 
+    def _spawn_ffmpeg(self):
+        """Launch ffmpeg in MJPEG-to-stdout streaming mode."""
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-f", "avfoundation",
+            "-framerate", "10",
+            "-video_size", self.resolution,
+            "-i", f"{self.camera_index}:none",
+            "-f", "mjpeg", "-q:v", "3", "-",
+        ]
+        return subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def _start_stream(self):
+        self._proc = self._spawn_ffmpeg()
+        self._stream_thread = Thread(target=self._read_stream, daemon=True)
+        self._stream_thread.start()
+
+    def _read_stream(self):
+        """Read MJPEG bytes from ffmpeg stdout, decode each JPEG frame,
+        and stash the latest as a BGR numpy array. On ffmpeg death, log
+        whatever it wrote to stderr and attempt a restart with backoff."""
+        backoff_s = 1.0
+        while not self._stop:
+            proc = self._proc
+            if proc is None or proc.stdout is None:
+                time.sleep(0.5)
+                continue
+            buf = b""
+            while not self._stop:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                buf += chunk
+                while True:
+                    soi = buf.find(b"\xff\xd8")
+                    if soi < 0:
+                        buf = b""
+                        break
+                    eoi = buf.find(b"\xff\xd9", soi + 2)
+                    if eoi < 0:
+                        buf = buf[soi:]
+                        break
+                    jpeg = buf[soi:eoi + 2]
+                    buf = buf[eoi + 2:]
+                    arr = np.frombuffer(jpeg, dtype=np.uint8)
+                    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        with self._frame_lock:
+                            self._latest_frame = frame
+            # ffmpeg exited or was stopped. Drain stderr for a hint, then
+            # back off before relaunching. A common cause is another app
+            # (Teams) holding the Brio exclusively.
+            if self._stop:
+                return
+            err = b""
+            try:
+                if proc.stderr is not None:
+                    err = proc.stderr.read() or b""
+            except Exception:
+                pass
+            msg = err.decode(errors="replace").strip().splitlines()
+            tail = msg[-1] if msg else "no stderr"
+            log.log(f"[CAPTURE] ffmpeg stream exited — restarting in {backoff_s:.1f}s ({tail})")
+            time.sleep(backoff_s)
+            backoff_s = min(10.0, backoff_s * 2)
+            try:
+                self._proc = self._spawn_ffmpeg()
+                backoff_s = 1.0
+            except Exception as e:
+                log.log(f"[CAPTURE] ffmpeg restart failed: {e}")
+
     def capture(self):
-        try:
-            subprocess.run([
-                "ffmpeg", "-y", "-loglevel", "error", "-nostdin",
-                "-f", "avfoundation", "-video_size", self.resolution,
-                "-framerate", "5", "-i", f"{self.camera_index}:none",
-                "-frames:v", "1", "-q:v", "2", str(CAPTURE_FILE)
-            ], capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
-            return cv2.imread(str(CAPTURE_FILE))
-        except Exception as e:
-            log.log(f"Capture error: {e}")
-            return None
+        with self._frame_lock:
+            if self._latest_frame is None:
+                return None
+            return self._latest_frame.copy()
+
+    def close(self):
+        self._stop = True
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 # ---------------------------------------------------------------------------
 # Calibration
@@ -2921,19 +3013,10 @@ def _process_deal_text(s, text):
 # Background capture
 # ---------------------------------------------------------------------------
 
-_last_capture_log = [0]  # throttle capture timing logs
-
 def bg_loop():
     while not _state.quit_flag:
-        t_cap = time.time()
         frame = _state.capture.capture()
-        cap_ms = (time.time() - t_cap) * 1000
         if frame is not None:
-            # Log capture timing every 30 seconds
-            now = time.time()
-            if now - _last_capture_log[0] > 30:
-                log.log(f"[CAPTURE] frame grabbed in {cap_ms:.0f}ms")
-                _last_capture_log[0] = now
             _state.latest_frame = frame
             disp = crop_circle(frame, _state.cal).copy()
             draw_overlay(disp, _state.cal, _state.monitor)
@@ -5612,10 +5695,18 @@ def main():
     capture = FrameCapture(camera_index, args.resolution)
     log.log(f"Camera {camera_index}, resolution {capture.resolution}")
 
-    print("  Testing capture...")
-    frame = capture.capture()
+    # Wait for the persistent ffmpeg stream to warm up enough to produce
+    # a frame. AVFoundation can take several seconds to open the Brio.
+    print("  Waiting for first frame from camera stream...")
+    frame = None
+    deadline = time.time() + 15.0
+    while time.time() < deadline:
+        frame = capture.capture()
+        if frame is not None:
+            break
+        time.sleep(0.1)
     if frame is None:
-        sys.exit("  ERROR: Could not capture. Check camera and ffmpeg.")
+        sys.exit("  ERROR: No frames from camera after 15s. Is Teams holding the Brio?")
     print(f"  OK: {frame.shape[1]}x{frame.shape[0]}")
 
     cal = Calibration()
