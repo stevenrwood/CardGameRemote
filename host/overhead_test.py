@@ -4689,9 +4689,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             pass
 
     def _jpeg(self, frame):
-        if frame is None: return self._r(503,"text/plain","No frame")
+        if frame is None:
+            log.log("[SNAPSHOT] no frame yet")
+            return self._r(503, "text/plain", "No frame")
+        try:
+            h, w = frame.shape[:2]
+        except Exception as e:
+            log.log(f"[SNAPSHOT] bad frame: {e}")
+            return self._r(500, "text/plain", f"bad frame: {e}")
         j = to_jpeg(frame, 80)
-        if j: self._r(200,"image/jpeg",j)
+        if not j:
+            log.log(f"[SNAPSHOT] JPEG encode failed for {w}x{h} frame")
+            return self._r(500, "text/plain", "JPEG encode failed")
+        return self._r(200, "image/jpeg", j)
 
     def _api_state(self, s):
         tm = s.test_mode
