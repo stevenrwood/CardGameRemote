@@ -69,7 +69,7 @@ SLOT_LED_GOOD_CONF = 0.50
 # present = mean_brightness < SLOT_PRESENCE_BRIGHTNESS_CEILING.
 # Persisted + runtime-tunable from /test_slots.
 SLOT_PRESENCE_FILE = Path(__file__).parent / "slot_presence.txt"
-DEFAULT_PRESENCE_BRIGHTNESS = 125.0
+DEFAULT_PRESENCE_BRIGHTNESS = 140.0
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("scan")

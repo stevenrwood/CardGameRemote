@@ -802,7 +802,7 @@ def _console_watch_dealer(s, frame):
         return
 
     if phase == "settling":
-        if time.time() - s.console_settle_time < CONSOLE_SETTLE_S:
+        if time.time() - s.console_settle_time < s.brio_settle_s:
             return
         # Trust the initial motion trigger — don't re-verify. The old 2s
         # re-check rejected real cards when auto-exposure drifted the
@@ -1108,6 +1108,13 @@ class AppState:
         self.pending_verify = None     # None or {guess, slot, prompt}
         self.table_log = []            # [{ts, msg}]
         self.pi_base_url = os.environ.get("PI_BASE_URL", "http://pokerbuddy.local:8080")
+        # Tunables loaded from ~/.cardgame_host.json if present. Setup modal
+        # writes them back when the user saves, so defaults only matter on
+        # first run. pi_presence_threshold is a cached mirror of the Pi's
+        # own persisted value — pushed to the Pi on save.
+        cfg = _load_host_config()
+        self.brio_settle_s = float(cfg.get("brio_settle_s", DEFAULT_BRIO_SETTLE_S))
+        self.pi_presence_threshold = float(cfg.get("pi_presence_threshold", 140.0))
         self.pi_polling = False
         self.pi_poll_thread = None
         self.pi_prev_slots = {}        # slot_num -> last-seen card code (e.g. "Ac")
@@ -1800,10 +1807,33 @@ GUIDED_STABLE_SCANS = 3
 # shorter values led to verify modals popping with partial-insertion reads.
 GUIDED_SETTLE_S = 2.0
 
-# After the overhead (Brio) camera trips a motion event in the dealer zone,
-# wait this long before firing the whole-table scan. Kept short: most cards
-# are dealt with a single flick and settle in well under a second.
-CONSOLE_SETTLE_S = 0.7
+# Default seconds to wait after the overhead (Brio) camera trips a motion
+# event in the dealer zone before firing the whole-table scan. Runtime-
+# configurable via the Setup modal → persisted in the host config file.
+DEFAULT_BRIO_SETTLE_S = 0.7
+
+HOST_CONFIG_PATH = Path.home() / ".cardgame_host.json"
+
+
+def _load_host_config() -> dict:
+    """Read persisted host tunables. Returns {} if file is missing/bad."""
+    try:
+        return json.loads(HOST_CONFIG_PATH.read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        log.log(f"[CONFIG] Could not read {HOST_CONFIG_PATH}: {e}")
+        return {}
+
+
+def _save_host_config(updates: dict) -> None:
+    """Merge updates into the persisted host config and write back to disk."""
+    cfg = _load_host_config()
+    cfg.update(updates)
+    try:
+        HOST_CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    except OSError as e:
+        log.log(f"[CONFIG] Could not write {HOST_CONFIG_PATH}: {e}")
 
 
 def _pi_slot_led(s, slot_num: int, state: str):
@@ -2121,6 +2151,12 @@ def _guided_replace_loop(s):
     stable_count = 0
     best_card = None
     settled = False
+    # In replace mode the old card may still be physically in the slot
+    # when guided starts — require a present=false transition before we
+    # accept a present=true reading, otherwise the old card gets re-
+    # committed as "new". Trailing mode starts from an empty slot.
+    require_empty_first = (mode == "replace")
+    saw_empty = not require_empty_first
 
     while True:
         gd = s.guided_deal
@@ -2168,6 +2204,7 @@ def _guided_replace_loop(s):
             stable_count = 0
             best_card = None
             settled = False
+            saw_empty = not require_empty_first
             continue
 
         if waiting_verify:
@@ -2180,9 +2217,16 @@ def _guided_replace_loop(s):
             continue
 
         if not result.get("present"):
+            saw_empty = True
             stable_count = 0
             best_card = None
             settled = False
+            time.sleep(GUIDED_POLL_S)
+            continue
+
+        # Replace mode: ignore the old card that was still in the slot
+        # when guided started. Wait for the user to remove it first.
+        if not saw_empty:
             time.sleep(GUIDED_POLL_S)
             continue
 
@@ -2215,6 +2259,7 @@ def _guided_replace_loop(s):
                 stable_count = 0
                 best_card = None
                 settled = False
+                saw_empty = not require_empty_first
                 continue
 
         if stable_count < GUIDED_STABLE_SCANS:
@@ -3995,6 +4040,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "all_players": PLAYER_NAMES,
                 "games": ge.get_game_list(),
                 "game_groups": ge.get_game_groups(),
+                "brio_settle_s": round(s.brio_settle_s, 2),
+                "pi_presence_threshold": round(s.pi_presence_threshold, 1),
                 "dealer": ge.get_dealer().name,
                 "hand": ge.get_hand_state(),
                 "last_round_cards": s.console_last_round_cards,
@@ -5116,8 +5163,13 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
     </div>
     <div class="field">
       <label>Pi presence brightness ceiling</label>
-      <input id="setup-presence" type="number" min="0" max="255" step="1" value="125">
+      <input id="setup-presence" type="number" min="0" max="255" step="1" value="140">
       <div class="hint">Slot is "present" when its brightness falls below this.</div>
+    </div>
+    <div class="field">
+      <label>Brio scan settle (seconds)</label>
+      <input id="setup-settle" type="number" min="0" max="10" step="0.1" value="0.7">
+      <div class="hint">Delay after the dealer zone trips before the whole-table scan fires.</div>
     </div>
     <div class="modal-btns">
       <button class="modal-save" onclick="saveSetup()">Save</button>
@@ -5277,6 +5329,12 @@ function populateSetupModal(){
   var yolo=document.getElementById('setup-yolo');
   yolo.value=Math.round((ST.yolo_min_conf||0.5)*100);
   document.getElementById('yolo-val').textContent=yolo.value+'%';
+  if(ST.pi_presence_threshold!=null){
+    document.getElementById('setup-presence').value=Math.round(ST.pi_presence_threshold);
+  }
+  if(ST.brio_settle_s!=null){
+    document.getElementById('setup-settle').value=Number(ST.brio_settle_s).toFixed(1);
+  }
 }
 
 function onStart(){
@@ -5294,7 +5352,8 @@ function saveSetup(){
   });
   var yolo=parseInt(document.getElementById('setup-yolo').value,10)/100.0;
   var presence=parseFloat(document.getElementById('setup-presence').value);
-  var body={dealer:dealer,players:players,yolo_min_conf:yolo,presence_threshold:presence};
+  var settle=parseFloat(document.getElementById('setup-settle').value);
+  var body={dealer:dealer,players:players,yolo_min_conf:yolo,presence_threshold:presence,brio_settle_s:settle};
   var path=(ST&&ST.night_active)?'/api/console/settings':'/api/console/start_night';
   api(path,body).then(function(){closeModal('setup-modal');refresh();});
 }
@@ -5404,17 +5463,32 @@ refresh();
         presence = data.get("presence_threshold")
         if presence is not None:
             try:
+                pval = float(presence)
+                s.pi_presence_threshold = pval
                 url = f"{s.pi_base_url.rstrip('/')}/presence_threshold"
-                body = json.dumps({"value": float(presence)}).encode()
+                body = json.dumps({"value": pval}).encode()
                 req = urllib.request.Request(
                     url, data=body,
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
                 urllib.request.urlopen(req, timeout=3).read()
-                log.log(f"[CONSOLE] Pi presence_threshold → {presence}")
+                log.log(f"[CONSOLE] Pi presence_threshold → {pval}")
             except Exception as e:
                 log.log(f"[CONSOLE] presence_threshold push failed: {e}")
+        settle = data.get("brio_settle_s")
+        if settle is not None:
+            try:
+                s.brio_settle_s = max(0.0, min(10.0, float(settle)))
+                log.log(f"[CONSOLE] Brio settle → {s.brio_settle_s:.2f}s")
+            except (TypeError, ValueError):
+                pass
+        # Persist host-managed tunables so restarts keep the user's choices.
+        _save_host_config({
+            "brio_settle_s": s.brio_settle_s,
+            "pi_presence_threshold": s.pi_presence_threshold,
+            "yolo_min_conf": s.monitor.yolo_min_conf,
+        })
 
     def _proxy_slot_image(self, s, slot_num: int):
         """Proxy the Pi's /slots/<n>/image through Neo so the browser sees
@@ -5509,6 +5583,13 @@ def main():
     monitor = ZoneMonitor(threshold=args.threshold)
     _state = AppState(capture, cal, monitor)
     _state.latest_frame = frame
+    # Apply any persisted YOLO min-confidence now that the monitor exists.
+    _persisted = _load_host_config()
+    if "yolo_min_conf" in _persisted:
+        try:
+            monitor.yolo_min_conf = max(0.0, min(1.0, float(_persisted["yolo_min_conf"])))
+        except (TypeError, ValueError):
+            pass
 
     # Start server. ThreadingHTTPServer gives each client connection its own
     # thread so a browser's keep-alive polling (e.g. /table/state every 500ms)
