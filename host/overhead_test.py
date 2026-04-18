@@ -147,6 +147,15 @@ class LogBuffer:
         with self._lock:
             return list(self._lines[-n:])
 
+    def clear(self):
+        """Wipe the in-memory buffer and the backing log file."""
+        with self._lock:
+            self._lines = []
+        try:
+            LOG_FILE.write_text("")
+        except Exception:
+            pass
+
     def start_night(self):
         """Rotate the working log and start a dated archive for this
         poker night. Returns the archive filename."""
@@ -2126,21 +2135,32 @@ def _guided_deal_loop(s):
             time.sleep(GUIDED_POLL_S)
             continue
 
-        # Debounce window elapsed without a high-confidence read.
-        if best_card is not None:
-            conf = float(best_card.get("confidence", 0.0))
-            guess = {
-                "rank": best_card["rank"],
-                "suit": best_card["suit"],
-                "confidence": round(conf, 2),
-            }
-            prompt = (
-                f"Slot {expecting}: low confidence ({int(conf*100)}%). "
-                f"Confirm or correct."
+        # Debounce window elapsed without a high-confidence read. If YOLO
+        # never recognized anything at all across the whole window, the
+        # scanner is probably misreporting present=true for an empty slot
+        # (e.g., brightness threshold too high). Don't open a modal with
+        # an empty guess — log once, reset state, and keep polling.
+        if best_card is None:
+            log.log(
+                f"[GUIDED] Slot {expecting}: present but nothing recognized "
+                f"after {GUIDED_STABLE_SCANS} scans — Pi presence threshold "
+                f"may be too high; continuing to poll"
             )
-        else:
-            guess = {"rank": "", "suit": "", "confidence": 0.0}
-            prompt = f"Slot {expecting}: card present, not recognized."
+            stable_count = 0
+            settled = False
+            time.sleep(GUIDED_POLL_S)
+            continue
+
+        conf = float(best_card.get("confidence", 0.0))
+        guess = {
+            "rank": best_card["rank"],
+            "suit": best_card["suit"],
+            "confidence": round(conf, 2),
+        }
+        prompt = (
+            f"Slot {expecting}: low confidence ({int(conf*100)}%). "
+            f"Confirm or correct."
+        )
 
         with s.table_lock:
             s.pending_verify = {
@@ -2406,20 +2426,26 @@ def _guided_replace_loop(s):
             time.sleep(GUIDED_POLL_S)
             continue
 
-        if best_card is not None:
-            conf = float(best_card.get("confidence", 0.0))
-            guess = {
-                "rank": best_card["rank"],
-                "suit": best_card["suit"],
-                "confidence": round(conf, 2),
-            }
-            prompt = (
-                f"Slot {expecting} (replacement): low confidence "
-                f"({int(conf*100)}%). Confirm or correct."
+        if best_card is None:
+            log.log(
+                f"[GUIDED/{mode}] Slot {expecting}: present but nothing "
+                f"recognized after {GUIDED_STABLE_SCANS} scans — continuing"
             )
-        else:
-            guess = {"rank": "", "suit": "", "confidence": 0.0}
-            prompt = f"Slot {expecting} (replacement): not recognized."
+            stable_count = 0
+            settled = False
+            time.sleep(GUIDED_POLL_S)
+            continue
+
+        conf = float(best_card.get("confidence", 0.0))
+        guess = {
+            "rank": best_card["rank"],
+            "suit": best_card["suit"],
+            "confidence": round(conf, 2),
+        }
+        prompt = (
+            f"Slot {expecting} (replacement): low confidence "
+            f"({int(conf*100)}%). Confirm or correct."
+        )
 
         with s.table_lock:
             s.pending_verify = {
@@ -3693,6 +3719,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s.cal.zones = data.get("zones", [])
             s.cal.save()
             self._r(200,"application/json",'{"ok":true}')
+
+        elif p == "/api/log/clear":
+            log.clear()
+            self._r(200, "application/json", '{"ok":true}')
 
         elif p == "/api/monitor/start":
             if s.cal.ok and s.latest_frame is not None:
@@ -5142,10 +5172,20 @@ function saveLog(){
     setTimeout(function(){btn.textContent='Save Log'},2000);
   });
 }
+function clearLog(){
+  fetch('/api/log/clear',{method:'POST'}).then(function(){
+    var pre=document.getElementById('log');
+    pre.innerHTML='';
+    var btn=document.getElementById('clrbtn');
+    btn.textContent='Cleared';
+    setTimeout(function(){btn.textContent='Clear Log'},1500);
+  });
+}
 refresh();
 </script></head><body>
 <div id="toolbar">
   <button id="savebtn" onclick="saveLog()">Save Log</button>
+  <button id="clrbtn" onclick="clearLog()">Clear Log</button>
   <span id="status">Auto-refreshing every 2s</span>
 </div>
 <pre id="log">Loading...</pre>
