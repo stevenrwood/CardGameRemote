@@ -890,7 +890,7 @@ def _console_watch_dealer(s, frame):
             # freeze — not an error worth nagging about. Skip the adjust-
             # prompt and let the dealer click Confirm Cards when ready.
             is_hit_round = (
-                ge.current_game and ge.current_game.name == "7/27"
+                ge.current_game and ge.current_game.name.startswith("7/27")
                 and s.console_up_round >= 1
             )
             if is_hit_round:
@@ -1136,7 +1136,7 @@ def _announce_7_27_hand_values(s):
     """Walk each active player's up cards and announce their 7/27 totals,
     then announce which player is first-to-bet (highest value)."""
     ge = s.game_engine
-    if not ge.current_game or ge.current_game.name != "7/27":
+    if not ge.current_game or not ge.current_game.name.startswith("7/27"):
         return
     RANK_SHORT = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}
     # Gather up cards per player from the hand-wide history.
@@ -1452,6 +1452,9 @@ def _build_table_state(s):
     # flip face-up (standard 7/27 start). The /table modal consumes this
     # field. It stays None if the dealer already flipped one himself.
     flip_choice = None
+    # Flip choice only applies to the 2-down variant ("7/27" proper, not
+    # "7/27 (one up)" where the dealer deals a face-up directly). The
+    # len==2 check naturally gates this.
     if ge.current_game is not None and ge.current_game.name == "7/27":
         if s.rodney_flipped_up is None and len(s.rodney_downs) == 2:
             downs_sorted = sorted(s.rodney_downs.items())
@@ -1466,7 +1469,7 @@ def _build_table_state(s):
     # 7/27: compute hand values per player. Rodney's value includes both
     # his up and down cards; everyone else's is up-cards-only (we don't
     # know their downs).
-    is_7_27 = ge.current_game is not None and ge.current_game.name == "7/27"
+    is_7_27 = ge.current_game is not None and ge.current_game.name.startswith("7/27")
     if is_7_27:
         RANK_SHORT = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}
         up_by_player_cards = {}
@@ -2064,11 +2067,23 @@ def _guided_deal_loop(s):
             with s.table_lock:
                 s.guided_deal = None
                 s.table_state_version += 1
-            # For all-down games, guided completion means every card is
-            # accounted for — auto-advance the console state to betting so
-            # the UI's next action becomes "Pot is right" without needing
-            # a manual Confirm Cards click.
-            if s.console_state == "dealing" and s.console_total_up_rounds == 0:
+            # For all-down games (5CD, 3 Toed Pete, 7/27 2-down variant),
+            # guided completion means every card is accounted for — auto-
+            # advance to betting. For games whose first deal phase mixes
+            # downs with an up card (7/27 1d+1u), stay in "dealing" so the
+            # user can press Confirm Cards once Brio catches the up card.
+            ge = s.game_engine
+            first_deal_phase = next(
+                (ph for ph in (ge.current_game.phases if ge.current_game else [])
+                 if ph.type.value in ("deal", "community")),
+                None,
+            )
+            first_phase_has_up = bool(
+                first_deal_phase and "up" in first_deal_phase.pattern
+            )
+            if (s.console_state == "dealing"
+                    and s.console_total_up_rounds == 0
+                    and not first_phase_has_up):
                 s.console_state = "betting"
                 if s.console_betting_round == 0:
                     s.console_betting_round = 1
@@ -4396,25 +4411,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.pi_offline = not pi_up
                 s.pi_flash_held = False  # reset our tracker regardless
                 log.log(f"[PI] Deal-time ping: {'reachable' if pi_up else 'OFFLINE (suppressing calls)'}")
-                # Brio watching starts once every initial down card is in
-                # and validated. While the dealer is still dealing downs,
-                # his hand sweeps over local-player zones and trips false
-                # motion events. Baselines are still captured now (table
-                # is empty of up cards) so when watching flips on later,
-                # it compares against a clean snapshot. For games with no
-                # leading downs, or when the Pi is offline (no guided),
-                # start watching immediately.
+                # Brio watching: triggered for any game that will produce up
+                # cards, either via explicit up/community phases or an
+                # open-ended HIT_ROUND (7/27). Baselines are captured now
+                # while the table is empty of up cards, regardless of when
+                # watching actually starts. Whether to watch immediately or
+                # defer until guided finishes depends on whether the FIRST
+                # deal phase itself contains an up card.
                 leading_downs = _initial_down_count(ge)
                 will_guide = leading_downs > 0 and not s.pi_offline
-                if up_rounds != 0 and s.cal.ok and s.latest_frame is not None:
+                needs_brio = up_rounds != 0 or has_hit_round
+                first_deal_phase = next(
+                    (ph for ph in template.phases
+                     if ph.type.value in ("deal", "community")),
+                    None,
+                )
+                first_phase_has_up = bool(
+                    first_deal_phase and "up" in first_deal_phase.pattern
+                )
+                if needs_brio and s.cal.ok and s.latest_frame is not None:
                     s.monitor.capture_baselines(s.latest_frame)
                     s.monitoring = True
-                    if will_guide:
-                        s.console_scan_phase = "idle"
-                        log.log("[CONSOLE] Baselines captured; Brio watching deferred until initial down cards are validated")
-                    else:
+                    if first_phase_has_up or not will_guide:
+                        # Up cards can arrive now (1d+1u 7/27, 7/27 hit
+                        # round with no guided, etc.) — watch immediately.
                         s.console_scan_phase = "watching"
-                        log.log(f"[CONSOLE] Watching {ge.get_dealer().name}'s zone for first card")
+                        log.log(
+                            f"[CONSOLE] Watching {ge.get_dealer().name}'s "
+                            f"zone for first card"
+                        )
+                    else:
+                        # First phase is all downs (7CS, FTQ, 7/27 2-down);
+                        # defer watching until guided completes so dealer
+                        # hand motion doesn't trip false alarms.
+                        s.console_scan_phase = "idle"
+                        log.log(
+                            "[CONSOLE] Baselines captured; Brio watching "
+                            "deferred until initial down cards are validated"
+                        )
                 # Start the hand fresh: clear Rodney-side state and turn the
                 # scanner LEDs on so the initial down cards get good scans.
                 with s.table_lock:
@@ -4479,7 +4513,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # first up-card round), a player who didn't take a card this
             # round increments their freeze count. Three freezes in a row
             # means they can't take another card this hand.
-            if (ge.current_game and ge.current_game.name == "7/27"
+            if (ge.current_game and ge.current_game.name.startswith("7/27")
                     and round_num > 1):
                 _update_7_27_freezes(s, round_cards)
             s.console_last_round_cards = []
