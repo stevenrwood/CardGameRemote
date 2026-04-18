@@ -130,9 +130,11 @@ class LogBuffer:
         LOG_FILE.write_text("")
 
     def log(self, msg):
-        ts = datetime.now().strftime("%H:%M:%S")
+        # ms precision so we can time sub-second pipeline stages.
+        now = datetime.now()
+        ts = now.strftime("%H:%M:%S") + f".{now.microsecond // 1000:03d}"
         line = f"[{ts}] {msg}"
-        print(f"  {msg}")
+        print(line)
         with self._lock:
             self._lines.append(line)
             self._lines = self._lines[-500:]
