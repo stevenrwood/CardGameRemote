@@ -1205,13 +1205,20 @@ def _announce_7_27_hand_values(s):
 
 def _announce_poker_hand_bet_first(s):
     """Announce who bets first at a poker-hand game based on best visible
-    hand. Skips 7/27 (its own announcer) and Challenge games."""
+    hand. Skips 7/27 (its own announcer), Challenge games, and all-down
+    games (5CD, 3 Toed Pete) where nobody has an up card to compare."""
     ge = s.game_engine
     if not ge.current_game:
         return
     if ge.current_game.name.startswith("7/27"):
         return
     if any(ph.type.value == "challenge" for ph in ge.current_game.phases):
+        return
+    has_up_deal = any(
+        ph.type.value in ("deal", "community") and "up" in ph.pattern
+        for ph in ge.current_game.phases
+    )
+    if not has_up_deal:
         return
     try:
         from poker_hands import best_hand, HandResult, RANK_VALUE, RANK_NAME, VALUE_RANK
