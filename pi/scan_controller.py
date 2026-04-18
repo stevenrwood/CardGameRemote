@@ -73,6 +73,11 @@ DEFAULT_PRESENCE_BRIGHTNESS = 140.0
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("scan")
+# Flasks default request logger writes one line per POST /slots/N/scan,
+# which the host polls multiple times per second during guided dealing.
+# Quiet it down to warnings so the interesting scan-state-change logs are
+# actually readable.
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 
 # ---- Hardware wrappers ----
@@ -342,6 +347,8 @@ class AppState:
         self.test_slot_stamp = 0
         self.calibration = self._load_calibration()
         self.presence_threshold = self._load_presence_threshold()
+        # Per-slot last-logged scan state so we only log on change.
+        self.last_scan_state: dict[int, tuple[bool, str]] = {}
         log.info(f"Slot presence threshold: {self.presence_threshold:.1f}")
         log.info(f"Scan controller ready with {len(self.cameras)} cameras; "
                  f"{len(self.calibration.get('slots', []))}/{NUM_SLOTS} slots calibrated")
@@ -878,10 +885,20 @@ def scan_slot(slot_num: int):
         if pred is not None:
             rank, suit, conf = pred
             card = {"rank": rank, "suit": suit, "confidence": round(conf, 3)}
-    log.info(
-        f"[SCAN/slot{slot_num}] bright={brightness:.1f} std={stddev:.1f} "
-        f"present={present} card={card}"
+    # Only log when the observed state differs from what we logged last
+    # time for this slot. The host polls several times per second during
+    # guided dealing; logging every scan drowns out the interesting lines.
+    card_code = (
+        f"{card['rank']}{card['suit'][0]}:{int(card['confidence']*100)}"
+        if card else ""
     )
+    state_key = (present, card_code)
+    if _state.last_scan_state.get(slot_num) != state_key:
+        _state.last_scan_state[slot_num] = state_key
+        log.info(
+            f"[SCAN/slot{slot_num}] bright={brightness:.1f} std={stddev:.1f} "
+            f"present={present} card={card}"
+        )
     return jsonify({
         "ok": True,
         "slot": slot_num,
