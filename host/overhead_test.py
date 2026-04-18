@@ -926,13 +926,13 @@ def _console_watch_dealer(s, frame):
                     trigger_zone = z
                     break
             if trigger_zone is not None:
-                log.log(f"[CONSOLE] Hit-round card detected in {trigger_zone['name']}'s zone — 2s settle")
+                log.log(f"[CONSOLE] Hit-round card detected in {trigger_zone['name']}'s zone — {s.brio_settle_s:.1f}s settle")
                 s.console_scan_phase = "settling"
                 s.console_settle_time = time.time()
             return
         crop = s.monitor.check_single(frame, dealer_zone)
         if crop is not None:
-            log.log(f"[CONSOLE] Dealer card detected in {dealer_name}'s zone — 2s settle")
+            log.log(f"[CONSOLE] Dealer card detected in {dealer_name}'s zone — {s.brio_settle_s:.1f}s settle")
             s.console_scan_phase = "settling"
             s.console_settle_time = time.time()
             return
