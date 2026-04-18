@@ -275,20 +275,24 @@ class FrameCapture:
     def _start_stream(self):
         # ffmpegs avfoundation index order (set in __init__ via
         # find_index_by_name) does NOT match OpenCVs AVFoundation ordering.
-        # Probe indices 0..5 and pick the first one that actually delivers
-        # the resolution we asked for — that is the Brio, not the 1080p
-        # C920X or the built-in webcam.
-        self._cv_index = self._find_matching_cv_index()
+        # Probe indices 0..5 and keep the first open VideoCapture that
+        # actually delivers the resolution we asked for — that is the
+        # Brio, not the 1080p C920X or the built-in webcam. We hold on
+        # to the matching cap here rather than releasing and reopening,
+        # because a rapid close/open on the same AVFoundation device
+        # can deadlock.
+        self._cv_index, self._initial_cap = self._find_matching_cv_cap()
         if self._cv_index is None:
             log.log(
                 f"[CAPTURE] no cv2.VideoCapture index delivered "
                 f"{self.width}x{self.height}; falling back to 0"
             )
             self._cv_index = 0
+            self._initial_cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
         self._stream_thread = Thread(target=self._read_stream, daemon=True)
         self._stream_thread.start()
 
-    def _find_matching_cv_index(self):
+    def _find_matching_cv_cap(self):
         target_w, target_h = self.width, self.height
         for idx in range(6):
             cap = cv2.VideoCapture(idx, cv2.CAP_AVFOUNDATION)
@@ -302,12 +306,12 @@ class FrameCapture:
             w = h = 0
             if ok and frame is not None:
                 h, w = frame.shape[:2]
-            try: cap.release()
-            except Exception: pass
             log.log(f"[CAPTURE] probe idx={idx}: {w}x{h}")
             if w == target_w and h == target_h:
-                return idx
-        return None
+                return idx, cap
+            try: cap.release()
+            except Exception: pass
+        return None, None
 
     def _read_stream(self):
         """Keep an AVFoundation VideoCapture open and push each decoded
@@ -317,10 +321,17 @@ class FrameCapture:
         backoff_s = 1.0
         frame_count = 0
         last_log = time.time()
+        first_pass = True
         while not self._stop:
-            cap = cv2.VideoCapture(self._cv_index, cv2.CAP_AVFOUNDATION)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            if first_pass and self._initial_cap is not None:
+                # Reuse the already-open capture from the resolution probe.
+                cap = self._initial_cap
+                self._initial_cap = None
+            else:
+                cap = cv2.VideoCapture(self._cv_index, cv2.CAP_AVFOUNDATION)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            first_pass = False
             # Smallest internal buffer so read() returns the newest frame
             # rather than an old queued one.
             try:
