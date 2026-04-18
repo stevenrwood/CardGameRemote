@@ -270,20 +270,13 @@ class FrameCapture:
         return "1920x1080"
 
     def _spawn_ffmpeg(self):
-        """Launch ffmpeg in MJPEG-to-stdout streaming mode.
-
-        Low-latency flags (-fflags nobuffer, -flags low_delay) keep
-        ffmpeg from holding onto stale frames; dropping the input
-        framerate lets avfoundation pick the cameras native rate
-        instead of forcing a potentially-unsupported 10 fps."""
+        """Launch ffmpeg in MJPEG-to-stdout streaming mode."""
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
             "-f", "avfoundation",
+            "-framerate", "10",
             "-video_size", self.resolution,
             "-i", f"{self.camera_index}:none",
-            "-fflags", "nobuffer",
             "-f", "mjpeg", "-q:v", "3", "-",
         ]
         return subprocess.Popen(
@@ -5822,7 +5815,12 @@ def main():
             break
         time.sleep(0.1)
     if frame is None:
-        sys.exit("  ERROR: No frames from camera after 15s. Is Teams holding the Brio?")
+        tail = getattr(capture, "_stderr_tail", b"").decode(errors="replace").strip()
+        hint = f"\n  ffmpeg stderr tail: {tail}" if tail else ""
+        sys.exit(
+            f"  ERROR: No frames from camera after 15s. "
+            f"Is another app holding the Brio?{hint}"
+        )
     print(f"  OK: {frame.shape[1]}x{frame.shape[0]}")
 
     cal = Calibration()
