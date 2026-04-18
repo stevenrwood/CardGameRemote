@@ -1451,6 +1451,19 @@ def _next_deal_position_type(s):
     return None
 
 
+def _skip_inactive_dealer(s):
+    """Rotate past any unchecked player so the dealer is always an active
+    seat. Caps the loop at one full rotation to guarantee termination if
+    every player ends up inactive."""
+    ge = s.game_engine
+    if not s.console_active_players:
+        return
+    for _ in range(len(ge.players)):
+        if ge.get_dealer().name in s.console_active_players:
+            return
+        ge.advance_dealer()
+
+
 def _total_downs_in_pattern(ge):
     """Total number of down cards in the current game's deal pattern.
 
@@ -1782,8 +1795,10 @@ GUIDED_POLL_S = 0.6       # interval between /slots/<n>/scan polls
 GUIDED_STABLE_SCANS = 3
 # After first detecting a card in the slot, wait this long before using any
 # scan reading. Gives the dealer time to fully seat the card so YOLO isn't
-# fighting motion blur on the first capture.
-GUIDED_SETTLE_S = 1.0
+# fighting motion blur on the first capture. Longer than strictly needed
+# to give the dealer time to finish placing the card before YOLO reads —
+# shorter values led to verify modals popping with partial-insertion reads.
+GUIDED_SETTLE_S = 2.0
 
 # After the overhead (Brio) camera trips a motion event in the dealer zone,
 # wait this long before firing the whole-table scan. Kept short: most cards
@@ -1887,12 +1902,15 @@ def _guided_deal_loop(s):
                   and s.console_total_up_rounds > 0
                   and s.console_scan_phase == "idle"):
                 # Mixed game (7CS, Hold'em, FTQ): initial downs are in,
-                # now hand off to Brio to watch for the up card(s).
-                if s.cal.ok and s.latest_frame is not None:
-                    s.monitor.capture_baselines(s.latest_frame)
-                    s.monitoring = True
-                    s.console_scan_phase = "watching"
-                    log.log("[CONSOLE] Guided downs done → Brio watching dealer zone")
+                # now hand off to Brio to watch for the up card(s). The
+                # baselines captured at Deal-time are still valid — the
+                # table had no up cards then and still has none now (local
+                # down cards are kept in hand, not placed in up-zones).
+                ge = s.game_engine
+                s.monitoring = True
+                s.console_scan_phase = "watching"
+                dname = ge.get_dealer().name if ge.current_game else "dealer"
+                log.log(f"[CONSOLE] Guided downs done → Brio watching {dname}'s zone")
             return
 
         # Was this slot's verify modal just resolved? Advance if so.
@@ -3887,10 +3905,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/state":
             ge = s.game_engine
-            # Include zone-recognized cards with details
+            # Include zone-recognized cards with details — only for players
+            # checked in as active. Inactive players' zones are still
+            # calibrated but not in play this hand.
             zone_cards = {}
             for z in s.cal.zones:
                 name = z["name"]
+                if name not in s.console_active_players:
+                    continue
                 card = s.monitor.last_card.get(name, "")
                 details = s.monitor.recognition_details.get(name, {})
                 zone_cards[name] = {
@@ -4114,22 +4136,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Brio watching starts once every initial down card is in
                 # and validated. While the dealer is still dealing downs,
                 # his hand sweeps over local-player zones and trips false
-                # motion events. Guided-deal completion is the trigger that
-                # hands off to the monitor — here we just flag "monitor
-                # enabled" and idle the scan phase. For games with no
+                # motion events. Baselines are still captured now (table
+                # is empty of up cards) so when watching flips on later,
+                # it compares against a clean snapshot. For games with no
                 # leading downs, or when the Pi is offline (no guided),
                 # start watching immediately.
                 leading_downs = _initial_down_count(ge)
                 will_guide = leading_downs > 0 and not s.pi_offline
                 if up_rounds != 0 and s.cal.ok and s.latest_frame is not None:
+                    s.monitor.capture_baselines(s.latest_frame)
                     s.monitoring = True
                     if will_guide:
                         s.console_scan_phase = "idle"
-                        log.log("[CONSOLE] Brio watching deferred until initial down cards are validated")
+                        log.log("[CONSOLE] Baselines captured; Brio watching deferred until initial down cards are validated")
                     else:
-                        s.monitor.capture_baselines(s.latest_frame)
                         s.console_scan_phase = "watching"
-                        log.log("[CONSOLE] Watching dealer zone for first card")
+                        log.log(f"[CONSOLE] Watching {ge.get_dealer().name}'s zone for first card")
                 # Start the hand fresh: clear Rodney-side state and turn the
                 # scanner LEDs on so the initial down cards get good scans.
                 with s.table_lock:
@@ -4310,7 +4332,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     log.log("[CONSOLE] No more up rounds — idle until End Hand")
                     s.console_state = "hand_over"
                 else:
-                    log.log("[CONSOLE] Baselines recaptured, watching dealer zone")
+                    log.log(f"[CONSOLE] Baselines recaptured, watching {ge.get_dealer().name}'s zone")
                     s.console_state = "dealing"
             log.log(f"[CONSOLE] Next Round — up round {s.console_up_round}/{s.console_total_up_rounds}")
             # Also queue any pending down-card scans so games with a final
@@ -4334,6 +4356,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             _stop_guided_deal(s)
             ge = s.game_engine
             result = ge.end_hand()
+            _skip_inactive_dealer(s)
+            result["next_dealer"] = ge.get_dealer().name
             s.console_last_round_cards = []
             s.console_hand_cards = []
             s.console_up_round = 0
@@ -4368,6 +4392,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p == "/api/console/advance_dealer":
             ge = s.game_engine
             ge.advance_dealer()
+            _skip_inactive_dealer(s)
             log.log(f"[CONSOLE] Dealer advanced to {ge.get_dealer().name}")
             self._r(200, "application/json", json.dumps({"dealer": ge.get_dealer().name}))
 
@@ -5140,7 +5165,6 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
 var ST=null;
 var correctPlayer=null;
 var gameOptionsBuilt=false;
-var zoneBuilt=false;
 
 function api(path,data){
   return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -5160,11 +5184,16 @@ function buildGameOptions(){
   gameOptionsBuilt=true;
 }
 
+var lastZoneKey='';
 function buildZoneRows(){
-  if(zoneBuilt||!ST||!ST.all_players) return;
+  if(!ST||!ST.active_players) return;
+  // Rebuild when the active-player list changes between hands.
+  var key=(ST.active_players||[]).join(',');
+  if(key===lastZoneKey) return;
+  lastZoneKey=key;
   var zc=document.getElementById('zone-cards');
   zc.innerHTML='';
-  ST.all_players.forEach(function(n){
+  ST.active_players.forEach(function(n){
     var div=document.createElement('div');
     div.className='zone-row';div.id='zr-'+n;
     div.onclick=(function(player){return function(){openCorrect(player);};})(n);
@@ -5174,7 +5203,6 @@ function buildZoneRows(){
     div.appendChild(name);div.appendChild(card);div.appendChild(arr);
     zc.appendChild(div);
   });
-  zoneBuilt=true;
 }
 
 function render(){
@@ -5207,7 +5235,7 @@ function render(){
     abtn.style.visibility='hidden';
   }
 
-  (ST.all_players||[]).forEach(function(n){
+  (ST.active_players||[]).forEach(function(n){
     var zi=(ST.zone_cards||{})[n]||{};
     var cs=document.getElementById('zc-'+n);
     if(!cs) return;
