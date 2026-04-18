@@ -820,19 +820,14 @@ class ZoneMonitor:
 # ---------------------------------------------------------------------------
 
 def _brio_player_names(s):
-    """Active players whose Brio zones can actually show a card.
+    """Active players whose Brio zones the overhead watcher should scan.
 
-    Excludes remote players (Rodney) — their Brio zone is the physical
-    spot on the table where nothing ever gets placed. Rodney's up cards
-    come from his /table flip choice or the Pi scanner, not the overhead
-    camera. Trying to scan a remote zone produces only 'No card' /
-    'Missing cards — please adjust' false prompts.
+    For both local and remote players: the dealer places face-up cards
+    in the players Brio zone for all players to see (Rodneys flipped-
+    up card in 7/27, his up cards in stud games, etc.). So every active
+    player contributes a Brio zone.
     """
-    ge = s.game_engine
-    if ge is None:
-        return set()
-    remote = {p.name for p in ge.players if p.is_remote}
-    return {n for n in s.console_active_players if n not in remote}
+    return set(s.console_active_players)
 
 
 def _console_watch_dealer(s, frame):
@@ -4277,7 +4272,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 ge.current_game is not None
                 and s.console_state != "idle"
             )
-            has_up = s.console_total_up_rounds > 0
+            has_up = s.console_total_up_rounds > 0 or (
+                ge.current_game is not None and any(
+                    ph.type.value == "hit_round" for ph in ge.current_game.phases
+                )
+            )
             # Map console_state -> phase label + action button spec for the UI.
             if not s.night_active:
                 phase_label = "Night not started"
@@ -4599,6 +4598,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             queued = _enqueue_down_card_verifies(s)
             if queued:
                 log.log(f"[CONSOLE] Down-card verify queued for slots {queued}")
+            # If Rodney flipped a card (7/27 2-down), stop its slots blink-
+            # hint now that the round is confirmed and the physical card is
+            # on the table.
+            if s.rodney_flipped_up and not s.pi_offline:
+                _pi_slot_led(s, int(s.rodney_flipped_up["slot"]), "off")
             _update_flash_for_deal_state(s)
             # /table polls on state version; the hand-wide up-card history
             # just grew so bump the version or clients 304 and never see
