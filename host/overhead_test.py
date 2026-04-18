@@ -4701,6 +4701,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not j:
             log.log(f"[SNAPSHOT] JPEG encode failed for {w}x{h} frame")
             return self._r(500, "text/plain", "JPEG encode failed")
+        log.log(f"[SNAPSHOT] served {w}x{h} JPEG ({len(j)} bytes)")
         return self._r(200, "image/jpeg", j)
 
     def _api_state(self, s):
@@ -5145,6 +5146,10 @@ img.onload=function(){{
   var sc=Math.min((window.innerWidth-40)/imgW,1);
   c.width=Math.round(imgW*sc);c.height=Math.round(imgH*sc);c.dataset.s=sc;
   draw();document.getElementById('status').textContent=steps[0].p;
+}};
+img.onerror=function(){{
+  document.getElementById('status').textContent=
+    'Image load FAILED — /snapshot returned an error. Check host log.';
 }};
 img.src='/snapshot?'+Date.now();
 function S(){{return parseFloat(c.dataset.s)||1}}
