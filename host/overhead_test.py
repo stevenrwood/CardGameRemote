@@ -258,6 +258,7 @@ class FrameCapture:
                 subprocess.run([
                     "ffmpeg", "-y", "-loglevel", "error", "-nostdin",
                     "-f", "avfoundation", "-video_size", res, "-framerate", "5",
+                    "-pixel_format", "uyvy422",
                     "-i", f"{self.camera_index}:none", "-frames:v", "1",
                     "-q:v", "2", str(CAPTURE_FILE)
                 ], capture_output=True, timeout=10, stdin=subprocess.DEVNULL)
@@ -271,12 +272,18 @@ class FrameCapture:
         return "1920x1080"
 
     def _spawn_ffmpeg(self):
-        """Launch ffmpeg in MJPEG-to-stdout streaming mode."""
+        """Launch ffmpeg in MJPEG-to-stdout streaming mode.
+
+        -pixel_format uyvy422 matches what Brio (and most UVC webcams)
+        natively emit via AVFoundation. Without it, ffmpeg guesses
+        yuv420p, the device rejects the format, and the pipeline stalls
+        producing a single frame forever."""
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
             "-f", "avfoundation",
             "-framerate", "10",
             "-video_size", self.resolution,
+            "-pixel_format", "uyvy422",
             "-i", f"{self.camera_index}:none",
             "-f", "mjpeg", "-q:v", "3", "-",
         ]
