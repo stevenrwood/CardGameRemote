@@ -3724,12 +3724,17 @@ function poll() {
 }
 
 function pickFlip(slot) {
+  // Close the modal immediately so the user gets instant feedback instead
+  // of waiting up to one poll cycle (500 ms) for the next render pass.
+  var fmodal = document.getElementById('flip-modal');
+  if (fmodal) fmodal.classList.remove('show');
   fetch('/api/table/flip_up', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({slot: slot})
   }).then(function(r){return r.json()}).then(function(d) {
     if (!d.ok) alert('Flip failed: ' + (d.error || 'unknown'));
-  });
+    poll();
+  }).catch(function(e) { console.warn('flip failed', e); });
 }
 
 function confirmVerify() {
@@ -4017,13 +4022,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p == "/api/table/flip_up":
             # Rodney picked which of his 2 initial down cards to flip face-up.
             # Keep the card in rodney_downs — the physical card stays in the
-            # slot and still counts toward the initial deal count. Popping
-            # it made _next_deal_position_type think another down card was
-            # needed, which held the flash and blinked the slot LED.
+            # slot and still counts toward the initial deal count. Mark the
+            # slot in rodney_flipped_up, feed the card into last_card so the
+            # confirm flow treats it as an up card for this round, and blink
+            # the slots LED so the dealer knows which physical card to pull
+            # out and show the table.
             try:
                 slot_num = int(data.get("slot"))
             except (TypeError, ValueError):
                 return self._r(400, "application/json", '{"ok":false,"error":"bad slot"}')
+            rodney = next((p2 for p2 in s.game_engine.players if p2.is_remote), None)
+            RANK_TO_NAME = {"A": "Ace", "K": "King", "Q": "Queen", "J": "Jack"}
+            SUIT_TO_NAME = {"spades": "Spades", "hearts": "Hearts",
+                            "diamonds": "Diamonds", "clubs": "Clubs"}
             with s.table_lock:
                 d = s.rodney_downs.get(slot_num)
                 if d is None:
@@ -4032,11 +4043,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.rodney_flipped_up = {
                     "rank": d["rank"], "suit": d["suit"], "slot": slot_num,
                 }
+                if rodney:
+                    rank_nm = RANK_TO_NAME.get(d["rank"], d["rank"])
+                    suit_nm = SUIT_TO_NAME.get(d["suit"], d["suit"])
+                    s.monitor.last_card[rodney.name] = f"{rank_nm} of {suit_nm}"
+                    s.monitor.zone_state[rodney.name] = "recognized"
                 _table_log_add(
                     s,
                     f"Slot {slot_num}: flipping up ({d['rank']}{d['suit'][0]})",
                 )
                 s.table_state_version += 1
+            # Blink the slots LED so the dealer can spot the chosen physical
+            # card at a glance. Skipped when the Pi is offline.
+            if not s.pi_offline:
+                _pi_slot_led(s, slot_num, "blink")
             self._r(200, "application/json", '{"ok":true}')
 
         elif p == "/api/table/fold":
@@ -4492,6 +4512,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # scanner LEDs on so the initial down cards get good scans.
                 with s.table_lock:
                     s.rodney_downs = {}
+                    s.rodney_flipped_up = None
                     s.slot_pending = {}
                     s.slot_empty = {}
                     s.verify_queue = []
