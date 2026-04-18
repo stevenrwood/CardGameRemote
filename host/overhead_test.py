@@ -1203,6 +1203,69 @@ def _announce_7_27_hand_values(s):
         speech.say(phrase)
 
 
+def _announce_poker_hand_bet_first(s):
+    """Announce who bets first at a poker-hand game based on best visible
+    hand. Skips 7/27 (its own announcer) and Challenge games."""
+    ge = s.game_engine
+    if not ge.current_game:
+        return
+    if ge.current_game.name.startswith("7/27"):
+        return
+    if any(ph.type.value == "challenge" for ph in ge.current_game.phases):
+        return
+    try:
+        from poker_hands import best_hand, HandResult, RANK_VALUE, RANK_NAME, VALUE_RANK
+    except Exception as e:
+        log.log(f"[POKER] best_hand unavailable: {e}")
+        return
+
+    RANK_SHORT = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}
+    per_player_cards = {}
+    for entry in s.console_hand_cards:
+        parts = entry.get("card", "").split(" of ")
+        if len(parts) != 2:
+            continue
+        rank_full, suit_full = parts[0].strip(), parts[1].strip().lower()
+        rank = RANK_SHORT.get(rank_full, rank_full)
+        per_player_cards.setdefault(entry["player"], []).append((rank, suit_full))
+
+    wild_ranks = list(getattr(ge, "wild_ranks", []) or [])
+    best_player = None
+    best_result = None
+    for name in s.console_active_players:
+        if name in s.folded_players:
+            continue
+        cards = per_player_cards.get(name, [])
+        if not cards:
+            continue
+        try:
+            if len(cards) == 1:
+                # Single up card — treat as high-card only.
+                rank, suit = cards[0]
+                v = RANK_VALUE.get(rank, 0)
+                result = HandResult(
+                    "high_card",
+                    f"{RANK_NAME.get(rank, rank)} high",
+                    [v],
+                    [],
+                )
+            else:
+                result = best_hand(cards, wild_ranks=wild_ranks)
+        except Exception as e:
+            log.log(f"[POKER] eval {name} failed: {e}")
+            continue
+        log.log(f"[POKER] {name}: {result.label}")
+        key = (result.rank, result.tiebreakers)
+        if best_result is None or key > (best_result.rank, best_result.tiebreakers):
+            best_result = result
+            best_player = name
+
+    if best_player is not None and best_result is not None:
+        phrase = f"{best_player}, your bet with {best_result.label}"
+        log.log(f"[POKER] Bet first: {phrase}")
+        speech.say(phrase)
+
+
 def _check_follow_the_queen_round(s, round_cards):
     """Check cards for Follow the Queen wild at end of round.
 
@@ -4573,6 +4636,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # For 7/27, announce each player's hand value(s) after the
             # up-cards have been accumulated + indicate who bets first.
             _announce_7_27_hand_values(s)
+            _announce_poker_hand_bet_first(s)
             # 7/27 freeze tracking: on hit rounds (any round after the
             # first up-card round), a player who didn't take a card this
             # round increments their freeze count. Three freezes in a row

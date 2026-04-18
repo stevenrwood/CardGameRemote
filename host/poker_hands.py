@@ -35,6 +35,12 @@ RANK_NAME = {
     "10": "Ten", "9": "Nine", "8": "Eight", "7": "Seven",
     "6": "Six", "5": "Five", "4": "Four", "3": "Three", "2": "Two",
 }
+# Plural of each rank for hand labels ("Pair of Sixes", "Three of a Kind, Aces").
+RANK_PLURAL = {
+    "A": "Aces", "K": "Kings", "Q": "Queens", "J": "Jacks",
+    "10": "Tens", "9": "Nines", "8": "Eights", "7": "Sevens",
+    "6": "Sixes", "5": "Fives", "4": "Fours", "3": "Threes", "2": "Twos",
+}
 
 SUITS = {"clubs", "diamonds", "hearts", "spades"}
 SUIT_FROM_LETTER = {"c": "clubs", "d": "diamonds", "h": "hearts", "s": "spades"}
@@ -121,6 +127,10 @@ def _parse_cards(cards, wild_ranks) -> list[Card]:
 
 def _rank_name(v: int) -> str:
     return RANK_NAME[VALUE_RANK[v]]
+
+
+def _rank_plural(v: int) -> str:
+    return RANK_PLURAL[VALUE_RANK[v]]
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +336,7 @@ def best_hand(cards, wild_ranks=None) -> HandResult:
             rv, used = r
             return HandResult(
                 "five_of_a_kind",
-                f"Five of a Kind, {_rank_name(rv)}s",
+                f"Five of a Kind, {_rank_plural(rv)}",
                 [rv],
                 used,
             )
@@ -346,7 +356,7 @@ def best_hand(cards, wild_ranks=None) -> HandResult:
             rv, used = r
             return HandResult(
                 "four_of_a_kind",
-                f"Four of a Kind, {_rank_name(rv)}s",
+                f"Four of a Kind, {_rank_plural(rv)}",
                 [rv],
                 used,
             )
@@ -358,7 +368,7 @@ def best_hand(cards, wild_ranks=None) -> HandResult:
             trips, pair, used = r
             return HandResult(
                 "full_house",
-                f"Full House, {_rank_name(trips)}s over {_rank_name(pair)}s",
+                f"Full House, {_rank_plural(trips)} over {_rank_plural(pair)}",
                 [trips, pair],
                 used,
             )
@@ -394,7 +404,7 @@ def best_hand(cards, wild_ranks=None) -> HandResult:
             rv, used = r
             return HandResult(
                 "three_of_a_kind",
-                f"Three of a Kind, {_rank_name(rv)}s",
+                f"Three of a Kind, {_rank_plural(rv)}",
                 [rv],
                 used,
             )
@@ -406,7 +416,7 @@ def best_hand(cards, wild_ranks=None) -> HandResult:
             hi, lo, used = r
             return HandResult(
                 "two_pair",
-                f"Two Pair, {_rank_name(hi)}s and {_rank_name(lo)}s",
+                f"Two Pair, {_rank_plural(hi)} and {_rank_plural(lo)}",
                 [hi, lo],
                 used,
             )
@@ -417,7 +427,7 @@ def best_hand(cards, wild_ranks=None) -> HandResult:
         rv, used = r
         return HandResult(
             "pair",
-            f"Pair of {_rank_name(rv)}s",
+            f"Pair of {_rank_plural(rv)}",
             [rv],
             used,
         )
