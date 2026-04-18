@@ -273,8 +273,41 @@ class FrameCapture:
         return "1920x1080"
 
     def _start_stream(self):
+        # ffmpegs avfoundation index order (set in __init__ via
+        # find_index_by_name) does NOT match OpenCVs AVFoundation ordering.
+        # Probe indices 0..5 and pick the first one that actually delivers
+        # the resolution we asked for — that is the Brio, not the 1080p
+        # C920X or the built-in webcam.
+        self._cv_index = self._find_matching_cv_index()
+        if self._cv_index is None:
+            log.log(
+                f"[CAPTURE] no cv2.VideoCapture index delivered "
+                f"{self.width}x{self.height}; falling back to 0"
+            )
+            self._cv_index = 0
         self._stream_thread = Thread(target=self._read_stream, daemon=True)
         self._stream_thread.start()
+
+    def _find_matching_cv_index(self):
+        target_w, target_h = self.width, self.height
+        for idx in range(6):
+            cap = cv2.VideoCapture(idx, cv2.CAP_AVFOUNDATION)
+            if not cap.isOpened():
+                try: cap.release()
+                except Exception: pass
+                continue
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
+            ok, frame = cap.read()
+            w = h = 0
+            if ok and frame is not None:
+                h, w = frame.shape[:2]
+            try: cap.release()
+            except Exception: pass
+            log.log(f"[CAPTURE] probe idx={idx}: {w}x{h}")
+            if w == target_w and h == target_h:
+                return idx
+        return None
 
     def _read_stream(self):
         """Keep an AVFoundation VideoCapture open and push each decoded
@@ -285,7 +318,7 @@ class FrameCapture:
         frame_count = 0
         last_log = time.time()
         while not self._stop:
-            cap = cv2.VideoCapture(self.camera_index, cv2.CAP_AVFOUNDATION)
+            cap = cv2.VideoCapture(self._cv_index, cv2.CAP_AVFOUNDATION)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             # Smallest internal buffer so read() returns the newest frame
@@ -305,7 +338,7 @@ class FrameCapture:
                 continue
             backoff_s = 1.0
             log.log(
-                f"[CAPTURE] VideoCapture opened idx={self.camera_index} "
+                f"[CAPTURE] VideoCapture opened idx={self._cv_index} "
                 f"{self.width}x{self.height}"
             )
             while not self._stop:
