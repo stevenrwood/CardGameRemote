@@ -295,14 +295,18 @@ class FrameCapture:
         self._stream_thread.start()
 
     def _drain_stderr(self, proc):
-        """Keep ffmpegs stderr pipe from filling and blocking stdout. Also
-        capture the last few lines so ffmpeg errors are visible when the
-        stream dies."""
+        """Keep ffmpegs stderr pipe from filling and blocking stdout. Log
+        each line with an [FFMPEG] prefix so problems surface in real time,
+        and retain the last line so the startup timeout message can quote
+        it."""
         try:
             for line in iter(proc.stderr.readline, b""):
                 if not line:
                     break
                 self._stderr_tail = line
+                text = line.decode(errors="replace").rstrip()
+                if text:
+                    log.log(f"[FFMPEG] {text}")
         except Exception:
             pass
 
