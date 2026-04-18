@@ -2152,11 +2152,11 @@ def _guided_replace_loop(s):
     slots = list(gd["slots"])
     mode = gd.get("mode", "replace")
     log.log(f"[GUIDED/{mode}] Started — slots {slots}")
-    # Light every slot in the list so the dealer can see which ones are
-    # pending; current expected slot solid, others blink. Trailing mode
-    # is usually a single slot so only the solid LED shows.
+    # Strict single-slot: only the slot being processed right now has its
+    # LED lit, every other slot is off. Previously upcoming slots blinked,
+    # which looked like we were trying to process them in parallel.
     for i, n in enumerate(slots):
-        _pi_slot_led(s, n, "on" if i == 0 else "blink")
+        _pi_slot_led(s, n, "on" if i == 0 else "off")
     stable_count = 0
     best_card = None
     settled = False
@@ -2225,7 +2225,22 @@ def _guided_replace_loop(s):
             time.sleep(1.5)
             continue
 
-        if not result.get("present"):
+        present = bool(result.get("present"))
+        cur = result.get("card") or {}
+        cur_code = (
+            f"{cur['rank']}{cur['suit'][0]}"
+            if cur.get("rank") and cur.get("suit") else ""
+        )
+        log.log(
+            f"[GUIDED/{mode}] Slot {expecting}: present={present} "
+            f"card={cur_code or '-'} "
+            f"conf={cur.get('confidence', 0.0):.2f} "
+            f"saw_empty={saw_empty}"
+        )
+
+        if not present:
+            if not saw_empty:
+                log.log(f"[GUIDED/{mode}] Slot {expecting}: empty — ready for new card")
             saw_empty = True
             stable_count = 0
             best_card = None
@@ -2239,11 +2254,6 @@ def _guided_replace_loop(s):
         # than the one that was in the slot before the replace started
         # — user swapped the card faster than our polling.
         if not saw_empty:
-            cur = result.get("card") or {}
-            cur_code = (
-                f"{cur['rank']}{cur['suit'][0]}"
-                if cur.get("rank") and cur.get("suit") else ""
-            )
             prev_code = gd.get("previous_cards", {}).get(expecting, "")
             if cur_code and prev_code and cur_code != prev_code:
                 log.log(
