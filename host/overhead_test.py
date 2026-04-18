@@ -239,6 +239,8 @@ class FrameCapture:
         self._latest_frame = None
         self._stop = False
         self._stream_thread = None
+        self._last_sig = 0
+        self._unique_sigs = 0
         self._start_stream()
 
     def _check_ffmpeg(self):
@@ -268,13 +270,20 @@ class FrameCapture:
         return "1920x1080"
 
     def _spawn_ffmpeg(self):
-        """Launch ffmpeg in MJPEG-to-stdout streaming mode."""
+        """Launch ffmpeg in MJPEG-to-stdout streaming mode.
+
+        Low-latency flags (-fflags nobuffer, -flags low_delay) keep
+        ffmpeg from holding onto stale frames; dropping the input
+        framerate lets avfoundation pick the cameras native rate
+        instead of forcing a potentially-unsupported 10 fps."""
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
             "-f", "avfoundation",
-            "-framerate", "10",
             "-video_size", self.resolution,
             "-i", f"{self.camera_index}:none",
+            "-fflags", "nobuffer",
             "-f", "mjpeg", "-q:v", "3", "-",
         ]
         return subprocess.Popen(
@@ -342,11 +351,26 @@ class FrameCapture:
                         with self._frame_lock:
                             self._latest_frame = frame
                         frame_count += 1
+                        # Cheap change-detection: sum of a stride-32 slice.
+                        # Repeated identical values means the camera is
+                        # handing us the same pixels over and over.
+                        try:
+                            sig = int(frame[::32, ::32, 0].sum())
+                        except Exception:
+                            sig = 0
+                        if sig != self._last_sig:
+                            self._last_sig = sig
+                            self._unique_sigs += 1
                         now = time.time()
                         if now - last_log >= 30:
                             fps = frame_count / max(1e-3, now - last_log)
-                            log.log(f"[CAPTURE] Brio stream: {frame_count} frames in {now - last_log:.0f}s ({fps:.1f} fps)")
+                            log.log(
+                                f"[CAPTURE] Brio stream: {frame_count} frames "
+                                f"in {now - last_log:.0f}s ({fps:.1f} fps, "
+                                f"{self._unique_sigs} unique)"
+                            )
                             frame_count = 0
+                            self._unique_sigs = 0
                             last_log = now
             # ffmpeg exited or was stopped.
             if self._stop:
