@@ -340,9 +340,12 @@ class FrameCapture:
             )
             self._cv_index = 0
         if self._initial_cap is None:
+            MJPG = int(cv2.VideoWriter_fourcc(*"MJPG"))
             self._initial_cap = cv2.VideoCapture(self._cv_index, cv2.CAP_AVFOUNDATION)
+            self._initial_cap.set(cv2.CAP_PROP_FOURCC, MJPG)
             self._initial_cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             self._initial_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self._initial_cap.set(cv2.CAP_PROP_FPS, 30)
         self._stream_thread = Thread(target=self._read_stream, daemon=True)
         self._stream_thread.start()
 
@@ -376,6 +379,7 @@ class FrameCapture:
         frame_count = 0
         last_log = time.time()
         first_pass = True
+        MJPG = int(cv2.VideoWriter_fourcc(*"MJPG"))
         while not self._stop:
             if first_pass and self._initial_cap is not None:
                 # Reuse the already-open capture from the resolution probe.
@@ -383,8 +387,14 @@ class FrameCapture:
                 self._initial_cap = None
             else:
                 cap = cv2.VideoCapture(self._cv_index, cv2.CAP_AVFOUNDATION)
+                # IMPORTANT: the Brio delivers 4K as MJPEG on the wire.
+                # Without this FOURCC hint OpenCV negotiates an
+                # uncompressed pixel format, which saturates USB and
+                # makes read() fail constantly at 4K.
+                cap.set(cv2.CAP_PROP_FOURCC, MJPG)
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+                cap.set(cv2.CAP_PROP_FPS, 30)
             first_pass = False
             # Smallest internal buffer so read() returns the newest frame
             # rather than an old queued one.
@@ -406,11 +416,26 @@ class FrameCapture:
                 f"[CAPTURE] VideoCapture opened idx={self._cv_index} "
                 f"{self.width}x{self.height}"
             )
+            # Tolerate a burst of transient read() failures before tearing
+            # the whole capture down and reopening — AVFoundation under 4K
+            # MJPEG occasionally delivers a bad packet that read() rejects.
+            # A quick sleep+retry almost always recovers; a reopen costs
+            # a full camera-open cycle we cannot afford.
+            fail_streak = 0
+            MAX_READ_FAILS = 10
             while not self._stop:
                 ok, frame = cap.read()
                 if not ok or frame is None:
-                    log.log("[CAPTURE] read() failed — reopening capture")
-                    break
+                    fail_streak += 1
+                    if fail_streak >= MAX_READ_FAILS:
+                        log.log(
+                            f"[CAPTURE] read() failed {fail_streak}x in a row "
+                            f"— reopening capture"
+                        )
+                        break
+                    time.sleep(0.05)
+                    continue
+                fail_streak = 0
                 with self._frame_lock:
                     self._latest_frame = frame
                 frame_count += 1
