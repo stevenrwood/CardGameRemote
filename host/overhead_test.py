@@ -269,9 +269,11 @@ class FrameCapture:
             return hit[0]
         return None
 
-    def __init__(self, camera_index, resolution="auto", camera_name_hint=None):
+    def __init__(self, camera_index, resolution="auto", camera_name_hint=None,
+                 cv_index_override=None):
         self.camera_index = camera_index
         self.camera_name_hint = camera_name_hint
+        self.cv_index_override = cv_index_override
         self._check_ffmpeg()  # only used by _find_best_resolution below
         self.resolution = self._find_best_resolution() if resolution == "auto" else resolution
         w, h = self.resolution.split("x")
@@ -329,7 +331,10 @@ class FrameCapture:
         #    4K-capable webcam (e.g., EMeet Pixy).
         self._cv_index = None
         self._initial_cap = None
-        if self.camera_name_hint:
+        if self.cv_index_override is not None:
+            log.log(f"[CAPTURE] Using forced OpenCV idx {self.cv_index_override}")
+            self._cv_index = int(self.cv_index_override)
+        elif self.camera_name_hint:
             self._cv_index = self.find_cv_index_by_name(self.camera_name_hint)
         if self._cv_index is None:
             self._cv_index, self._initial_cap = self._find_matching_cv_cap()
@@ -350,25 +355,34 @@ class FrameCapture:
         self._stream_thread.start()
 
     def _find_matching_cv_cap(self):
+        """Open each OpenCV index, request target resolution as MJPG, read
+        one frame, log what came back. Return the first index that actually
+        delivered the requested size along with its open VideoCapture."""
         target_w, target_h = self.width, self.height
+        MJPG = int(cv2.VideoWriter_fourcc(*"MJPG"))
+        first_match = None
         for idx in range(6):
             cap = cv2.VideoCapture(idx, cv2.CAP_AVFOUNDATION)
             if not cap.isOpened():
                 try: cap.release()
                 except Exception: pass
+                log.log(f"[CAPTURE] probe idx={idx}: not opened")
                 continue
+            cap.set(cv2.CAP_PROP_FOURCC, MJPG)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
+            cap.set(cv2.CAP_PROP_FPS, 30)
             ok, frame = cap.read()
             w = h = 0
             if ok and frame is not None:
                 h, w = frame.shape[:2]
             log.log(f"[CAPTURE] probe idx={idx}: {w}x{h}")
-            if w == target_w and h == target_h:
-                return idx, cap
-            try: cap.release()
-            except Exception: pass
-        return None, None
+            if first_match is None and w == target_w and h == target_h:
+                first_match = (idx, cap)
+            else:
+                try: cap.release()
+                except Exception: pass
+        return first_match if first_match is not None else (None, None)
 
     def _read_stream(self):
         """Keep an AVFoundation VideoCapture open and push each decoded
@@ -6084,6 +6098,10 @@ def main():
     parser.add_argument("--camera-name", type=str, default=DEFAULT_CAMERA_NAME,
                         help="Substring of the avfoundation device name to prefer "
                              "when auto-selecting the camera")
+    parser.add_argument("--cv-camera-index", type=int, default=None,
+                        help="Force a specific OpenCV VideoCapture index, skipping "
+                             "name-based lookup. Use this when multiple 4K cameras "
+                             "are connected and the auto-picker opens the wrong one.")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION)
     parser.add_argument("--voice", type=str, default=None,
@@ -6107,7 +6125,8 @@ def main():
                     f"falling back to index {camera_index}")
 
     capture = FrameCapture(camera_index, args.resolution,
-                           camera_name_hint=args.camera_name)
+                           camera_name_hint=args.camera_name,
+                           cv_index_override=args.cv_camera_index)
     log.log(f"Camera {camera_index}, resolution {capture.resolution}")
 
     # Wait for the persistent ffmpeg stream to warm up enough to produce
