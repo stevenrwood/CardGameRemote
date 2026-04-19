@@ -6124,9 +6124,22 @@ def main():
             log.log(f"Camera: '{args.camera_name}' not found in avfoundation devices, "
                     f"falling back to index {camera_index}")
 
+    # OpenCV VideoCapture index can differ from AVFoundations enumeration
+    # when multiple 4K cameras are attached. Persist whatever value the user
+    # passes via --cv-camera-index so the next run picks up the Brio without
+    # having to re-specify it.
+    _persisted_cfg = _load_host_config()
+    cv_idx = args.cv_camera_index
+    if cv_idx is not None:
+        _save_host_config({"cv_camera_index": cv_idx})
+        log.log(f"[CAPTURE] Saved cv_camera_index={cv_idx} to host config")
+    elif "cv_camera_index" in _persisted_cfg:
+        cv_idx = _persisted_cfg["cv_camera_index"]
+        log.log(f"[CAPTURE] Loaded cv_camera_index={cv_idx} from host config")
+
     capture = FrameCapture(camera_index, args.resolution,
                            camera_name_hint=args.camera_name,
-                           cv_index_override=args.cv_camera_index)
+                           cv_index_override=cv_idx)
     log.log(f"Camera {camera_index}, resolution {capture.resolution}")
 
     # Wait for the persistent ffmpeg stream to warm up enough to produce
