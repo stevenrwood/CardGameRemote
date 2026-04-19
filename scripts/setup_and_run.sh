@@ -103,6 +103,10 @@ fi
 info "Installing/updating dependencies..."
 pip install --quiet --upgrade pip
 pip install --quiet opencv-python numpy anthropic SpeechRecognition pyaudio
+# pyobjc-framework-AVFoundation gives us the macOS camera-name lookup so the
+# overhead capture opens the Logitech Brio rather than whichever other 4K
+# webcam OpenCV happens to enumerate first.
+pip install --quiet pyobjc-framework-AVFoundation
 
 # --- Create training data directory ---
 mkdir -p "$REPO_DIR/host/training_data"

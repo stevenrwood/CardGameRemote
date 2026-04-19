@@ -226,8 +226,52 @@ class FrameCapture:
                 return idx
         return None
 
-    def __init__(self, camera_index, resolution="auto"):
+    @staticmethod
+    def find_cv_index_by_name(preferred_substring):
+        """Find the OpenCV VideoCapture index for a camera whose name matches
+        preferred_substring. Uses AVFoundations own device enumeration via
+        PyObjC, which shares its ordering with OpenCVs AVFoundation backend
+        — ffmpegs avfoundation indices do NOT match. Returns None if PyObjC
+        is unavailable or no matching camera is found.
+        """
+        try:
+            from AVFoundation import (
+                AVCaptureDevice,
+                AVCaptureDeviceDiscoverySession,
+                AVCaptureDeviceTypeBuiltInWideAngleCamera,
+                AVCaptureDeviceTypeExternal,
+                AVMediaTypeVideo,
+            )
+        except Exception as e:
+            log.log(f"[CAPTURE] pyobjc AVFoundation unavailable: {e}")
+            return None
+        # Prefer the discovery session (modern API, includes external cams).
+        try:
+            types = [
+                AVCaptureDeviceTypeBuiltInWideAngleCamera,
+                AVCaptureDeviceTypeExternal,
+            ]
+            session = AVCaptureDeviceDiscoverySession.discoverySessionWithDeviceTypes_mediaType_position_(
+                types, AVMediaTypeVideo, 0
+            )
+            devices = list(session.devices())
+        except Exception:
+            devices = list(AVCaptureDevice.devicesWithMediaType_(AVMediaTypeVideo) or [])
+        needle = preferred_substring.lower()
+        hit = None
+        for i, dev in enumerate(devices):
+            name = str(dev.localizedName())
+            log.log(f"[CAPTURE] AVFoundation idx={i}: {name}")
+            if hit is None and needle in name.lower():
+                hit = (i, name)
+        if hit is not None:
+            log.log(f"[CAPTURE] Matched '{hit[1]}' at OpenCV idx {hit[0]}")
+            return hit[0]
+        return None
+
+    def __init__(self, camera_index, resolution="auto", camera_name_hint=None):
         self.camera_index = camera_index
+        self.camera_name_hint = camera_name_hint
         self._check_ffmpeg()  # only used by _find_best_resolution below
         self.resolution = self._find_best_resolution() if resolution == "auto" else resolution
         w, h = self.resolution.split("x")
@@ -275,22 +319,30 @@ class FrameCapture:
         return "1920x1080"
 
     def _start_stream(self):
-        # ffmpegs avfoundation index order (set in __init__ via
-        # find_index_by_name) does NOT match OpenCVs AVFoundation ordering.
-        # Probe indices 0..5 and keep the first open VideoCapture that
-        # actually delivers the resolution we asked for — that is the
-        # Brio, not the 1080p C920X or the built-in webcam. We hold on
-        # to the matching cap here rather than releasing and reopening,
-        # because a rapid close/open on the same AVFoundation device
-        # can deadlock.
-        self._cv_index, self._initial_cap = self._find_matching_cv_cap()
+        # Two strategies to find the right OpenCV VideoCapture index:
+        # 1. PyObjC AVFoundation device enumeration — shares OpenCVs
+        #    ordering, and lets us match by camera name. This is the
+        #    reliable path once a name hint is available.
+        # 2. Resolution probe fallback — open each index, grab one frame,
+        #    keep the first that delivers the requested WxH. Works when
+        #    only one camera supports 4K, but confuses Brio with another
+        #    4K-capable webcam (e.g., EMeet Pixy).
+        self._cv_index = None
+        self._initial_cap = None
+        if self.camera_name_hint:
+            self._cv_index = self.find_cv_index_by_name(self.camera_name_hint)
+        if self._cv_index is None:
+            self._cv_index, self._initial_cap = self._find_matching_cv_cap()
         if self._cv_index is None:
             log.log(
                 f"[CAPTURE] no cv2.VideoCapture index delivered "
                 f"{self.width}x{self.height}; falling back to 0"
             )
             self._cv_index = 0
-            self._initial_cap = cv2.VideoCapture(0, cv2.CAP_AVFOUNDATION)
+        if self._initial_cap is None:
+            self._initial_cap = cv2.VideoCapture(self._cv_index, cv2.CAP_AVFOUNDATION)
+            self._initial_cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self._initial_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         self._stream_thread = Thread(target=self._read_stream, daemon=True)
         self._stream_thread.start()
 
@@ -6029,7 +6081,8 @@ def main():
             log.log(f"Camera: '{args.camera_name}' not found in avfoundation devices, "
                     f"falling back to index {camera_index}")
 
-    capture = FrameCapture(camera_index, args.resolution)
+    capture = FrameCapture(camera_index, args.resolution,
+                           camera_name_hint=args.camera_name)
     log.log(f"Camera {camera_index}, resolution {capture.resolution}")
 
     # Wait for the persistent ffmpeg stream to warm up enough to produce
