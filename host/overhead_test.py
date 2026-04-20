@@ -270,10 +270,15 @@ class FrameCapture:
         return None
 
     def __init__(self, camera_index, resolution="auto", camera_name_hint=None,
-                 cv_index_override=None):
+                 cv_index_override=None, focus=None):
         self.camera_index = camera_index
         self.camera_name_hint = camera_name_hint
         self.cv_index_override = cv_index_override
+        # None = leave autofocus on; otherwise disable AF and apply this
+        # manual focus value (Logitech Brio usable range is 0..255, lower
+        # = farther). Settable at runtime via set_focus().
+        self.focus = focus
+        self._active_cap = None
         self._check_ffmpeg()  # only used by _find_best_resolution below
         self.resolution = self._find_best_resolution() if resolution == "auto" else resolution
         w, h = self.resolution.split("x")
@@ -351,6 +356,7 @@ class FrameCapture:
             self._initial_cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             self._initial_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             self._initial_cap.set(cv2.CAP_PROP_FPS, 30)
+        self._apply_focus(self._initial_cap)
         self._stream_thread = Thread(target=self._read_stream, daemon=True)
         self._stream_thread.start()
 
@@ -409,6 +415,8 @@ class FrameCapture:
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
                 cap.set(cv2.CAP_PROP_FPS, 30)
+                self._apply_focus(cap)
+            self._active_cap = cap
             first_pass = False
             # Smallest internal buffer so read() returns the newest frame
             # rather than an old queued one.
@@ -478,6 +486,34 @@ class FrameCapture:
                 cap.release()
             except Exception:
                 pass
+
+    def _apply_focus(self, cap):
+        """Set autofocus + manual focus on a freshly-opened VideoCapture."""
+        if cap is None or self.focus is None:
+            return
+        try:
+            cap.set(cv2.CAP_PROP_AUTOFOCUS, 0.0)
+            cap.set(cv2.CAP_PROP_FOCUS, float(self.focus))
+            log.log(f"[CAPTURE] Autofocus off, focus={self.focus}")
+        except Exception as e:
+            log.log(f"[CAPTURE] focus set failed: {e}")
+
+    def set_focus(self, value):
+        """Update focus at runtime. None turns autofocus back on."""
+        self.focus = value
+        cap = self._active_cap
+        if cap is None:
+            return
+        try:
+            if value is None:
+                cap.set(cv2.CAP_PROP_AUTOFOCUS, 1.0)
+                log.log("[CAPTURE] Autofocus re-enabled")
+            else:
+                cap.set(cv2.CAP_PROP_AUTOFOCUS, 0.0)
+                cap.set(cv2.CAP_PROP_FOCUS, float(value))
+                log.log(f"[CAPTURE] focus={value}")
+        except Exception as e:
+            log.log(f"[CAPTURE] set_focus failed: {e}")
 
     def capture(self):
         with self._frame_lock:
@@ -4030,6 +4066,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log.clear()
             self._r(200, "application/json", '{"ok":true}')
 
+        elif p == "/api/brio/focus":
+            # Live focus tuning + persistence. Body: {"value": N} where N
+            # is 0..255 (lower = farther). "auto" or null re-enables AF.
+            raw = data.get("value")
+            new_val = None
+            if isinstance(raw, (int, float)):
+                new_val = max(0, min(255, int(raw)))
+            elif isinstance(raw, str) and raw.strip().isdigit():
+                new_val = max(0, min(255, int(raw.strip())))
+            s.capture.set_focus(new_val)
+            _save_host_config({"brio_focus": new_val})
+            self._r(200, "application/json",
+                    json.dumps({"ok": True, "focus": new_val}))
+
         elif p == "/api/monitor/start":
             if s.cal.ok and s.latest_frame is not None:
                 s.monitor.capture_baselines(s.latest_frame)
@@ -5454,6 +5504,8 @@ update();
 
     def _calibrate_page(self, s):
         players_js = json.dumps(PLAYER_NAMES)
+        current_focus = getattr(s.capture, "focus", None)
+        focus_init_js = json.dumps(current_focus)
         self._r(200,"text/html",f"""<!DOCTYPE html>
 <html><head><title>Calibrate</title>
 <style>
@@ -5464,11 +5516,28 @@ button{{padding:8px 16px;background:#e94560;color:#fff;border:none;border-radius
 </style></head><body>
 <h1>Calibration</h1>
 <div id="status">Loading image...</div>
+<div style="margin:8px 0;display:flex;align-items:center;gap:10px">
+  <label>Brio focus <span id="focus-val">auto</span></label>
+  <input id="focus" type="range" min="0" max="255" value="0"
+         style="flex:1;max-width:400px" oninput="onFocus(this.value)">
+  <button onclick="onFocus(null)" style="padding:4px 10px">Auto</button>
+  <button onclick="reloadImage()" style="padding:4px 10px">Refresh Image</button>
+</div>
 <canvas id="canvas"></canvas>
 <button onclick="location.href='/'">Back</button>
 <script>
 var c=document.getElementById('canvas'),ctx=c.getContext('2d');
 var players={players_js};
+var _initFocus={focus_init_js};
+(function(){{
+  var slider=document.getElementById('focus');
+  var label=document.getElementById('focus-val');
+  if(_initFocus!==null&&_initFocus!==undefined){{
+    slider.value=_initFocus;label.textContent=_initFocus;
+  }} else {{
+    label.textContent='auto';
+  }}
+}})();
 var steps=[],step=0,cc=null,cr=null,zones=[],pc=null,imgW=0,imgH=0;
 steps.push({{p:'Click CENTER of felt circle',t:'cc'}});
 steps.push({{p:"Click EDGE of felt circle (at Bill's position)",t:'ce'}});
@@ -5487,6 +5556,32 @@ img.onerror=function(){{
   document.getElementById('status').textContent=
     'Image load FAILED — /snapshot returned an error. Check host log.';
 }};
+var _focusTimer=null;
+function onFocus(v){{
+  var label=document.getElementById('focus-val');
+  label.textContent=(v===null||v==='')?'auto':v;
+  if(_focusTimer) clearTimeout(_focusTimer);
+  _focusTimer=setTimeout(function(){{
+    fetch('/api/brio/focus',{{
+      method:'POST',headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{value:(v===null||v==='')?null:parseInt(v,10)}})
+    }}).then(function(){{
+      // Give the camera ~300 ms to settle on the new focus, then
+      // refetch the snapshot so the user sees the effect.
+      setTimeout(reloadImage,300);
+    }});
+  }},150);
+}}
+function reloadImage(){{
+  var src='/snapshot?'+Date.now();
+  var tmp=new Image();
+  tmp.onload=function(){{
+    img=tmp;
+    // Canvas stays same size; just re-draw everything.
+    draw();
+  }};
+  tmp.src=src;
+}}
 img.src='/snapshot?'+Date.now();
 function S(){{return parseFloat(c.dataset.s)||1}}
 function draw(){{
@@ -6102,6 +6197,9 @@ def main():
                         help="Force a specific OpenCV VideoCapture index, skipping "
                              "name-based lookup. Use this when multiple 4K cameras "
                              "are connected and the auto-picker opens the wrong one.")
+    parser.add_argument("--brio-focus", type=int, default=None,
+                        help="Manual focus value for the Brio (0..255, lower = "
+                             "farther). Omitting the flag leaves autofocus on.")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION)
     parser.add_argument("--voice", type=str, default=None,
@@ -6137,9 +6235,20 @@ def main():
         cv_idx = _persisted_cfg["cv_camera_index"]
         log.log(f"[CAPTURE] Loaded cv_camera_index={cv_idx} from host config")
 
+    # Brio manual focus override — autofocus hunts on the low-contrast
+    # felt background, so pin a focus position once and keep it.
+    brio_focus = args.brio_focus
+    if brio_focus is not None:
+        _save_host_config({"brio_focus": brio_focus})
+        log.log(f"[CAPTURE] Saved brio_focus={brio_focus} to host config")
+    elif "brio_focus" in _persisted_cfg:
+        brio_focus = _persisted_cfg["brio_focus"]
+        log.log(f"[CAPTURE] Loaded brio_focus={brio_focus} from host config")
+
     capture = FrameCapture(camera_index, args.resolution,
                            camera_name_hint=args.camera_name,
-                           cv_index_override=cv_idx)
+                           cv_index_override=cv_idx,
+                           focus=brio_focus)
     log.log(f"Camera {camera_index}, resolution {capture.resolution}")
 
     # Wait for the persistent ffmpeg stream to warm up enough to produce
