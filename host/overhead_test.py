@@ -1574,6 +1574,43 @@ def _parse_card_any(text):
     return None
 
 
+_SUIT_LETTER_CODE = {"clubs": "c", "diamonds": "d", "hearts": "h", "spades": "s"}
+
+
+def _best_hand_for_cards(cards, ge):
+    """Given a list of card dicts ({rank, suit, ...}), compute the best
+    poker hand using the current game's wild ranks and return
+    {"label": ..., "codes": [...]} for the /table UI. codes are short
+    card codes ("Ah", "10s") in best-hand order so the client can reorder
+    its card row. Returns None if fewer than 2 cards or evaluation fails.
+    """
+    tuples = []
+    code_by_id = {}
+    for i, c in enumerate(cards):
+        rank = c.get("rank")
+        suit = c.get("suit")
+        if not rank or not suit:
+            continue
+        tuples.append((rank, suit))
+        code_by_id[i] = f"{rank}{_SUIT_LETTER_CODE.get(suit, (suit or '?')[0])}"
+    if len(tuples) < 2:
+        return None
+    try:
+        from poker_hands import best_hand
+    except Exception:
+        return None
+    try:
+        wilds = list(getattr(ge, "wild_ranks", []) or [])
+        result = best_hand(tuples, wild_ranks=wilds)
+    except Exception:
+        return None
+    codes = []
+    for bc in result.cards:
+        suit_letter = _SUIT_LETTER_CODE.get(bc.suit, (bc.suit or "?")[0])
+        codes.append(f"{bc.rank}{suit_letter}")
+    return {"label": result.label, "codes": codes, "category": result.category}
+
+
 def _build_table_state(s):
     """Produce the JSON doc that /table/state returns.
 
@@ -1651,6 +1688,7 @@ def _build_table_state(s):
             for c in up_cards:
                 hand.append({"type": "up", **c})
             entry["hand"] = hand
+            entry["best_hand"] = _best_hand_for_cards(hand, ge)
         else:
             # Dealer deals the same card-type to every player in each round,
             # so every non-folded player holds as many downs as Rodney has
@@ -1662,6 +1700,7 @@ def _build_table_state(s):
                 down_count = max(0, down_count - 1)
             entry["down_count"] = down_count
             entry["up_cards"] = up_cards
+            entry["best_hand"] = _best_hand_for_cards(up_cards, ge)
         players.append(entry)
 
     # Console flow doesn't advance game_engine.phase_index, so derive the
@@ -3661,7 +3700,40 @@ function cardEl(card, opts) {
   return el;
 }
 
-function sortCards(cards, mode) {
+function sortCards(cards, mode, best) {
+  if (mode === "best" && best && best.codes && best.codes.length) {
+    // "Best" mode: cards that form the best hand come first in the exact
+    // order poker_hands.best_hand returned, then leftover cards sorted
+    // by rank descending. Down-only placeholders (no rank) sink last.
+    var codeOf = function(c){
+      if (!c.rank || !c.suit) return "";
+      var sl = {clubs:"c",diamonds:"d",hearts:"h",spades:"s"}[c.suit] || "";
+      return c.rank + sl;
+    };
+    var used = {};
+    var ordered = [];
+    best.codes.forEach(function(code){
+      for (var i = 0; i < cards.length; i++) {
+        if (used[i]) continue;
+        if (codeOf(cards[i]) === code) {
+          used[i] = true;
+          ordered.push(cards[i]);
+          break;
+        }
+      }
+    });
+    var leftover = [];
+    for (var j = 0; j < cards.length; j++) {
+      if (!used[j]) leftover.push(cards[j]);
+    }
+    leftover.sort(function(a,b){
+      var aKnown = !!a.rank, bKnown = !!b.rank;
+      if (aKnown !== bKnown) return aKnown ? -1 : 1;
+      var ra = RANK_ORDER[a.rank] || 0, rb = RANK_ORDER[b.rank] || 0;
+      return rb - ra;
+    });
+    return ordered.concat(leftover);
+  }
   if (mode !== "rank") return cards;
   var copy = cards.slice();
   copy.sort(function(a,b) {
@@ -3688,9 +3760,14 @@ function buildCards(p) {
   return cards;
 }
 
-function toggleSort(name) {
-  sortMode[name] = (sortMode[name] === "rank") ? "deal" : "rank";
+function setSortMode(name, mode) {
+  sortMode[name] = mode;
   renderPlayer(window._playersByName[name]);
+}
+// Backward compat — some handlers might still reference toggleSort.
+function toggleSort(name) {
+  var cur = sortMode[name] || "deal";
+  setSortMode(name, cur === "deal" ? "rank" : (cur === "rank" ? "best" : "deal"));
 }
 
 function toggleFold(name, currentlyFolded) {
@@ -3734,11 +3811,26 @@ function renderPlayer(p) {
   head.appendChild(nm);
 
   var mode = sortMode[p.name] || "deal";
-  var sortBtn = document.createElement('button');
-  sortBtn.className = 'sml-btn' + (mode === "rank" ? ' active' : '');
-  sortBtn.textContent = (mode === "rank") ? 'Rank Order' : 'Deal Order';
-  sortBtn.onclick = function(){ toggleSort(p.name); };
-  head.appendChild(sortBtn);
+  var sortSel = document.createElement('select');
+  sortSel.className = 'sml-btn';
+  [
+    ["deal","Deal Order"],
+    ["rank","Rank Order"],
+    ["best","Best Hand"],
+  ].forEach(function(o){
+    var opt = document.createElement('option');
+    opt.value = o[0]; opt.textContent = o[1];
+    if (o[0] === mode) opt.selected = true;
+    sortSel.appendChild(opt);
+  });
+  sortSel.onchange = function(){ setSortMode(p.name, sortSel.value); };
+  head.appendChild(sortSel);
+  if (mode === "best" && p.best_hand && p.best_hand.label) {
+    var bhLabel = document.createElement('span');
+    bhLabel.className = 'values';
+    bhLabel.textContent = p.best_hand.label;
+    head.appendChild(bhLabel);
+  }
 
   var foldBtn = document.createElement('button');
   foldBtn.className = 'sml-btn' + (folded ? ' folded' : '');
@@ -3764,7 +3856,7 @@ function renderPlayer(p) {
 
   var cardRow = document.createElement('div');
   cardRow.className = 'cards';
-  var cards = sortCards(buildCards(p), mode);
+  var cards = sortCards(buildCards(p), mode, p.best_hand);
   var drawState = (window._lastState && window._lastState.draw) || {};
   var canMark = !!drawState.can_mark && p.is_remote;
   var markedSet = {};
