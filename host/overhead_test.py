@@ -1015,7 +1015,31 @@ def _console_watch_dealer(s, frame):
         return
 
     if phase == "scanned":
-        # Initial batch scan completed — check if anyone is missing
+        # Wait until pending scans are done before deciding anything.
+        if any(s.monitor.pending.get(n) for n in brio_names):
+            return
+        # Dealer deals to themselves last, so the motion trigger should
+        # have coincided with an actual card in the dealer's own zone.
+        # If the dealer zone is still empty post-scan, the trigger was a
+        # hand/arm sweep — revert to watching instead of nagging every
+        # player who is also missing.
+        dealer_card = s.monitor.last_card.get(dealer_name, "")
+        dealer_empty = not dealer_card or dealer_card == "No card"
+        is_hit_round = (
+            ge.current_game and ge.current_game.name.startswith("7/27")
+            and s.console_up_round >= 1
+        )
+        if dealer_empty and not is_hit_round:
+            log.log(
+                f"[CONSOLE] {dealer_name}'s zone empty after scan — "
+                f"likely a false trigger (arm over zone). Resuming watch."
+            )
+            for nm in brio_names:
+                if s.monitor.zone_state.get(nm) != "corrected":
+                    s.monitor.zone_state[nm] = "empty"
+                    s.monitor.last_card[nm] = ""
+            s.console_scan_phase = "watching"
+            return
         missing = []
         for name in brio_names:
             if s.monitor.zone_state.get(name) == "corrected":
@@ -1023,20 +1047,21 @@ def _console_watch_dealer(s, frame):
             card = s.monitor.last_card.get(name, "")
             if not card or card == "No card":
                 missing.append(name)
-        # Wait until pending is cleared (scan still running) before prompting
-        if missing and not any(s.monitor.pending.get(n) for n in brio_names):
+        if missing:
             # In hit rounds (7/27), a missing card means the player chose to
             # freeze — not an error worth nagging about. Skip the adjust-
             # prompt and let the dealer click Confirm Cards when ready.
-            is_hit_round = (
-                ge.current_game and ge.current_game.name.startswith("7/27")
-                and s.console_up_round >= 1
-            )
             if is_hit_round:
                 return
-            names = " and ".join(missing)
-            log.log(f"[CONSOLE] Missing cards: {names} — prompting to adjust")
-            speech.say(f"{names}, please adjust your card")
+            # 10-second cooldown between "please adjust your card"
+            # announcements so we don't rattle them off back-to-back.
+            now = time.time()
+            last_speech = getattr(s, "_missing_speech_time", 0.0)
+            if now - last_speech >= 10.0:
+                names = " and ".join(missing)
+                log.log(f"[CONSOLE] Missing cards: {names} — prompting to adjust")
+                speech.say(f"{names}, please adjust your card")
+                s._missing_speech_time = now
             s.console_scan_phase = "watching_missing"
             s._missing_prompt_time = time.time()
         return
@@ -1440,6 +1465,43 @@ def _check_follow_the_queen_round(s, round_cards):
         log.log(f"[WILD] Current: {ge.wild_label}")
 
 
+def _recompute_follow_the_queen(s):
+    """Replay FTQ queen-follower logic against console_hand_cards in round
+    order and update ge.wild_ranks/wild_label. Used when a correction
+    changes a card that may have been the follower of a Queen. Announces
+    the new wild state if it differs from the current one."""
+    ge = s.game_engine
+    if not ge.current_game or ge.current_game.dynamic_wild != "follow_the_queen":
+        return
+    prior_label = ge.wild_label
+    RANK_SHORT = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}
+    ge.wild_ranks = ["Q"]
+    ge.wild_label = "Queens wild"
+    ge.last_up_was_queen = False
+    by_round = {}
+    for e in s.console_hand_cards:
+        by_round.setdefault(e.get("round", 0), []).append(e)
+    for r in sorted(by_round.keys()):
+        for c in by_round[r]:
+            parts = c.get("card", "").split(" of ")
+            if len(parts) != 2:
+                continue
+            rank = parts[0]
+            rank_short = RANK_SHORT.get(rank, rank)
+            if ge.last_up_was_queen and rank_short != "Q":
+                ge.wild_ranks = ["Q", rank_short]
+                plural = f"{rank}'s" if rank.isdigit() else f"{rank}s"
+                ge.wild_label = f"Queens and {plural} are wild"
+            ge.last_up_was_queen = (rank_short == "Q")
+    if ge.wild_label != prior_label:
+        log.log(f"[WILD] Recomputed after correction: {ge.wild_label}")
+        if ge.wild_label == "Queens wild":
+            speech.say("Correction: only queens are now wild")
+        else:
+            tail = ge.wild_label.replace("Queens and ", "").replace(" are wild", "")
+            speech.say(f"Correction: queens and {tail} are now wild")
+
+
 # ---------------------------------------------------------------------------
 # App state
 # ---------------------------------------------------------------------------
@@ -1752,11 +1814,17 @@ def _build_table_state(s):
             rank = RANK_SHORT.get(rank_full, rank_full)
             up_by_player_cards.setdefault(entry["player"], []).append((rank, suit_full))
         remote_name = next((p.name for p in ge.players if p.is_remote), None)
+        flipped_slot = (s.rodney_flipped_up or {}).get("slot")
         values_by_player = {}
         for p in ge.players:
             pairs = list(up_by_player_cards.get(p.name, []))
             if p.name == remote_name:
-                for d in s.rodney_downs.values():
+                # Skip the flipped slot — its already counted via the
+                # up_by_player_cards entry fed in by /api/console/confirm
+                # (flip_up sets monitor.last_card[Rodney] to that card).
+                for slot_num, d in s.rodney_downs.items():
+                    if slot_num == flipped_slot:
+                        continue
                     if d.get("rank") and d.get("suit"):
                         pairs.append((d["rank"], d["suit"]))
             if pairs:
@@ -5116,6 +5184,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p == "/api/console/correct":
             # Batch corrections: [{player, rank, suit}, ...]
             corrections = data.get("corrections", [])
+            changed_any = False
             for c in corrections:
                 player = c.get("player", "")
                 rank = c.get("rank", "")
@@ -5137,12 +5206,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "final": new_card,
                         "corrected": True,
                     }
+                    # If this round's card already landed in console_hand_cards
+                    # (correction happens after Confirm), update the most
+                    # recent entry for this player so subsequent logic —
+                    # wild-card recomputation, dedup, hand value, best hand —
+                    # all see the corrected card.
+                    for entry in reversed(s.console_hand_cards):
+                        if entry.get("player") == player:
+                            entry["card"] = new_card
+                            break
                     # Save corrected crop to training_data for future YOLO training
                     crop = s.monitor.recognition_crops.get(player)
                     if crop is not None:
                         s.monitor._save(player, crop, new_card)
                         log.log(f"[CONSOLE] Saved correction to training_data: {new_card}")
                     log.log(f"[CONSOLE] Corrected {player}: {old_card} -> {new_card}")
+                    if old_card != new_card:
+                        changed_any = True
+            # Re-derive Follow-the-Queen wild ranks from the corrected
+            # history. If the corrected card was the follower of a queen,
+            # this announces the new wild rank.
+            if changed_any:
+                _recompute_follow_the_queen(s)
             self._r(200, "application/json", '{"ok":true}')
 
         elif p == "/api/console/yolo_conf":
