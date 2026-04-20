@@ -119,8 +119,14 @@ speech = SpeechQueue()
 # Log buffer
 # ---------------------------------------------------------------------------
 
-LOG_FILE = Path.home() / "Downloads" / "log.txt"
-LOG_ARCHIVE_DIR = Path.home() / "Downloads"
+# Logs live in ~/Library/Logs/cardgame-host/ rather than ~/Downloads so they
+# stay outside macOS Transparency Consent and Control (TCC) protected
+# directories. This lets SSH/scp sessions read them without granting sshd
+# Full Disk Access.
+LOG_DIR = Path.home() / "Library" / "Logs" / "cardgame-host"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "log.txt"
+LOG_ARCHIVE_DIR = LOG_DIR
 
 class LogBuffer:
     def __init__(self, maxlines=500):
