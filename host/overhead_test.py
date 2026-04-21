@@ -4897,33 +4897,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 leading_downs = _initial_down_count(ge)
                 will_guide = leading_downs > 0 and not s.pi_offline
                 needs_brio = up_rounds != 0 or has_hit_round
-                first_deal_phase = next(
-                    (ph for ph in template.phases
-                     if ph.type.value in ("deal", "community")),
-                    None,
-                )
-                first_phase_has_up = bool(
-                    first_deal_phase and "up" in first_deal_phase.pattern
-                )
                 if needs_brio and s.cal.ok and s.latest_frame is not None:
                     s.monitor.capture_baselines(s.latest_frame)
                     s.monitoring = True
-                    if first_phase_has_up or not will_guide:
-                        # Up cards can arrive now (1d+1u 7/27, 7/27 hit
-                        # round with no guided, etc.) — watch immediately.
+                    if will_guide:
+                        # Any game that uses guided Pi-slot dealing deals
+                        # downs first — regardless of whether the first
+                        # phase also contains an up card — so the dealer
+                        # sweeps every zone multiple times before the up
+                        # cards arrive. Defer Brio until guided completes;
+                        # the per-game guided-completion branches (all-down
+                        # vs mixed vs hit-round) take over from there.
+                        s.console_scan_phase = "idle"
+                        log.log(
+                            "[CONSOLE] Baselines captured; Brio watching "
+                            "deferred until guided downs are validated"
+                        )
+                    else:
                         s.console_scan_phase = "watching"
                         log.log(
                             f"[CONSOLE] Watching {ge.get_dealer().name}'s "
                             f"zone for first card"
-                        )
-                    else:
-                        # First phase is all downs (7CS, FTQ, 7/27 2-down);
-                        # defer watching until guided completes so dealer
-                        # hand motion doesn't trip false alarms.
-                        s.console_scan_phase = "idle"
-                        log.log(
-                            "[CONSOLE] Baselines captured; Brio watching "
-                            "deferred until initial down cards are validated"
                         )
                 # Start the hand fresh: clear Rodney-side state and turn the
                 # scanner LEDs on so the initial down cards get good scans.
