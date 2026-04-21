@@ -794,11 +794,17 @@ def _announce_poker_hand_bet_first(s):
         speech.say(phrase)
 
 
-def _check_follow_the_queen_round(s, round_cards):
+def _check_follow_the_queen_round(s, round_cards, announce=True):
     """Check cards for Follow the Queen wild at end of round.
 
     Args:
         round_cards: list of {"player": name, "card": "Rank of Suit"} in deal order
+        announce: when False, update wild state silently. Used for the
+            last up-card round of stud games — we defer the speech until
+            after the trailing 7th (down) card has been dealt, so the
+            final wild state is announced once, alongside the high-hand
+            bet-first call. State updates still happen either way; only
+            speech.say is gated.
     """
     ge = s.game_engine
     if not ge.current_game or ge.current_game.dynamic_wild != "follow_the_queen":
@@ -825,13 +831,34 @@ def _check_follow_the_queen_round(s, round_cards):
                 plural = f"{rank}'s" if rank.isdigit() else f"{rank}s"
                 ge.wild_label = f"Queens and {plural} are wild"
                 log.log(f"[WILD] {ge.wild_label}")
-                speech.say(f"Queens and {plural} are now wild")
+                if announce:
+                    speech.say(f"Queens and {plural} are now wild")
 
         ge.last_up_was_queen = (rank_short == "Q")
 
     # Always announce current wild state at end of round if non-default
     if ge.wild_label and ge.wild_label != "Queens wild":
         log.log(f"[WILD] Current: {ge.wild_label}")
+
+
+def _announce_trailing_done(s):
+    """Speak the final wild state (if any) then the bet-first player.
+
+    Called after the trailing down card (7th street for 7CS/FTQ) has
+    been dealt to every active player, so the final betting round gets
+    one consolidated announcement instead of one stale one after the
+    6th-street confirm.
+    """
+    ge = s.game_engine
+    if not ge or not ge.current_game:
+        return
+    # Re-state the current wild label if it's non-default. For FTQ we
+    # suppressed mid-round speech on the last up round; this is where
+    # the player hears the final wild mapping.
+    label = getattr(ge, "wild_label", "") or ""
+    if label and label != "Queens wild":
+        speech.say(label + " are wild")
+    _announce_poker_hand_bet_first(s)
 
 
 def _recompute_follow_the_queen(s):
@@ -1989,6 +2016,11 @@ def _guided_replace_loop(s):
                     log.log(
                         "[CONSOLE] Trailing down deal complete → final betting"
                     )
+                    # The wild-card and bet-first announcements were
+                    # deferred from the last-up-round Confirm Cards so
+                    # the player hears them only once, after the final
+                    # card is on the table.
+                    _announce_trailing_done(s)
                 elif s.console_state == "replacing":
                     # Record this draw as done. Multi-draw games (3 Toed
                     # Pete) use this to know whether another DRAW phase

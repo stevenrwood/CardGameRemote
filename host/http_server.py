@@ -892,20 +892,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Rodney's down cards) before the round is announced and
             # accumulated — a duplicate is almost always a misread.
             _dedup_round_cards_against_seen(s, round_cards)
-            # Check Follow the Queen wild cards — announce before betting
-            _check_follow_the_queen_round(s, round_cards)
+            # For stud games (7CS, FTQ, High Chicago, Eight or Better) the
+            # last up-card round is followed by a trailing down (7th street).
+            # Defer the wild + bet-first announces so the final betting
+            # round gets one consolidated announcement *after* the trailing
+            # card is on the table. See _announce_trailing_done.
+            round_num = s.console_up_round + 1
+            defer_announces = (
+                s.console_total_up_rounds > 0
+                and round_num >= s.console_total_up_rounds
+                and bool(_trailing_down_slots(ge))
+            )
+            # Check Follow the Queen wild cards — state update always
+            # runs; speech is silenced when we're deferring.
+            _check_follow_the_queen_round(s, round_cards, announce=not defer_announces)
             # Accumulate into hand-wide history, then clear the current-round
             # data so it stops re-appearing as "just dealt" cards (which were
             # triggering the duplicate detector against the exact same cards
             # now in the hand history).
-            round_num = s.console_up_round + 1
             if round_cards:
                 for c in round_cards:
                     s.console_hand_cards.append({"player": c["player"], "card": c["card"], "round": round_num})
             # For 7/27, announce each player's hand value(s) after the
             # up-cards have been accumulated + indicate who bets first.
             _announce_7_27_hand_values(s)
-            _announce_poker_hand_bet_first(s)
+            if not defer_announces:
+                _announce_poker_hand_bet_first(s)
             # 7/27 freeze tracking: on hit rounds (any round after the
             # first up-card round), a player who didn't take a card this
             # round increments their freeze count. Three freezes in a row
