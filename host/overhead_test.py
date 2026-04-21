@@ -293,15 +293,17 @@ def _console_watch_dealer(s, frame):
                 missing.append(name)
         # Standing allowed: dealer deals one at a time so a missing
         # zone might just mean "dealt to someone else first, we'll see
-        # this player next" — keep watching until the empty-scan cap
-        # absorbs genuinely-standing players.
+        # this player next". Always return to watching so late-
+        # arriving cards keep triggering scans; the empty-scan cap
+        # merely hides "still waiting on X" spam for genuinely-
+        # standing players (they stay out of the missing list).
         if stand_allowed:
             if missing:
                 log.log(
                     f"[CONSOLE] Partial scan: still waiting on "
                     f"{', '.join(missing)} — resuming watch"
                 )
-                s.console_scan_phase = "watching"
+            s.console_scan_phase = "watching"
             return
         if missing:
             # Per-player "please adjust" speech, capped at 2 prompts per
@@ -368,42 +370,44 @@ def _console_watch_dealer(s, frame):
                 s.console_scan_phase = "settling"
                 s.console_settle_time = time.time()
             return
-        # Deal-order gating: the dealer sweeps their own zone repeatedly
-        # while dealing to everyone else. To avoid false triggers we only
-        # treat a dealer-zone motion as "the deal is done" once every
-        # OTHER active brio zone has already shown motion since the last
-        # round reset. Other zones are tracked in s._zones_with_motion.
+        # "Wait for all zones" gate: hold off on settling until every
+        # watched zone currently shows motion above its baseline
+        # threshold (i.e., a physical card is present in each zone RIGHT
+        # NOW, not just "has shown motion at some point this round"). An
+        # arm sweeping through a zone produces transient motion that the
+        # old accumulate-over-time gate mistook for a card landing —
+        # this version requires the diff to be above threshold at the
+        # moment of the decision, so transient arm-crossings don't fire
+        # scans prematurely. Used for 7 Card Stud initial deal AND 7/27
+        # round-1 flip-up, where stand_allowed=False.
         if not hasattr(s, "_zones_with_motion"):
             s._zones_with_motion = set()
+        all_present = True
         for z in s.cal.zones:
             name = z["name"]
             if name not in brio_names:
-                continue
-            if name == dealer_zone["name"]:
-                continue
-            if name in s._zones_with_motion:
                 continue
             if s.monitor.zone_state.get(name) in ("recognized", "corrected"):
                 s._zones_with_motion.add(name)
                 continue
             if s.monitor.check_single(frame, z) is not None:
-                s._zones_with_motion.add(name)
-                log.log(f"[CONSOLE] Motion seen in {name}'s zone "
-                        f"({len(s._zones_with_motion)}/"
-                        f"{len(brio_names) - 1} others)")
-        others = brio_names - {dealer_zone["name"]}
-        crop = s.monitor.check_single(frame, dealer_zone)
-        if crop is not None and s._zones_with_motion >= others:
-            log.log(f"[CONSOLE] Dealer card detected in {dealer_zone['name']}'s "
-                    f"zone — {s.brio_settle_s:.1f}s settle")
+                if name not in s._zones_with_motion:
+                    s._zones_with_motion.add(name)
+                    log.log(
+                        f"[CONSOLE] Card present in {name}'s zone "
+                        f"({len(s._zones_with_motion)}/{len(brio_names)})"
+                    )
+            else:
+                all_present = False
+                s._zones_with_motion.discard(name)
+        if all_present and brio_names:
+            log.log(
+                f"[CONSOLE] All {len(brio_names)} zones have cards — "
+                f"{s.brio_settle_s:.1f}s settle"
+            )
             s.console_scan_phase = "settling"
             s.console_settle_time = time.time()
             return
-        if crop is not None and not (s._zones_with_motion >= others):
-            # Dealer zone moved but not all other zones have received a
-            # card yet — likely dealer's arm crossing their own zone
-            # during deal. Ignore, keep watching.
-            pass
         # Heartbeat diagnostic: once every ~10s while we're stuck in
         # watching, log the per-zone diff from baseline for every active
         # zone so the user can tell whether Brio is seeing changes below
@@ -456,19 +460,13 @@ def _console_watch_dealer(s, frame):
             # another motion event in the same round.
             if s.monitor.zone_state.get(name) in ("recognized", "corrected"):
                 continue
-            if s._empty_scan_count.get(name, 0) >= MAX_EMPTY_SCANS:
-                # Cap reached — normally skip so YOLO can't burn
-                # through attempts on an empty felt crop. BUT if
-                # there's fresh motion above the baseline threshold
-                # the player has finally placed a card; reset the
-                # count and let this zone back into the batch.
-                if s.monitor.check_single(frame, z) is None:
-                    continue
-                log.log(
-                    f"[CONSOLE] {name}: motion after cap — "
-                    f"resetting scan count"
-                )
-                s._empty_scan_count[name] = 0
+            # No hard cap-based skip here anymore: a new settling event
+            # means the watcher saw something new worth scanning, and
+            # force_claude (below) routes previously-empty zones
+            # through Claude so a late YOLO hallucination can't slip
+            # through. The MAX_EMPTY_SCANS cap still lives in the
+            # scanned phase where it suppresses "still waiting on X"
+            # log spam for genuinely-standing players.
             crop = s.monitor._crop(frame, z)
             if crop is None or crop.size == 0:
                 continue
