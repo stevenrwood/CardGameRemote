@@ -920,14 +920,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if round_cards:
                 for c in round_cards:
                     s.console_hand_cards.append({"player": c["player"], "card": c["card"], "round": round_num})
-            # Per-game confirm hooks: 7/27 speaks numeric totals + bet-
-            # first and ticks freeze counters; stud/draw variants are a
-            # no-op here (their bet-first speech goes through
-            # _announce_poker_hand_bet_first below).
+            # Single per-round hook: the game class updates internal
+            # state (freezes, wild tracking) and speaks its bet-first
+            # announcement via the base class's score_hand flow.
+            # ``announce=False`` is the stud "defer past trailing down"
+            # case: state updates still run, speech is held until
+            # _announce_trailing_done fires. Stud/draw games still
+            # announced via _announce_poker_hand_bet_first below — that
+            # free function will migrate to the BaseGame path once the
+            # poker-hand announcer lands in step 4 of the refactor.
             impl = s.current_game_impl
             if impl is not None:
-                impl.announce_round_summary(s)
-                impl.on_round_confirmed(s, round_cards)
+                impl.on_round_confirmed(
+                    s, round_cards, announce=not defer_announces
+                )
             if not defer_announces:
                 _announce_poker_hand_bet_first(s)
             s.console_last_round_cards = []

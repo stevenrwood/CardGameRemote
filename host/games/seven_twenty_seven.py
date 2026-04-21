@@ -5,7 +5,7 @@ winning. Aces count as 1 or 11; face cards count as 0.5.
 
 The game class owns:
 - per-player freeze tracking (three consecutive passes → frozen)
-- per-hand-value speech (including half-integers and ace ambiguity)
+- per-hand-value scoring (half-integers and multiple ace totals)
 - the flip-choice prompt for the 2-down variant
 - the ``values_7_27`` decoration fed to /table for UI rendering
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 from log_buffer import log
 from speech import speech
 
-from . import BaseGame, register
+from . import BaseGame, ScoreResult, register
 
 
 # Face cards and 10 contribute either their point value or 0.5 (for
@@ -29,8 +29,6 @@ _RANK_TO_VALUE = {
     "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7,
     "8": 8, "9": 9, "10": 10, "J": 0.5, "Q": 0.5, "K": 0.5,
 }
-
-_RANK_SHORT = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}
 
 
 def compute_values(cards):
@@ -99,67 +97,67 @@ class SevenTwentySevenGame(BaseGame):
         self.freezes = {name: 0 for name in state.console_active_players}
         state.freezes = self.freezes
 
-    # --- per-round hooks ---
+    # --- per-round hook (state + speech) ---
 
-    def on_round_confirmed(self, state, round_cards) -> None:
-        # Freeze tracking only kicks in starting round 2: round 1 is the
-        # initial deal where every player must accept a card.
+    def on_round_confirmed(
+        self, state, round_cards, *, announce: bool = True
+    ) -> None:
+        # Freeze tracking only kicks in starting round 2: round 1 is
+        # the initial deal where every player must accept a card.
         round_num = state.console_up_round + 1
-        if round_num <= 1:
-            return
-        took = {c["player"] for c in round_cards}
-        newly_frozen = []
-        for name in state.console_active_players:
-            if self.freezes.get(name, 0) >= 3:
-                continue  # already frozen
-            if name in took:
-                self.freezes[name] = 0
-            else:
-                self.freezes[name] = self.freezes.get(name, 0) + 1
-                if self.freezes[name] >= 3:
-                    newly_frozen.append(name)
-        for name in newly_frozen:
-            log.log(f"[7/27] {name} is frozen")
-            speech.say(f"{name} is frozen")
+        if round_num > 1:
+            took = {c["player"] for c in round_cards}
+            newly_frozen = []
+            for name in state.console_active_players:
+                if self.freezes.get(name, 0) >= 3:
+                    continue  # already frozen
+                if name in took:
+                    self.freezes[name] = 0
+                else:
+                    self.freezes[name] = self.freezes.get(name, 0) + 1
+                    if self.freezes[name] >= 3:
+                        newly_frozen.append(name)
+            for name in newly_frozen:
+                log.log(f"[7/27] {name} is frozen")
+                speech.say(f"{name} is frozen")
+        # Let the base class speak the per-player totals + bet first
+        # via score_hand / _announce_round.
+        super().on_round_confirmed(state, round_cards, announce=announce)
 
-    def announce_round_summary(self, state) -> None:
-        # Walk each active player's up cards from the hand history and
-        # announce their 7/27 totals, then speak the highest-valued
-        # player as the first-to-bet.
-        per_player = {}
-        for entry in state.console_hand_cards:
-            txt = entry.get("card", "")
-            parts = txt.split(" of ")
-            if len(parts) != 2:
-                continue
-            rank_full, suit_full = parts[0].strip(), parts[1].strip().lower()
-            rank = _RANK_SHORT.get(rank_full, rank_full)
-            per_player.setdefault(entry["player"], []).append((rank, suit_full))
+    # --- scoring ---
 
-        best_player = None
-        best_high = -1
-        per_player_values = {}
-        for name in state.console_active_players:
-            cards = per_player.get(name, [])
-            if not cards:
-                continue
-            values = compute_values(cards)
-            if not values:
-                continue
-            per_player_values[name] = values
-            log.log(f"[7/27] {name}: {_format_values_phrase(values)}")
-            high = max(values)
-            if high > best_high:
-                best_high = high
-                best_player = name
+    def score_hand(self, cards, wild_ranks):
+        if not cards:
+            return None
+        values = compute_values(cards)
+        if not values:
+            return None
+        best = max(values)
+        ordered = sorted(set(values), reverse=True)
+        tail = (_speak_value(ordered[0]) if len(ordered) == 1
+                else _format_values_phrase(ordered))
+        return ScoreResult(
+            value=best,
+            speech=f"your bet with high of {tail}",
+        )
 
-        if best_player is not None:
-            best_values = per_player_values.get(best_player, [best_high])
-            ordered = sorted(set(best_values), reverse=True)
-            tail = _speak_value(ordered[0]) if len(ordered) == 1 else _format_values_phrase(ordered)
-            phrase = f"{best_player}, your bet with high of {tail}"
-            log.log(f"[7/27] Bet first: {phrase}")
-            speech.say(phrase)
+    def _player_visible_cards(self, state, player_name):
+        """Rodney's score includes his known down cards (minus any
+        flipped one). Everyone else uses the default ``console_hand_cards``
+        view."""
+        cards = super()._player_visible_cards(state, player_name)
+        remote = next(
+            (p for p in self.engine.players if p.is_remote), None
+        )
+        if remote is None or player_name != remote.name:
+            return cards
+        flipped_slot = (state.rodney_flipped_up or {}).get("slot")
+        for slot_num, d in state.rodney_downs.items():
+            if slot_num == flipped_slot:
+                continue
+            if d.get("rank") and d.get("suit"):
+                cards.append((d["rank"], d["suit"]))
+        return cards
 
     # --- scan policy ---
 
@@ -170,38 +168,15 @@ class SevenTwentySevenGame(BaseGame):
 
     def decorate_table_players(self, entries, state) -> None:
         """Add ``values_7_27`` (list of possible totals ≤27) to each
-        player entry. Rodney's value includes both up and down cards;
-        other players' values use only the up cards that are visible."""
-        ge = self.engine
-        up_by_player = {}
-        for hc in state.console_hand_cards:
-            parts = hc.get("card", "").split(" of ")
-            if len(parts) != 2:
-                continue
-            rank_full, suit_full = parts[0].strip(), parts[1].strip().lower()
-            rank = _RANK_SHORT.get(rank_full, rank_full)
-            up_by_player.setdefault(hc["player"], []).append((rank, suit_full))
-
-        remote_name = next((p.name for p in ge.players if p.is_remote), None)
-        flipped_slot = (state.rodney_flipped_up or {}).get("slot")
-
+        player entry. Uses the same per-player card view as scoring
+        but exposes every candidate total rather than just the max."""
         for entry in entries:
-            name = entry["name"]
-            pairs = list(up_by_player.get(name, []))
-            if name == remote_name:
-                # Rodney's down cards are known to the host — include
-                # them. Skip the flipped slot since that card is already
-                # counted via up_by_player (flip_up writes it into
-                # monitor.last_card on Confirm).
-                for slot_num, d in state.rodney_downs.items():
-                    if slot_num == flipped_slot:
-                        continue
-                    if d.get("rank") and d.get("suit"):
-                        pairs.append((d["rank"], d["suit"]))
-            if pairs:
-                values = compute_values(pairs)
-                if values:
-                    entry["values_7_27"] = values
+            pairs = self._player_visible_cards(state, entry["name"])
+            if not pairs:
+                continue
+            values = compute_values(pairs)
+            if values:
+                entry["values_7_27"] = values
 
     def flip_choice(self, state):
         """2-down variant only: prompt Rodney to pick which of his two
