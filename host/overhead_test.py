@@ -1156,15 +1156,29 @@ def _console_watch_dealer(s, frame):
                 s.console_scan_phase = "watching"
             return
         if missing:
-            # 10-second cooldown between "please adjust your card"
-            # announcements so we don't rattle them off back-to-back.
+            # Per-player "please adjust" speech, capped at 2 prompts per
+            # round so we stop nagging when YOLO and Claude simply can't
+            # see a card there. 10s cooldown stays — no back-to-back
+            # announcements even for a new set of names.
             now = time.time()
             last_speech = getattr(s, "_missing_speech_time", 0.0)
+            if not hasattr(s, "_missing_speech_count"):
+                s._missing_speech_count = {}
             if now - last_speech >= 10.0:
-                names = " and ".join(missing)
-                log.log(f"[CONSOLE] Missing cards: {names} — prompting to adjust")
-                speech.say(f"{names}, please adjust your card")
-                s._missing_speech_time = now
+                to_say = [n for n in missing
+                          if s._missing_speech_count.get(n, 0) < 2]
+                if to_say:
+                    names = " and ".join(to_say)
+                    log.log(f"[CONSOLE] Missing cards: {names} — prompting to adjust")
+                    speech.say(f"{names}, please adjust your card")
+                    s._missing_speech_time = now
+                    for n in to_say:
+                        s._missing_speech_count[n] = s._missing_speech_count.get(n, 0) + 1
+                else:
+                    log.log(
+                        "[CONSOLE] Missing cards still unresolved — "
+                        "2-announcement cap reached, waiting for manual entry"
+                    )
             s.console_scan_phase = "watching_missing"
             s._missing_prompt_time = time.time()
         return
@@ -5106,6 +5120,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.stats = {"yolo_right": 0, "yolo_wrong": 0,
                                "claude_right": 0, "claude_wrong": 0}
                     s._zones_with_motion = set()
+                    s._missing_speech_count = {}
                     s.table_state_version += 1
                 # Make sure any stale guided session from a prior hand is gone.
                 _stop_guided_deal(s)
@@ -5175,6 +5190,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 s.console_scan_phase = "confirmed"
                 log.log(f"[CONSOLE] Cards confirmed for up round {round_num}")
+            # Reset the per-player adjust-prompt cap so the next round
+            # starts fresh (two prompts max per player per round).
+            s._missing_speech_count = {}
             # Once the up-card round is confirmed, check Rodney's down slots
             # for anything below the auto-accept threshold. Those slots get
             # queued and (on LED-equipped hardware) will start blinking; the
