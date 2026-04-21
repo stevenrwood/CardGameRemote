@@ -1040,10 +1040,15 @@ def _console_watch_dealer(s, frame):
                 f"[CONSOLE] {dealer_name}'s zone empty after scan — "
                 f"likely a false trigger (arm over zone). Resuming watch."
             )
+            # Only reset zones that did NOT land a card on this scan.
+            # Cards already recognized or corrected keep their state so
+            # the next motion trigger does not re-scan them from scratch.
             for nm in brio_names:
-                if s.monitor.zone_state.get(nm) != "corrected":
-                    s.monitor.zone_state[nm] = "empty"
-                    s.monitor.last_card[nm] = ""
+                state = s.monitor.zone_state.get(nm)
+                if state in ("recognized", "corrected"):
+                    continue
+                s.monitor.zone_state[nm] = "empty"
+                s.monitor.last_card[nm] = ""
             s.console_scan_phase = "watching"
             return
         missing = []
@@ -1151,7 +1156,11 @@ def _console_watch_dealer(s, frame):
             name = z["name"]
             if name not in brio_names:
                 continue
-            if s.monitor.zone_state.get(name) == "corrected":
+            # Lock already-identified cards: once a zone has a recognized
+            # (or user-corrected) card for this round, skip it. Only zones
+            # that are still empty get re-scanned when the dealer triggers
+            # another motion event in the same round.
+            if s.monitor.zone_state.get(name) in ("recognized", "corrected"):
                 continue
             crop = s.monitor._crop(frame, z)
             if crop is None or crop.size == 0:
