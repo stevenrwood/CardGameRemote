@@ -9,6 +9,20 @@ Usage:
     python overhead_test.py [--camera 0] [--threshold 30.0] [--resolution auto]
 """
 
+import sys as _sys
+# When this file is run as `python overhead_test.py` it loads as the
+# module `__main__`, not `overhead_test`. Our own http_server.py does
+# `import overhead_test as ot` at module load to reach game-flow
+# helpers that still live here — without this alias, that triggers a
+# SECOND execution of this file under the name `overhead_test`, which
+# then re-hits `from http_server import Handler` mid-load and crashes
+# with "cannot import name 'Handler' from partially initialized
+# module 'http_server'". Aliasing the main module under its filename
+# name makes the nested import resolve to the same (partial) module
+# we are already executing, so nothing re-runs.
+if __name__ == "__main__":
+    _sys.modules.setdefault("overhead_test", _sys.modules[__name__])
+
 import argparse
 import base64
 import json
