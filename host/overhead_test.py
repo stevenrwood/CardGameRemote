@@ -963,9 +963,34 @@ class ZoneMonitor:
     def _save(self, name, crop, result):
         TRAINING_DIR.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe = result.replace(" ","_").replace("/","-")[:30]
-        cv2.imwrite(str(TRAINING_DIR / f"{ts}_{name}_{safe}.jpg"), crop)
-        (TRAINING_DIR / f"{ts}_{name}_{safe}.txt").write_text(result)
+        safe = result.replace(" ", "_").replace("/", "-")[:30]
+        base = TRAINING_DIR / f"{ts}_{name}_{safe}"
+        cv2.imwrite(str(base.with_suffix(".jpg")), crop)
+        base.with_suffix(".txt").write_text(result)
+        # Remember so a later user correction can delete this (wrong-label)
+        # pair and replace it with the correct one.
+        if not hasattr(self, "last_save_base"):
+            self.last_save_base = {}
+        self.last_save_base[name] = base
+
+    def _delete_last_save(self, name):
+        """Remove the most recent training_data save for this zone. Used
+        when the user corrects a misrecognition so the bad label doesn't
+        poison future YOLO training runs."""
+        base = getattr(self, "last_save_base", {}).get(name)
+        if base is None:
+            return False
+        removed = False
+        for suffix in (".jpg", ".txt"):
+            p = base.with_suffix(suffix)
+            try:
+                if p.exists():
+                    p.unlink()
+                    removed = True
+            except Exception as e:
+                log.log(f"[{name}] failed to remove stale training file {p}: {e}")
+        self.last_save_base.pop(name, None)
+        return removed
 
 # ---------------------------------------------------------------------------
 # Console scan trigger — watches dealer's zone, scans all zones when dealer dealt
@@ -5275,9 +5300,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         if entry.get("player") == player:
                             entry["card"] = new_card
                             break
-                    # Save corrected crop to training_data for future YOLO training
+                    # Save corrected crop to training_data for future YOLO
+                    # training. Delete the prior (wrong-label) save for this
+                    # zone so the bad label doesnt poison the dataset.
                     crop = s.monitor.recognition_crops.get(player)
                     if crop is not None:
+                        removed = s.monitor._delete_last_save(player)
+                        if removed:
+                            log.log(f"[CONSOLE] Removed wrong-label training save for {player}")
                         s.monitor._save(player, crop, new_card)
                         log.log(f"[CONSOLE] Saved correction to training_data: {new_card}")
                     log.log(f"[CONSOLE] Corrected {player}: {old_card} -> {new_card}")
