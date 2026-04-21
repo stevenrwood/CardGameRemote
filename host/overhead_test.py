@@ -132,6 +132,11 @@ class LogBuffer:
     def __init__(self, maxlines=500):
         self._lines = []
         self._lock = Lock()
+        # Path of the current hand-by-hand archive (the poker_* file),
+        # set when start_night() runs. Each log.log() also appends here
+        # so the archive is a full copy of the live log for this night,
+        # available for later inspection (e.g. cleanup_training_data.py).
+        self._archive_path = None
         # Overwrite log file on startup
         LOG_FILE.write_text("")
 
@@ -144,12 +149,20 @@ class LogBuffer:
         with self._lock:
             self._lines.append(line)
             self._lines = self._lines[-500:]
-        # Append to file
+        # Append to both the live log and (if a poker night is active) the
+        # per-night archive file, so historical analysis tools can replay
+        # what happened after the fact.
         try:
             with open(LOG_FILE, "a") as f:
                 f.write(line + "\n")
         except Exception:
             pass
+        if self._archive_path is not None:
+            try:
+                with open(self._archive_path, "a") as f:
+                    f.write(line + "\n")
+            except Exception:
+                pass
 
     def get(self, n=50):
         with self._lock:
@@ -173,14 +186,25 @@ class LogBuffer:
             LOG_FILE.write_text("")
         except Exception:
             pass
+        try:
+            LOG_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+            archive.write_text("")
+        except Exception:
+            pass
         with self._lock:
             self._lines = []
+            self._archive_path = archive
         self.log(f"=== Poker night started {stamp} → {archive.name} ===")
         return archive.name
 
     def end_night(self):
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log(f"=== Poker night ended {stamp} ===")
+        # Stop appending to the per-night archive; the file on disk stays
+        # for historical analysis. The next start_night() creates a new
+        # archive file and takes over.
+        with self._lock:
+            self._archive_path = None
 
 
 log = LogBuffer()
@@ -5364,13 +5388,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "final": new_card,
                         "corrected": True,
                     }
-                    # If this round's card already landed in console_hand_cards
-                    # (correction happens after Confirm), update the most
-                    # recent entry for this player so subsequent logic —
-                    # wild-card recomputation, dedup, hand value, best hand —
-                    # all see the corrected card.
+                    # If the corrected card already landed in console_hand_cards
+                    # (post-Confirm correction), update that entry in place so
+                    # dedup / wild recompute / hand value / best hand all see
+                    # the new value. Match on BOTH player AND the old card
+                    # value — otherwise a mid-round correction (the common
+                    # case) would overwrite a previous rounds entry because
+                    # the current round hasnt been appended yet.
                     for entry in reversed(s.console_hand_cards):
-                        if entry.get("player") == player:
+                        if (entry.get("player") == player
+                                and entry.get("card") == old_card):
                             entry["card"] = new_card
                             break
                     # Save corrected crop to training_data for future YOLO

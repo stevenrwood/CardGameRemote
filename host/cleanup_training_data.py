@@ -46,8 +46,23 @@ def _label_to_safe(label: str) -> str:
     return label.replace(" ", "_").replace("/", "-")[:30]
 
 
+def _read_corrections_from(text, base_date):
+    out = []
+    for line in text.splitlines():
+        cm = CORRECTION_RE.search(line)
+        if not cm:
+            continue
+        h, mi, se = int(cm.group(1)), int(cm.group(2)), int(cm.group(3))
+        ts = datetime.combine(
+            base_date, datetime.min.time()
+        ).replace(hour=h, minute=mi, second=se)
+        out.append((ts, cm.group(4), cm.group(5).strip(), cm.group(6).strip()))
+    return out
+
+
 def load_corrections():
-    """Return list of (correction_datetime, player, old_label, new_label)."""
+    """Return list of (correction_datetime, player, old_label, new_label)
+    from every archived poker_*.txt plus the live log.txt."""
     corrections = []
     for log_dir in LOG_DIRS:
         if not log_dir.exists():
@@ -64,17 +79,16 @@ def load_corrections():
                 text = f.read_text(errors="replace")
             except OSError:
                 continue
-            for line in text.splitlines():
-                cm = CORRECTION_RE.search(line)
-                if not cm:
-                    continue
-                h, mi, se = int(cm.group(1)), int(cm.group(2)), int(cm.group(3))
-                ts = datetime.combine(
-                    base_date, datetime.min.time()
-                ).replace(hour=h, minute=mi, second=se)
-                corrections.append(
-                    (ts, cm.group(4), cm.group(5).strip(), cm.group(6).strip())
-                )
+            corrections.extend(_read_corrections_from(text, base_date))
+        # Live log file too — corrections from todays unfinished session.
+        live = log_dir / "log.txt"
+        if live.exists():
+            try:
+                text = live.read_text(errors="replace")
+                mtime = datetime.fromtimestamp(live.stat().st_mtime).date()
+                corrections.extend(_read_corrections_from(text, mtime))
+            except OSError:
+                pass
     return corrections
 
 
