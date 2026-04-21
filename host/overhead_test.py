@@ -1576,8 +1576,51 @@ def _announce_poker_hand_bet_first(s):
             best_player = name
 
     if best_player is not None and best_result is not None:
-        phrase = f"{best_player}, your bet with {best_result.label}"
-        log.log(f"[POKER] Bet first: {phrase}")
+        try:
+            from poker_hands import RANK_PLURAL
+        except Exception:
+            RANK_PLURAL = {}
+        cat = best_result.category
+        tb = best_result.tiebreakers
+        name_of = lambda v: RANK_NAME.get(VALUE_RANK.get(v, ""), "")
+        plural_of = lambda v: RANK_PLURAL.get(VALUE_RANK.get(v, ""), name_of(v) + "s")
+        if cat == "five_of_a_kind":
+            hand_phrase = f"Five {plural_of(tb[0])}"
+        elif cat == "four_of_a_kind":
+            hand_phrase = f"Four {plural_of(tb[0])}"
+        elif cat == "three_of_a_kind":
+            hand_phrase = f"Three {plural_of(tb[0])}"
+        elif cat == "full_house":
+            hand_phrase = f"Three {plural_of(tb[0])} and two {plural_of(tb[1])}"
+        elif cat == "two_pair":
+            hand_phrase = f"Two {plural_of(tb[0])} and two {plural_of(tb[1])}"
+        elif cat == "pair":
+            hand_phrase = f"Two {plural_of(tb[0])}"
+        elif cat == "straight_flush" and tb[0] == 14:
+            hand_phrase = "Royal flush"
+        elif cat == "straight_flush":
+            hand_phrase = f"Straight flush, {name_of(tb[0])} high"
+        elif cat == "flush":
+            hand_phrase = f"Flush, {name_of(tb[0])} high"
+        elif cat == "straight":
+            hand_phrase = f"Straight, {name_of(tb[0])} high"
+        else:
+            # high card: list every card the player actually shows, in
+            # descending effective rank (wilds speak as Ace).
+            wild_set = set(wild_ranks)
+            values = []
+            for rank, _suit in per_player_cards.get(best_player, []):
+                if rank in wild_set:
+                    values.append(14)
+                else:
+                    v = RANK_VALUE.get(rank)
+                    if v:
+                        values.append(v)
+            values.sort(reverse=True)
+            ranks_spoken = [name_of(v) for v in values if v]
+            hand_phrase = ", ".join(ranks_spoken) if ranks_spoken else "no card"
+        phrase = f"{best_player}, {hand_phrase} is high. Your bet."
+        log.log(f"[POKER] Bet first: {phrase} ({best_result.label})")
         speech.say(phrase)
 
 
