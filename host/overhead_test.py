@@ -723,8 +723,16 @@ class ZoneMonitor:
                 self.pending[name] = True
             Thread(target=self._recognize_batch, args=(changed,), daemon=True).start()
 
-    def _recognize_batch(self, zone_crops):
-        """Run YOLO on all zones, then batch Claude call for low-confidence ones."""
+    def _recognize_batch(self, zone_crops, force_claude_names=None):
+        """Run YOLO on all zones, then batch Claude call for low-confidence ones.
+
+        ``force_claude_names`` — optional iterable of zone names that must
+        route through Claude even when YOLO passes the confidence bar.
+        Used for zones that already came back empty earlier in this round;
+        a subsequent YOLO hit on those zones is almost always a
+        hallucination (phantom 2 of Spades on an empty zone), so Claude's
+        verdict wins before we commit a card that never existed."""
+        force_claude = set(force_claude_names or ())
         need_claude = {}  # name -> (crop, yolo_result, yolo_conf)
 
         # Phase 1: YOLO all zones (sequential, under lock)
@@ -741,7 +749,8 @@ class ZoneMonitor:
                     details["yolo"] = result
                     details["yolo_conf"] = round(conf * 100)
 
-                    if result != "No card" and conf >= self.yolo_min_conf:
+                    if (result != "No card" and conf >= self.yolo_min_conf
+                            and name not in force_claude):
                         # YOLO confident — accept it
                         total_ms = (time.time() - t0) * 1000
                         self.last_card[name] = result
@@ -1134,13 +1143,22 @@ def _console_watch_dealer(s, frame):
         missing = []
         if not hasattr(s, "_empty_scan_count"):
             s._empty_scan_count = {}
+        MAX_EMPTY_SCANS_SCANNED = 3
         for name in brio_names:
             if s.monitor.zone_state.get(name) == "corrected":
                 continue
             card = s.monitor.last_card.get(name, "")
             if not card or card == "No card":
-                missing.append(name)
                 s._empty_scan_count[name] = s._empty_scan_count.get(name, 0) + 1
+                # Stop treating a zone as "missing" once it has come back
+                # empty enough times — otherwise a standing player (e.g.
+                # Rodney passing in a 7/27 hit round) keeps re-triggering
+                # "still waiting on…" every time another zone sees motion.
+                # User can still correct the zone if the player actually
+                # did place a card we never saw.
+                if s._empty_scan_count[name] >= MAX_EMPTY_SCANS_SCANNED:
+                    continue
+                missing.append(name)
         # In hit rounds (7/27), dealer deals one at a time around the
         # table. The first motion fires a scan long before the later
         # players get their cards, so a "missing" zone here just means
@@ -1318,8 +1336,21 @@ def _console_watch_dealer(s, frame):
                 continue
             zone_crops[name] = crop.copy()
             s.monitor.pending[name] = True
+        # Zones that came back empty on a prior scan this round can't
+        # trust YOLO for their next recognition — it has a strong habit
+        # of hallucinating "2 of Spades" on an empty felt crop at 50-55%
+        # confidence, which is just above the auto-accept bar. Send
+        # those zones through Claude to sanity-check YOLO's pick.
+        force_claude = {
+            name for name in zone_crops
+            if s._empty_scan_count.get(name, 0) > 0
+        }
         s.console_scan_phase = "scanned"
-        Thread(target=s.monitor._recognize_batch, args=(zone_crops,), daemon=True).start()
+        Thread(
+            target=s.monitor._recognize_batch,
+            args=(zone_crops, force_claude),
+            daemon=True,
+        ).start()
 
 
 def _console_rescan_missing(s, zone_crops):
