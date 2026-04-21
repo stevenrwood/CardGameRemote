@@ -49,6 +49,11 @@ class GameTemplate:
     with_params: dict = field(default_factory=dict)
     wild_cards: dict = field(default_factory=dict)  # {"ranks": ["2"], "label": "..."}
     dynamic_wild: str = ""  # e.g., "follow_the_queen"
+    # Optional per-game class name registered in host/games/__init__.py.
+    # Empty string → BaseGame (no game-specific overrides). Games whose
+    # rules differ only in data (wild_cards / dynamic_wild / with_params)
+    # don't need a dedicated class.
+    class_name: str = ""
     repeatable: bool = False
     notes: str = ""
 

@@ -38,6 +38,7 @@ from pi_scanner import (
     _pi_ping, _pi_flash, _pi_slot_led, _pi_slot_scan,
 )
 from zone_monitor import TRAINING_DIR
+from games import make_game
 from overhead_test import (
     PLAYER_NAMES,
     _announce_7_27_hand_values,
@@ -772,6 +773,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._r(400, "application/json", json.dumps({"error": f"Unknown game: {game_name}"}))
             else:
                 result = ge.new_hand(game_name)
+                # Stand up the per-game class instance. Empty class_name
+                # falls back to BaseGame, so templates that have no
+                # dedicated class behave exactly as before.
+                s.current_game_impl = make_game(ge.current_game, ge)
                 s.console_last_round_cards = []
                 s.console_hand_cards = []
                 # Count total up-card rounds from template. Games with an
@@ -861,6 +866,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s._missing_speech_count = {}
                     s._empty_scan_count = {}
                     s.table_state_version += 1
+                # Let the per-game class wire up its own per-hand state
+                # (freeze counters, local flags) now that common state is
+                # reset and the engine knows the current game.
+                s.current_game_impl.on_hand_start(s)
                 # Make sure any stale guided session from a prior hand is gone.
                 _stop_guided_deal(s)
                 s.console_state = "dealing"
@@ -1098,7 +1107,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     f"YOLO {yr}/{yolo_total} right ({_pct(yr, yolo_total)}), "
                     f"Claude {cr}/{claude_total} right ({_pct(cr, claude_total)})"
                 )
+            if s.current_game_impl is not None:
+                s.current_game_impl.on_hand_end(s)
             result = ge.end_hand()
+            s.current_game_impl = None
             _skip_inactive_dealer(s)
             result["next_dealer"] = ge.get_dealer().name
             s.console_last_round_cards = []

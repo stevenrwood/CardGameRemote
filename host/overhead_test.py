@@ -1007,6 +1007,10 @@ class AppState:
         # True when Deal pinged the Pi and got no answer; stays set until the
         # next Deal so we skip hitting the Pi (flash/hold, /slots, LEDs, etc).
         self.pi_offline = False
+        # Per-hand game class instance (subclass of games.BaseGame).
+        # Created in /api/console/deal from the template's class_name and
+        # cleared on end_hand. None when idle / between hands.
+        self.current_game_impl = None
 
 _state = None
 
