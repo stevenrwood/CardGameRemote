@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html><head><title>Card Scanner</title><meta name="viewport" content="width=device-width">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#1a1a2e;color:#e0e0e0;padding:12px}
+button{padding:8px 14px;border:none;border-radius:6px;cursor:pointer;font-size:.9em;margin:3px}
+.btn-blue{background:#0f3460;color:#fff} .btn-blue:hover{background:#1a4a7a}
+.btn-green{background:#1b5e20;color:#fff} .btn-green:hover{background:#2e7d32}
+.btn-red{background:#b71c1c;color:#fff} .btn-red:hover{background:#c62828}
+.btn-orange{background:#e65100;color:#fff}
+.btn-off{background:#333;color:#888}
+img{border:1px solid #333;border-radius:4px}
+#toolbar{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px;padding:8px;background:#16213e;border-radius:8px}
+#main{display:flex;gap:12px;flex-wrap:wrap}
+#left{flex:1;min-width:300px} #right{width:320px;flex-shrink:0}
+.zone{padding:8px;margin:4px 0;border:2px solid #444;border-radius:8px;display:flex;align-items:center;gap:8px}
+.zone img{width:100px;height:100px;object-fit:cover;border-radius:4px}
+.zone-info{flex:1}
+.zone-name{font-weight:bold;font-size:1.1em}
+.zone-card{font-size:1.2em;margin-top:2px}
+pre{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:200px;overflow:auto;margin-top:8px}
+#test-panel{background:#0f3460;padding:12px;border-radius:8px;margin:8px 0;display:none}
+#test-panel h3{margin-bottom:8px}
+#status-bar{font-size:.85em;color:#888;margin-top:8px}
+</style></head><body>
+<div id="toolbar">
+  <button class="btn-blue" onclick="location.href='/calibrate'">Calibrate</button>
+  <button class="btn-green" id="btn-monitor" onclick="toggleMonitor()">Start Monitor</button>
+  <button class="btn-blue" onclick="ensureLogWindow();startTest()">Test Recognition</button>
+  <button class="btn-blue" id="btn-deal" onclick="toggleDeal()">Test Dealing</button>
+  <button class="btn-blue" onclick="resetBaselines()">Reset Baselines</button>
+  <button class="btn-blue" onclick="saveSnapshot()">Snapshot</button>
+  <button class="btn-blue" id="btn-collect" onclick="toggleCollect()">Collect Data</button>
+  <span id="status-bar">Loading...</span>
+</div>
+<div id="test-panel">
+  <h3 id="test-title">Test Mode</h3>
+  <p id="test-prompt"></p>
+  <div id="test-buttons" style="margin-top:8px">
+    <button class="btn-green" onclick="testConfirm(true)">Correct</button>
+    <button class="btn-red" onclick="testConfirm(false)">Incorrect</button>
+    <button class="btn-orange" onclick="testSkip()">Skip</button>
+    <button class="btn-off" onclick="testStop()">Stop Test</button>
+  </div>
+</div>
+<div id="collect-panel" style="display:none;background:#1b5e20;padding:12px;border-radius:8px;margin:8px 0">
+  <h3>Data Collection</h3>
+  <div id="collect-info">
+    <p style="font-size:1.1em;color:#fff;margin:8px 0">
+      Deal rank <span id="collect-rank" style="color:#ff0;font-weight:bold;font-size:1.3em">—</span> to each player:
+    </p>
+    <div id="collect-assignments" style="margin:6px 0"></div>
+    <p style="font-size:.9em;color:#aaa">
+      Pass <span id="collect-pass">1</span>/<span id="collect-pass-total">4</span> |
+      Card <span id="collect-idx">0</span>/<span id="collect-total">52</span>
+    </p>
+    <div style="background:#333;border-radius:4px;height:8px;margin:8px 0">
+      <div id="collect-progress" style="background:#4caf50;height:100%;border-radius:4px;width:0%"></div>
+    </div>
+  </div>
+  <div id="collect-done" style="display:none">
+    <p style="font-size:1.2em;color:#4caf50">All cards collected!</p>
+  </div>
+  <div style="margin-top:8px">
+    <button class="btn-green" id="collect-go-btn" onclick="collectGo()" style="font-size:1.1em;padding:10px 20px">Start</button>
+    <button class="btn-orange" id="collect-pause-btn" onclick="collectPause()" style="display:none">Pause</button>
+    <button class="btn-blue" id="collect-redo-btn" onclick="collectRedo()" style="display:none">Redo</button>
+    <span id="collect-countdown" style="font-size:2.5em;color:#ff0;margin:0 16px;display:none"></span>
+    <span id="collect-phase-label" style="font-size:1em;color:#aaa;display:none"></span>
+    <button class="btn-red" onclick="toggleCollect()" style="margin-left:8px">Stop</button>
+  </div>
+</div>
+<div id="deal-panel" style="display:none;background:#0f3460;padding:12px;border-radius:8px;margin:8px 0">
+  <h3>Test Dealing</h3>
+  <p style="margin:4px 0">Game: <span id="deal-game" style="color:#4fc3f7;font-size:1.1em">—</span></p>
+  <div id="deal-game-input" style="margin:6px 0">
+    <div style="margin:4px 0">
+      <label style="font-size:.85em;color:#888">Dealer: </label>
+      <select id="deal-dealer" style="padding:6px;border-radius:4px;border:1px solid #444;background:#1a1a2e;color:#e0e0e0"
+        onchange="setDealer()">
+      </select>
+      <span id="deal-order-display" style="font-size:.8em;color:#888;margin-left:8px"></span>
+    </div>
+    <div style="margin:4px 0">
+      <label style="font-size:.85em;color:#888">Game (dictate or type): </label>
+      <input id="deal-input" type="text" placeholder="e.g. 'Follow the Queen'"
+        style="width:60%;padding:8px;border-radius:6px;border:1px solid #444;background:#1a1a2e;color:#e0e0e0;font-size:1em">
+      <button class="btn-green" onclick="submitGameName()" style="margin-left:4px">Start</button>
+    </div>
+  </div>
+  <div id="deal-status" style="margin:6px 0;display:none">
+    <p style="color:#4fc3f7;font-size:.95em">Watching: <span id="deal-active-player" style="font-weight:bold">—</span>'s zone
+      (round <span id="deal-round">—</span>/<span id="deal-total">—</span>)</p>
+  </div>
+  <div id="deal-cards" style="margin:8px 0"></div>
+  <button class="btn-orange" onclick="clearDeal()">Clear</button>
+  <button class="btn-red" onclick="toggleDeal()">Stop Dealing</button>
+</div>
+<div id="main">
+  <div id="left">
+    <img id="tableimg" src="/snapshot/cropped" style="width:100%;cursor:pointer"
+         onclick="this.src='/snapshot/cropped?'+Date.now()">
+    <div style="margin-top:8px">
+      <button class="btn-off" style="padding:3px 8px;font-size:.75em" onclick="openLogWindow()">Log Window</button>
+      <a href="/training" style="color:#4fc3f7;font-size:.8em;margin-left:8px">Training data</a>
+    </div>
+  </div>
+  <div id="right">
+    <h3>Zones</h3>
+    <div id="zones"></div>
+  </div>
+</div>
+<script>
+var players=$players_js;
+var monitoring=false, testMode=null;
+
+function api(path, data){
+  return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(data||{})}).then(function(r){return r.json()});
+}
+
+function toggleMonitor(){
+  if(!monitoring) ensureLogWindow();
+  if(monitoring) api('/api/monitor/stop').then(update);
+  else api('/api/monitor/start').then(update);
+}
+function startTest(){
+  if(!confirm('Clear all cards from table, then click OK')) return;
+  api('/api/test/start').then(update);
+}
+function testConfirm(correct){ api('/api/test/confirm',{correct:correct}).then(update); }
+function testSkip(){ api('/api/test/skip').then(update); }
+function testStop(){ api('/api/test/stop').then(update); }
+function toggleDeal(){
+  fetch('/api/state').then(function(r){return r.json()}).then(function(d){
+    if(d.deal_mode) api('/api/deal/stop').then(update);
+    else { ensureLogWindow(); api('/api/deal/start').then(function(){
+      update();
+      setTimeout(function(){
+        var inp=document.getElementById('deal-input');
+        if(inp) inp.focus();
+      }, 300);
+    }); }
+  });
+}
+function clearDeal(){
+  api('/api/deal/clear').then(function(){
+    var inp=document.getElementById('deal-input');
+    if(inp) inp.value='';
+    update();
+  });
+}
+function submitGameName(){
+  var inp=document.getElementById('deal-input');
+  if(inp && inp.value.trim()) {
+    api('/api/deal/text',{text:inp.value.trim()}).then(update);
+  }
+}
+function setDealer(){
+  var sel=document.getElementById('deal-dealer');
+  if(sel) {
+    api('/api/deal/dealer',{dealer:sel.value}).then(function(){
+      // Show deal order
+      var idx=players.indexOf(sel.value);
+      var order=[];
+      for(var i=1;i<=players.length;i++) order.push(players[(idx+i)%players.length]);
+      var el=document.getElementById('deal-order-display');
+      if(el) el.textContent='Deal: '+order.join(' → ');
+    });
+  }
+}
+// Allow Enter key to submit game name
+document.addEventListener('keydown',function(e){
+  if(e.key==='Enter' && document.activeElement && document.activeElement.id==='deal-input'){
+    submitGameName();
+  }
+});
+
+function resetBaselines(){
+  if(!confirm('Clear all cards, then click OK')) return;
+  api('/api/baselines').then(function(){ log.log && update(); });
+}
+function saveSnapshot(){ api('/api/snapshot/save'); }
+
+function toggleCollect(){
+  fetch('/api/state').then(function(r){return r.json()}).then(function(d){
+    if(d.collect_mode) api('/api/collect/stop').then(update);
+    else { ensureLogWindow(); api('/api/collect/start').then(update); }
+  });
+}
+function collectGo(){
+  api('/api/collect/go').then(update);
+}
+function collectPause(){
+  api('/api/collect/pause').then(update);
+}
+function collectResume(){
+  api('/api/collect/resume').then(update);
+}
+function collectRedo(){
+  api('/api/collect/redo').then(update);
+}
+var _logWin=null;
+function openLogWindow(){
+  if(!_logWin || _logWin.closed)
+    _logWin=window.open('/logview','_logview','width=800,height=400,scrollbars=yes');
+  else
+    _logWin.focus();
+}
+function ensureLogWindow(){
+  if(!_logWin || _logWin.closed)
+    _logWin=window.open('/logview','_logview','width=800,height=400,scrollbars=yes');
+}
+
+function update(){
+  // Table image
+  var ti=new Image();
+  ti.onload=function(){document.getElementById('tableimg').src=ti.src};
+  ti.src='/snapshot/cropped?'+Date.now()+Math.random();
+
+  // State
+  fetch('/api/state').then(function(r){return r.json()}).then(function(d){
+    monitoring=d.monitoring;
+    var btn=document.getElementById('btn-monitor');
+    btn.textContent=monitoring?'Stop Monitor':'Start Monitor';
+    btn.className=monitoring?'btn-red':'btn-green';
+
+    // Status bar
+    var sb='Resolution: '+d.resolution+' | '+(d.calibrated?'Calibrated':'NOT calibrated');
+    sb+=' | Monitor: '+(d.monitoring?'ON':'OFF');
+    document.getElementById('status-bar').textContent=sb;
+
+    // Zones
+    var zh='';
+    players.forEach(function(name){
+      var z=d.zones[name]||{};
+      var st=z.state||'empty';
+      var card=z.card||'';
+      var bc={'recognized':'#4caf50','processing':'#ff9800'}[st]||'#444';
+      zh+='<div class="zone" style="border-color:'+bc+'">'
+        +'<img src="/zone/'+name+'?'+Date.now()+'" onerror="this.style.display=\\'none\\'">'
+        +'<div class="zone-info"><div class="zone-name">'+name+'</div>'
+        +'<div style="color:#888;font-size:.8em">'+st+'</div>'
+        +'<div class="zone-card" style="color:'+bc+'">'+card+'</div></div></div>';
+    });
+    document.getElementById('zones').innerHTML=zh;
+
+    // Collect mode panel
+    var cp=document.getElementById('collect-panel');
+    var cbtn=document.getElementById('btn-collect');
+    if(d.collect_mode){
+      cp.style.display='block';
+      cbtn.textContent='Stop Collect';cbtn.className='btn-red';
+      var cm=d.collect_mode;
+      if(cm.done){
+        document.getElementById('collect-info').style.display='none';
+        document.getElementById('collect-done').style.display='';
+        document.getElementById('collect-scan-btn').style.display='none';
+        document.getElementById('collect-next-btn').style.display='none';
+      } else {
+        document.getElementById('collect-info').style.display='';
+        document.getElementById('collect-done').style.display='none';
+        document.getElementById('collect-rank').textContent=cm.rank||'?';
+        document.getElementById('collect-pass').textContent=cm.pass_idx+1;
+        document.getElementById('collect-pass-total').textContent=cm.pass_total;
+        document.getElementById('collect-idx').textContent=cm.current+1;
+        document.getElementById('collect-total').textContent=cm.total;
+        // Show per-player assignments
+        var ah='';
+        Object.keys(cm.cards||{}).forEach(function(p){
+          ah+='<span style="display:inline-block;margin:3px;padding:4px 10px;background:#0f3460;border-radius:4px">'
+            +p+': <b>'+cm.cards[p]+'</b></span>';
+        });
+        document.getElementById('collect-assignments').innerHTML=ah;
+        var pct=Math.round(cm.current/cm.total*100);
+        document.getElementById('collect-progress').style.width=pct+'%';
+        var goBtn=document.getElementById('collect-go-btn');
+        var pauseBtn=document.getElementById('collect-pause-btn');
+        var redoBtn=document.getElementById('collect-redo-btn');
+        var cdSpan=document.getElementById('collect-countdown');
+        var phLabel=document.getElementById('collect-phase-label');
+        if(cm.phase=='dealing'||cm.phase=='clearing'){
+          goBtn.style.display='none';
+          pauseBtn.style.display='';
+          redoBtn.style.display=cm.phase=='clearing'?'':'none';
+          cdSpan.style.display='';cdSpan.textContent=cm.countdown;
+          phLabel.style.display='';
+          phLabel.textContent=cm.phase=='dealing'?'DEAL':'CLEAR';
+          phLabel.style.color=cm.phase=='dealing'?'#4caf50':'#ff9800';
+        } else if(cm.phase=='paused'||cm.phase=='paused_new_pass'){
+          goBtn.style.display='';goBtn.textContent=cm.phase=='paused_new_pass'?'Start New Pass':'Resume';
+          goBtn.onclick=cm.phase=='paused_new_pass'?collectGo:collectResume;
+          pauseBtn.style.display='none';
+          redoBtn.style.display='';
+          cdSpan.style.display='none';
+          phLabel.style.display='';phLabel.textContent='PAUSED';phLabel.style.color='#888';
+        } else {
+          goBtn.style.display='';goBtn.textContent='Start';goBtn.onclick=collectGo;
+          pauseBtn.style.display='none';
+          redoBtn.style.display='none';
+          cdSpan.style.display='none';
+          phLabel.style.display='none';
+        }
+      }
+    } else {
+      cp.style.display='none';
+      cbtn.textContent='Collect Data';cbtn.className='btn-blue';
+    }
+
+    // Deal mode panel
+    var dp=document.getElementById('deal-panel');
+    var dbtn=document.getElementById('btn-deal');
+    if(d.deal_mode){
+      dp.style.display='block';
+      dbtn.textContent='Stop Dealing';dbtn.className='btn-red';
+      var dm=d.deal_mode;
+      document.getElementById('deal-game').textContent=dm.game||'—';
+      // Show/hide game input vs dealing status
+      var gi=document.getElementById('deal-game-input');
+      var ds=document.getElementById('deal-status');
+      if(dm.phase=='game_select'){
+        gi.style.display='';ds.style.display='none';
+        // Populate dealer dropdown if empty
+        var sel=document.getElementById('deal-dealer');
+        if(sel && sel.options.length==0){
+          players.forEach(function(n){
+            var opt=document.createElement('option');opt.value=n;opt.textContent=n;
+            sel.appendChild(opt);
+          });
+          setDealer();  // set initial deal order
+        }
+      } else {
+        gi.style.display='none';ds.style.display='';
+        document.getElementById('deal-active-player').textContent=dm.active_player||'—';
+        document.getElementById('deal-round').textContent=(dm.round_idx||0)+1;
+        document.getElementById('deal-total').textContent=dm.total_rounds||'?';
+      }
+      if(dm.phase=='complete'){
+        ds.innerHTML='<p style="color:#4caf50;font-size:1.1em">All rounds dealt!</p>';
+      }
+      var ch='';
+      (dm.cards||[]).forEach(function(c){
+        ch+='<span style="display:inline-block;margin:3px;padding:4px 8px;background:#1b5e20;border-radius:4px">'
+          +c.player+': '+c.card+'</span>';
+      });
+      document.getElementById('deal-cards').innerHTML=ch;
+    } else {
+      dp.style.display='none';
+      dbtn.textContent='Test Dealing';dbtn.className='btn-blue';
+    }
+
+    // Test mode panel
+    var tp=document.getElementById('test-panel');
+    var tb=document.getElementById('test-buttons');
+    if(d.test_mode){
+      tp.style.display='block';
+      var tm=d.test_mode;
+      if(!tm.zone){
+        document.getElementById('test-title').textContent='Test Complete!';
+        document.getElementById('test-prompt').textContent='';
+        tb.innerHTML='<button class="btn-blue" onclick="testStop()">Done</button>';
+      } else if(tm.waiting=='card'){
+        document.getElementById('test-title').textContent='Testing: '+tm.zone+' ('+
+          (tm.zone_idx+1)+'/'+tm.total+')';
+        document.getElementById('test-prompt').textContent='Place a face-up card in '+tm.zone+'\\'s zone...';
+        tb.innerHTML='<button class="btn-orange" onclick="testSkip()">Skip</button> '+
+          '<button class="btn-off" onclick="testStop()">Stop Test</button>';
+      } else if(tm.waiting=='confirm'){
+        document.getElementById('test-title').textContent='Testing: '+tm.zone;
+        document.getElementById('test-prompt').textContent='Recognized: '+tm.result;
+        tb.innerHTML='<button class="btn-green" onclick="testConfirm(true)">Correct</button> '+
+          '<button class="btn-red" onclick="testConfirm(false)">Incorrect</button> '+
+          '<button class="btn-orange" onclick="testSkip()">Skip</button> '+
+          '<button class="btn-off" onclick="testStop()">Stop Test</button>';
+      }
+    } else {
+      tp.style.display='none';
+    }
+  }).catch(function(){});
+
+}
+
+setInterval(update, 2000);
+update();

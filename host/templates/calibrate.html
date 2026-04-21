@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html><head><title>Calibrate</title>
+<style>
+body{font-family:sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px;margin:0}
+canvas{border:1px solid #444;cursor:crosshair;display:block;margin:10px 0;max-width:100%}
+#status{font-size:1.2em;color:#4fc3f7;margin:10px 0}
+button{padding:8px 16px;background:#e94560;color:#fff;border:none;border-radius:6px;cursor:pointer;margin:5px}
+</style></head><body>
+<h1>Calibration</h1>
+<div id="status">Loading image...</div>
+<div style="margin:8px 0;display:flex;align-items:center;gap:10px">
+  <label>Brio focus <span id="focus-val">auto</span></label>
+  <input id="focus" type="range" min="0" max="255" value="0"
+         style="flex:1;max-width:400px" oninput="onFocus(this.value)">
+  <button onclick="onFocus(null)" style="padding:4px 10px">Auto</button>
+  <button onclick="reloadImage()" style="padding:4px 10px">Refresh Image</button>
+</div>
+<canvas id="canvas"></canvas>
+<button onclick="location.href='/'">Back</button>
+<script>
+var c=document.getElementById('canvas'),ctx=c.getContext('2d');
+var players=$players_js;
+var _initFocus=$focus_init_js;
+(function(){
+  var slider=document.getElementById('focus');
+  var label=document.getElementById('focus-val');
+  if(_initFocus!==null&&_initFocus!==undefined){
+    slider.value=_initFocus;label.textContent=_initFocus;
+  } else {
+    label.textContent='auto';
+  }
+})();
+var steps=[],step=0,cc=null,cr=null,zones=[],pc=null,imgW=0,imgH=0;
+steps.push({p:'Click CENTER of felt circle',t:'cc'});
+steps.push({p:"Click EDGE of felt circle (at Bill's position)",t:'ce'});
+players.forEach(function(n){
+  steps.push({p:'Click CENTER of '+n+"'s zone",t:'zc',n:n});
+  steps.push({p:'Set '+n+"'s zone size, then click",t:'ze',n:n});
+});
+var img=new Image();
+img.onload=function(){
+  imgW=img.naturalWidth;imgH=img.naturalHeight;
+  var sc=Math.min((window.innerWidth-40)/imgW,1);
+  c.width=Math.round(imgW*sc);c.height=Math.round(imgH*sc);c.dataset.s=sc;
+  draw();document.getElementById('status').textContent=steps[0].p;
+};
+img.onerror=function(){
+  document.getElementById('status').textContent=
+    'Image load FAILED — /snapshot returned an error. Check host log.';
+};
+var _focusTimer=null;
+function onFocus(v){
+  var label=document.getElementById('focus-val');
+  label.textContent=(v===null||v==='')?'auto':v;
+  if(_focusTimer) clearTimeout(_focusTimer);
+  _focusTimer=setTimeout(function(){
+    fetch('/api/brio/focus',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({value:(v===null||v==='')?null:parseInt(v,10)})
+    }).then(function(){
+      // Give the camera ~300 ms to settle on the new focus, then
+      // refetch the snapshot so the user sees the effect.
+      setTimeout(reloadImage,300);
+    });
+  },150);
+}
+function reloadImage(){
+  var src='/snapshot?'+Date.now();
+  var tmp=new Image();
+  tmp.onload=function(){
+    img=tmp;
+    // Canvas stays same size; just re-draw everything.
+    draw();
+  };
+  tmp.src=src;
+}
+img.src='/snapshot?'+Date.now();
+function S(){return parseFloat(c.dataset.s)||1}
+function draw(){
+  var s=S();ctx.drawImage(img,0,0,c.width,c.height);
+  if(cc&&cr){ctx.strokeStyle='#fff';ctx.lineWidth=2;ctx.beginPath();ctx.arc(cc[0]*s,cc[1]*s,cr*s,0,Math.PI*2);ctx.stroke()}
+  zones.forEach(function(z){ctx.strokeStyle='#0f0';ctx.lineWidth=2;ctx.beginPath();ctx.arc(z.cx*s,z.cy*s,z.r*s,0,Math.PI*2);ctx.stroke();
+    ctx.fillStyle='#0f0';ctx.font='16px sans-serif';ctx.fillText(z.name,z.cx*s-20,z.cy*s-z.r*s-8)});
+  if(pc){ctx.strokeStyle='#ff0';ctx.lineWidth=2;ctx.setLineDash([5,5]);ctx.beginPath();ctx.arc(pc[0]*S(),pc[1]*S(),(pc[2]||0)*S(),0,Math.PI*2);ctx.stroke();ctx.setLineDash([])}
+}
+function xy(e){var r=c.getBoundingClientRect();return[Math.round((e.clientX-r.left)*imgW/r.width),Math.round((e.clientY-r.top)*imgH/r.height)]}
+c.onclick=function(e){
+  var p=xy(e),x=p[0],y=p[1];if(step>=steps.length)return;var st=steps[step];
+  if(st.t=='cc'){cc=[x,y];step++}
+  else if(st.t=='ce'){cr=Math.round(Math.sqrt(Math.pow(x-cc[0],2)+Math.pow(y-cc[1],2)));step++}
+  else if(st.t=='zc'){pc=[x,y,0];step++}
+  else if(st.t=='ze'){var r=Math.round(Math.sqrt(Math.pow(x-pc[0],2)+Math.pow(y-pc[1],2)));zones.push({name:st.n,cx:pc[0],cy:pc[1],r:r});pc=null;step++}
+  draw();
+  if(step<steps.length)document.getElementById('status').textContent=steps[step].p;
+  else{document.getElementById('status').textContent='Saving...';
+    fetch('/api/calibrate/save',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({circle_center:cc,circle_radius:cr,zones:zones})})
+    .then(function(){document.getElementById('status').textContent='Done! Return to main page.'})}
+};
+c.onmousemove=function(e){if(!pc)return;var p=xy(e);pc[2]=Math.round(Math.sqrt(Math.pow(p[0]-pc[0],2)+Math.pow(p[1]-pc[1],2)));draw()};

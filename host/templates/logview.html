@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html><head><title>Log</title>
+<style>
+body{font-family:monospace;background:#0d1117;color:#e0e0e0;padding:0;margin:0}
+#toolbar{padding:6px 12px;background:#16213e;position:sticky;top:0}
+button{padding:4px 12px;border:none;border-radius:4px;cursor:pointer;background:#333;color:#e0e0e0;font-size:0.85em}
+button:hover{background:#555}
+#status{font-size:0.8em;color:#888;margin-left:12px}
+pre{white-space:pre-wrap;font-size:0.85em;line-height:1.4;padding:8px 12px;margin:0}
+</style>
+<script>
+function refresh(){
+  fetch('/api/log').then(function(r){return r.json()}).then(function(d){
+    var pre=document.getElementById('log');
+    var atBottom=pre.scrollHeight-pre.scrollTop-pre.clientHeight<50;
+    pre.innerHTML=d.lines.join('\\n');
+    if(atBottom) pre.scrollTop=pre.scrollHeight;
+  }).catch(function(){});
+  setTimeout(refresh,2000);
+}
+function saveLog(){
+  fetch('/log').then(function(r){return r.text()}).then(function(t){
+    var blob=new Blob([t],{type:'text/plain'});
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='log.txt';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    var btn=document.getElementById('savebtn');
+    btn.textContent='Saved!';
+    setTimeout(function(){btn.textContent='Save Log'},2000);
+  });
+}
+function clearLog(){
+  fetch('/api/log/clear',{method:'POST'}).then(function(){
+    var pre=document.getElementById('log');
+    pre.innerHTML='';
+    var btn=document.getElementById('clrbtn');
+    btn.textContent='Cleared';
+    setTimeout(function(){btn.textContent='Clear Log'},1500);
+  });
+}
+refresh();
+</script></head><body>
+<div id="toolbar">
+  <button id="savebtn" onclick="saveLog()">Save Log</button>
+  <button id="clrbtn" onclick="clearLog()">Clear Log</button>
+  <span id="status">Auto-refreshing every 2s</span>
+</div>
+<pre id="log">Loading...</pre>

@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html><head><title>Poker Console</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#1a1a2e;color:#e0e0e0;
+  padding:10px;padding-bottom:24px;-webkit-user-select:none;user-select:none}
+h1{font-size:1.25em;text-align:center;margin:2px 0 8px;color:#e0e0e0}
+button{font-family:inherit;font-weight:600;border:none;border-radius:8px;cursor:pointer;
+  -webkit-tap-highlight-color:transparent}
+select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;color:#e0e0e0;
+  font-size:1em;width:100%;-webkit-appearance:none;appearance:none}
+select:disabled{opacity:.55}
+.hdr{display:flex;gap:8px;margin-bottom:10px}
+.hdr button{flex:1;padding:10px;font-size:.95em}
+.btn-start{background:#1b5e20;color:#fff}
+.btn-setup{background:#0f3460;color:#fff}
+.btn-exit{background:#b71c1c;color:#fff}
+.dim{opacity:.45;pointer-events:none}
+.field{margin:8px 0}
+.status-row{display:flex;gap:8px;align-items:stretch;margin:10px 0}
+.status-label{flex:1.2;background:#16213e;padding:12px;border-radius:8px;font-weight:600;
+  color:#4fc3f7;display:flex;align-items:center}
+.action-btn{flex:1;padding:12px;font-size:1em;background:#1b5e20;color:#fff}
+.action-btn:disabled{background:#333;color:#666}
+h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin:14px 0 6px}
+.zone-row{display:flex;align-items:center;padding:10px;margin:4px 0;border-radius:8px;
+  background:#16213e;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.zone-row:active{background:#1a3a6e}
+.zone-name{width:80px;font-weight:600}
+.zone-card{flex:1;color:#4caf50}
+.zone-empty{color:#555}
+.zone-dup{color:#e53935 !important}
+.zone-arrow{color:#555;font-size:1.2em}
+.modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:100;
+  overflow-y:auto;padding:16px}
+.modal-inner{background:#16213e;border-radius:12px;padding:14px;max-width:400px;margin:10px auto}
+.modal-inner h2{color:#4fc3f7;font-size:1.1em;letter-spacing:0;text-transform:none;margin:0 0 10px}
+.modal-inner label{display:block;font-size:.85em;color:#aaa;margin-bottom:4px}
+.modal-inner input[type=range]{width:100%;accent-color:#4fc3f7}
+.modal-inner input[type=number]{width:80px;padding:6px;background:#0d1b2a;color:#fff;
+  border:1px solid #333;border-radius:4px}
+.modal-btns{display:flex;gap:8px;margin-top:14px}
+.modal-btns button{flex:1;padding:10px}
+.modal-save{background:#1b5e20;color:#fff}
+.modal-cancel{background:#333;color:#ccc}
+.player-row{display:flex;align-items:center;padding:6px 0;border-bottom:1px solid #222}
+.player-row input{width:22px;height:22px;accent-color:#4fc3f7;margin-right:10px}
+.player-row label{flex:1;font-size:1em}
+#correct-img{width:40%;border-radius:8px;margin:6px auto;display:block;border:1px solid #333;background:#000}
+.picker-row{display:flex;gap:8px;margin:8px 0;align-items:center}
+.picker-row label{width:50px;font-size:.9em;color:#888}
+.picker-row select{flex:1}
+.hint{font-size:.75em;color:#666;margin-top:3px}
+</style></head><body>
+
+<h1>Poker Console</h1>
+
+<div class="hdr">
+  <button id="start-btn" class="btn-start" onclick="onStart()">Start</button>
+  <button id="exit-btn" class="btn-exit" onclick="onExit()" style="display:none">Exit Poker</button>
+</div>
+
+<div id="main" class="dim">
+  <div class="field">
+    <select id="game-select" onchange="onPickGame()" disabled>
+      <option value="">-- choose game --</option>
+    </select>
+  </div>
+
+  <div class="status-row">
+    <div class="status-label" id="state-text">Night not started</div>
+    <button class="action-btn" id="action-btn" onclick="onAction()" disabled>—</button>
+  </div>
+
+  <h2>Up cards seen</h2>
+  <div id="zone-cards"></div>
+</div>
+
+<!-- Setup / Adjust modal -->
+<div id="setup-modal" class="modal">
+  <div class="modal-inner">
+    <h2 id="setup-title">Start night</h2>
+    <div class="field">
+      <label>Dealer</label>
+      <select id="setup-dealer"></select>
+    </div>
+    <div class="field">
+      <label>Active players</label>
+      <div id="setup-players"></div>
+    </div>
+    <div class="field">
+      <label>YOLO min confidence: <span id="yolo-val">50%</span></label>
+      <input id="setup-yolo" type="range" min="0" max="100" value="50"
+             oninput="document.getElementById('yolo-val').textContent = this.value + '%'">
+      <div class="hint">Below this, falls back to Claude AI.</div>
+    </div>
+    <div class="field">
+      <label>Pi presence brightness ceiling</label>
+      <input id="setup-presence" type="number" min="0" max="255" step="1" value="140">
+      <div class="hint">Slot is "present" when its brightness falls below this.</div>
+    </div>
+    <div class="field">
+      <label>Brio scan settle (seconds)</label>
+      <input id="setup-settle" type="number" min="0" max="10" step="0.1" value="0.7">
+      <div class="hint">Delay after the dealer zone trips before the whole-table scan fires.</div>
+    </div>
+    <div class="modal-btns">
+      <button class="modal-save" onclick="saveSetup()">Save</button>
+      <button class="modal-cancel" onclick="closeModal('setup-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Correction modal -->
+<div id="correct-modal" class="modal" onclick="if(event.target===this)closeModal('correct-modal')">
+  <div class="modal-inner">
+    <h2 id="correct-title">—</h2>
+    <img id="correct-img" src="">
+    <div class="picker-row">
+      <label>Rank</label>
+      <select id="correct-rank">
+        <option value="">—</option>
+        <option value="A">Ace</option>
+        <option value="2">2</option><option value="3">3</option>
+        <option value="4">4</option><option value="5">5</option>
+        <option value="6">6</option><option value="7">7</option>
+        <option value="8">8</option><option value="9">9</option>
+        <option value="10">10</option>
+        <option value="J">Jack</option><option value="Q">Queen</option>
+        <option value="K">King</option>
+      </select>
+    </div>
+    <div class="picker-row">
+      <label>Suit</label>
+      <select id="correct-suit">
+        <option value="">—</option>
+        <option value="clubs">Clubs</option>
+        <option value="diamonds">Diamonds</option>
+        <option value="hearts">Hearts</option>
+        <option value="spades">Spades</option>
+      </select>
+    </div>
+    <div class="modal-btns">
+      <button class="modal-save" onclick="saveCorrection()">Save</button>
+      <button class="modal-cancel" onclick="closeModal('correct-modal')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var ST=null;
+var correctPlayer=null;
+var gameOptionsBuilt=false;
+
+function api(path,data){
+  return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(data||{})}).then(function(r){return r.json()});
+}
+
+function refresh(){
+  api('/api/console/state').then(function(d){ST=d;render();}).catch(function(){});
+}
+
+function buildGameOptions(){
+  if(gameOptionsBuilt||!ST||!ST.game_groups) return;
+  var gs=document.getElementById('game-select');
+  // Keep the placeholder, if any, that the HTML already rendered.
+  ST.game_groups.forEach(function(g){
+    if(g.variants && g.variants.length){
+      var og=document.createElement('optgroup');og.label=g.name;
+      [g.name].concat(g.variants).forEach(function(v){
+        var o=document.createElement('option');o.value=v;o.textContent=v;og.appendChild(o);
+      });
+      gs.appendChild(og);
+    } else {
+      var o=document.createElement('option');o.value=g.name;o.textContent=g.name;gs.appendChild(o);
+    }
+  });
+  gameOptionsBuilt=true;
+}
+
+var lastZoneKey='';
+function buildZoneRows(){
+  if(!ST||!ST.active_players) return;
+  // Rebuild when the active-player list changes between hands.
+  var key=(ST.active_players||[]).join(',');
+  if(key===lastZoneKey) return;
+  lastZoneKey=key;
+  var zc=document.getElementById('zone-cards');
+  zc.innerHTML='';
+  ST.active_players.forEach(function(n){
+    var div=document.createElement('div');
+    div.className='zone-row';div.id='zr-'+n;
+    div.onclick=(function(player){return function(){openCorrect(player);};})(n);
+    var name=document.createElement('span');name.className='zone-name';name.textContent=n;
+    var card=document.createElement('span');card.className='zone-card zone-empty';card.id='zc-'+n;card.textContent='—';
+    var arr=document.createElement('span');arr.className='zone-arrow';arr.textContent='›';
+    div.appendChild(name);div.appendChild(card);div.appendChild(arr);
+    zc.appendChild(div);
+  });
+}
+
+function render(){
+  if(!ST) return;
+  buildGameOptions();
+  buildZoneRows();
+
+  var gs=document.getElementById('game-select');
+  gs.value=ST.current_game||'';
+  gs.disabled=!ST.night_active||ST.game_in_progress;
+
+  var sbtn=document.getElementById('start-btn');
+  sbtn.textContent=ST.night_active?'Setup':'Start';
+  sbtn.className=ST.night_active?'btn-setup':'btn-start';
+
+  var ebtn=document.getElementById('exit-btn');
+  ebtn.style.display=ST.night_active?'block':'none';
+  ebtn.textContent=ST.game_in_progress?'Exit Game':'Exit Poker';
+
+  var mc=document.getElementById('main');
+  if(ST.night_active) mc.classList.remove('dim'); else mc.classList.add('dim');
+
+  document.getElementById('state-text').textContent=ST.phase_label||'—';
+  var abtn=document.getElementById('action-btn');
+  if(ST.action_label){
+    abtn.style.visibility='visible';
+    abtn.textContent=ST.action_label;
+    abtn.disabled=!ST.action_enabled;
+  } else {
+    abtn.style.visibility='hidden';
+  }
+
+  (ST.active_players||[]).forEach(function(n){
+    var zi=(ST.zone_cards||{})[n]||{};
+    var cs=document.getElementById('zc-'+n);
+    if(!cs) return;
+    var txt=zi.card||'';
+    cs.textContent=txt?(zi.duplicate?txt+' DUP!':txt):'—';
+    cs.className='zone-card'+(txt?'':' zone-empty')+(zi.duplicate?' zone-dup':'');
+  });
+}
+
+function populateSetupModal(){
+  if(!ST) return;
+  var ds=document.getElementById('setup-dealer');
+  ds.innerHTML='';
+  (ST.all_players||[]).forEach(function(n){
+    var o=document.createElement('option');o.value=n;o.textContent=n;
+    if(ST.dealer===n) o.selected=true;
+    ds.appendChild(o);
+  });
+  var pl=document.getElementById('setup-players');
+  pl.innerHTML='';
+  (ST.all_players||[]).forEach(function(n){
+    var active=(ST.active_players||[]).indexOf(n)!==-1;
+    var row=document.createElement('div');row.className='player-row';
+    var cb=document.createElement('input');cb.type='checkbox';cb.id='sp-'+n;cb.checked=active;
+    var lbl=document.createElement('label');lbl.htmlFor='sp-'+n;lbl.textContent=n;
+    row.appendChild(cb);row.appendChild(lbl);
+    pl.appendChild(row);
+  });
+  var yolo=document.getElementById('setup-yolo');
+  yolo.value=Math.round((ST.yolo_min_conf||0.5)*100);
+  document.getElementById('yolo-val').textContent=yolo.value+'%';
+  if(ST.pi_presence_threshold!=null){
+    document.getElementById('setup-presence').value=Math.round(ST.pi_presence_threshold);
+  }
+  if(ST.brio_settle_s!=null){
+    document.getElementById('setup-settle').value=Number(ST.brio_settle_s).toFixed(1);
+  }
+}
+
+function onStart(){
+  populateSetupModal();
+  document.getElementById('setup-title').textContent=
+    (ST&&ST.night_active)?'Adjust settings':'Start night';
+  document.getElementById('setup-modal').style.display='block';
+}
+
+function saveSetup(){
+  var dealer=document.getElementById('setup-dealer').value;
+  var players=[];
+  (ST.all_players||[]).forEach(function(n){
+    if(document.getElementById('sp-'+n).checked) players.push(n);
+  });
+  var yolo=parseInt(document.getElementById('setup-yolo').value,10)/100.0;
+  var presence=parseFloat(document.getElementById('setup-presence').value);
+  var settle=parseFloat(document.getElementById('setup-settle').value);
+  var body={dealer:dealer,players:players,yolo_min_conf:yolo,presence_threshold:presence,brio_settle_s:settle};
+  var path=(ST&&ST.night_active)?'/api/console/settings':'/api/console/start_night';
+  api(path,body).then(function(){closeModal('setup-modal');refresh();});
+}
+
+function onExit(){
+  if(!ST) return;
+  if(ST.game_in_progress){
+    if(!confirm('End current hand?')) return;
+    api('/api/console/end').then(refresh);
+  } else {
+    if(!confirm('Exit poker night?')) return;
+    api('/api/console/exit_poker').then(function(){
+      document.body.innerHTML='<h1 style="text-align:center;margin-top:40vh">Goodnight!</h1>';
+    });
+  }
+}
+
+function onPickGame(){
+  var g=document.getElementById('game-select').value;
+  if(!g) return;
+  api('/api/console/deal',{game:g}).then(refresh);
+}
+
+function onAction(){
+  if(!ST||!ST.action_endpoint) return;
+  var ep=ST.action_endpoint;
+  // Confirm Cards with nothing scanned yet → trigger a force_scan first,
+  // then confirm once recognition has settled.
+  if(ep==='/api/console/confirm' && ST.scan_phase==='watching'){
+    api('/api/console/force_scan').then(function(){
+      setTimeout(function(){ api('/api/console/confirm').then(refresh); },2500);
+    });
+  } else {
+    api(ep).then(refresh);
+  }
+}
+
+var RANK_MAP={'Ace':'A','King':'K','Queen':'Q','Jack':'J',
+  '2':'2','3':'3','4':'4','5':'5','6':'6','7':'7','8':'8','9':'9','10':'10'};
+var SUIT_MAP={'Clubs':'clubs','Diamonds':'diamonds','Hearts':'hearts','Spades':'spades'};
+
+function parseCard(card){
+  if(!card) return {rank:'',suit:''};
+  var m=card.match(/^(.+) of (.+)$/);
+  if(!m) return {rank:'',suit:''};
+  return {rank:RANK_MAP[m[1]]||'',suit:SUIT_MAP[m[2]]||''};
+}
+
+function openCorrect(player){
+  if(!ST) return;
+  correctPlayer=player;
+  var zi=(ST.zone_cards||{})[player]||{};
+  document.getElementById('correct-title').textContent=player+' — tap to correct';
+  document.getElementById('correct-img').src='/zone_snap/'+player+'?t='+Date.now();
+  var parsed=parseCard(zi.card);
+  document.getElementById('correct-rank').value=parsed.rank;
+  document.getElementById('correct-suit').value=parsed.suit;
+  document.getElementById('correct-modal').style.display='block';
+}
+
+function saveCorrection(){
+  var rank=document.getElementById('correct-rank').value;
+  var suit=document.getElementById('correct-suit').value;
+  if(!rank||!suit){alert('Pick both rank and suit');return;}
+  api('/api/console/correct',{corrections:[{player:correctPlayer,rank:rank,suit:suit}]})
+    .then(function(){closeModal('correct-modal');refresh();});
+}
+
+function closeModal(id){document.getElementById(id).style.display='none';}
+
+setInterval(refresh,2000);
+refresh();
