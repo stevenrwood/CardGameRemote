@@ -1138,12 +1138,24 @@ def _console_watch_dealer(s, frame):
             card = s.monitor.last_card.get(name, "")
             if not card or card == "No card":
                 missing.append(name)
+        # In hit rounds (7/27), dealer deals one at a time around the
+        # table. The first motion fires a scan long before the later
+        # players get their cards, so a "missing" zone here just means
+        # not yet dealt — frozen or not. Treat any unfrozen missing
+        # zone as "keep watching", so the next motion trigger fires
+        # another scan pass (already-recognized zones stay locked).
+        if is_hit_round:
+            unfrozen_missing = [
+                n for n in missing if s.freezes.get(n, 0) < 3
+            ]
+            if unfrozen_missing:
+                log.log(
+                    f"[CONSOLE] Hit-round partial scan: still waiting on "
+                    f"{', '.join(unfrozen_missing)} — resuming watch"
+                )
+                s.console_scan_phase = "watching"
+            return
         if missing:
-            # In hit rounds (7/27), a missing card means the player chose to
-            # freeze — not an error worth nagging about. Skip the adjust-
-            # prompt and let the dealer click Confirm Cards when ready.
-            if is_hit_round:
-                return
             # 10-second cooldown between "please adjust your card"
             # announcements so we don't rattle them off back-to-back.
             now = time.time()
