@@ -31,13 +31,20 @@ _RANK_TO_VALUE = {
 }
 
 
-def compute_values(cards):
+def compute_values(cards, max_total: float = 27):
     """Given an iterable of (rank, suit) tuples, return the sorted
-    list of possible 7/27 totals ≤ 27 (one per ace assignment).
+    list of possible 7/27 totals ≤ max_total (one per ace assignment).
 
-    Only totals that stay ≤27 count — once a hand is over 27 with
-    aces at 1, that assignment doesn't qualify. The empty result
-    means the player has already busted.
+    Only totals that stay within the ceiling count — assignments that
+    exceed it don't qualify. An empty result means the player has
+    busted relative to the ceiling used.
+
+    ``max_total`` defaults to 27 (the natural high-hand cap for a
+    complete hand). Callers scoring VISIBLE up-cards only should pass
+    26.5 — any higher visible total can't reach a legal ≤27 hand
+    because the down card contributes at least 0.5 (face card), so
+    an interpretation that already exceeds 26.5 visible is impossible
+    to recover from and shouldn't be announced.
     """
     base = 0.0
     aces = 0
@@ -52,10 +59,14 @@ def compute_values(cards):
     values = set()
     for k in range(aces + 1):
         total = base + k * 11 + (aces - k) * 1
-        if total <= 27:
+        if total <= max_total:
             # Collapse 17.0 → 17 so speech says "17" not "17.0".
             values.add(total if total != int(total) else int(total))
     return sorted(values)
+
+
+# Visible-only ceiling: any higher total + min down card (0.5) exceeds 27.
+VISIBLE_MAX = 26.5
 
 
 def _speak_value(v):
@@ -120,16 +131,57 @@ class SevenTwentySevenGame(BaseGame):
             for name in newly_frozen:
                 log.log(f"[7/27] {name} is frozen")
                 speech.say(f"{name} is frozen")
+        # Bust detection: any player whose visible up-cards exceed 26.5
+        # can't reach a legal ≤27 final hand no matter what their down
+        # card is. Auto-fold them and announce so play can continue
+        # without waiting for them to stand.
+        self._check_busts(state, announce=announce)
         # Let the base class speak the per-player totals + bet first
-        # via score_hand / _announce_round.
+        # via score_hand / _announce_round. Busted players are now in
+        # folded_players so the base class skips them.
         super().on_round_confirmed(state, round_cards, announce=announce)
+
+    def _check_busts(self, state, announce: bool = True) -> None:
+        """Fold any player whose visible up-cards already exceed the
+        26.5 bust ceiling. Rodney is excluded — his real hand total is
+        evaluated against the normal 27 ceiling because we know his
+        down cards; a bust there is checked by downstream code that
+        has access to the full hand."""
+        remote = next(
+            (p for p in self.engine.players if p.is_remote), None
+        )
+        remote_name = remote.name if remote else None
+        for name in list(state.console_active_players):
+            if name == remote_name:
+                continue
+            if name in state.folded_players:
+                continue
+            cards = self._player_visible_cards(state, name)
+            if not cards:
+                continue
+            # Bust iff every possible ace assignment leaves the
+            # visible total above 26.5.
+            values = compute_values(cards, max_total=VISIBLE_MAX)
+            if values:
+                continue
+            state.folded_players.add(name)
+            log.log(f"[7/27] {name} busted out — auto-folded")
+            if announce:
+                speech.say(
+                    f"{name}, you busted out with more than "
+                    f"{_speak_value(VISIBLE_MAX)} showing"
+                )
 
     # --- scoring ---
 
     def score_hand(self, cards, wild_ranks):
+        # Visible-only scoring: cap at 26.5. An ace-as-11 interpretation
+        # (or any interpretation) that puts visible cards above that is
+        # an impossible-to-win hand regardless of the down card, so
+        # don't announce it as their "high".
         if not cards:
             return None
-        values = compute_values(cards)
+        values = compute_values(cards, max_total=VISIBLE_MAX)
         if not values:
             return None
         best = max(values)
@@ -187,12 +239,18 @@ class SevenTwentySevenGame(BaseGame):
     # --- table decorations ---
 
     def decorate_table_players(self, entries, state) -> None:
-        """Add ``values_7_27`` (list of possible totals ≤27) to each
-        player entry. Everyone else gets totals from their visible up-
-        cards only; Rodney gets his full private hand (up + his known
-        downs) because this is HIS display and he already knows his
-        downs. Never mix the two views — the public bet-first flow
-        uses visible-only scoring."""
+        """Add ``values_7_27`` (list of possible totals ≤ the relevant
+        ceiling) to each player entry.
+
+        Rodney's entry uses his full private hand (up + known downs)
+        with the natural 27 ceiling because this is HIS display and he
+        already knows his downs — the total shown is a real candidate
+        final hand value.
+
+        Every other player's entry uses the VISIBLE-only view and the
+        26.5 ceiling: anything higher visible can't reach a legal ≤27
+        final hand once you add the mandatory down card, so it's a
+        busted interpretation that shouldn't clutter the UI."""
         remote = next(
             (p for p in self.engine.players if p.is_remote), None
         )
@@ -200,11 +258,13 @@ class SevenTwentySevenGame(BaseGame):
         for entry in entries:
             if entry["name"] == remote_name:
                 pairs = self._rodney_all_cards(state)
+                values = compute_values(pairs) if pairs else []
             else:
                 pairs = self._player_visible_cards(state, entry["name"])
-            if not pairs:
-                continue
-            values = compute_values(pairs)
+                values = (
+                    compute_values(pairs, max_total=VISIBLE_MAX)
+                    if pairs else []
+                )
             if values:
                 entry["values_7_27"] = values
 
