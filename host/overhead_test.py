@@ -1132,12 +1132,15 @@ def _console_watch_dealer(s, frame):
             s.console_scan_phase = "watching"
             return
         missing = []
+        if not hasattr(s, "_empty_scan_count"):
+            s._empty_scan_count = {}
         for name in brio_names:
             if s.monitor.zone_state.get(name) == "corrected":
                 continue
             card = s.monitor.last_card.get(name, "")
             if not card or card == "No card":
                 missing.append(name)
+                s._empty_scan_count[name] = s._empty_scan_count.get(name, 0) + 1
         # In hit rounds (7/27), dealer deals one at a time around the
         # table. The first motion fires a scan long before the later
         # players get their cards, so a "missing" zone here just means
@@ -1288,6 +1291,14 @@ def _console_watch_dealer(s, frame):
         # pass-overs by returning "No card" for the whole zone.
         log.log("[CONSOLE] Scanning all active zones")
         zone_crops = {}
+        # Per-round empty-scan counter. If a zones scan keeps coming back
+        # as "No card" (YOLO below threshold + Claude sees nothing) we
+        # eventually stop including it in the batch so YOLO cant finally
+        # hallucinate a random card on its Nth retry. Reset on Confirm
+        # Cards and on next round.
+        if not hasattr(s, "_empty_scan_count"):
+            s._empty_scan_count = {}
+        MAX_EMPTY_SCANS = 3
         for z in s.cal.zones:
             name = z["name"]
             if name not in brio_names:
@@ -1297,6 +1308,10 @@ def _console_watch_dealer(s, frame):
             # that are still empty get re-scanned when the dealer triggers
             # another motion event in the same round.
             if s.monitor.zone_state.get(name) in ("recognized", "corrected"):
+                continue
+            if s._empty_scan_count.get(name, 0) >= MAX_EMPTY_SCANS:
+                # Treated as "passed" for this round. User can still
+                # manually correct if the player actually took a card.
                 continue
             crop = s.monitor._crop(frame, z)
             if crop is None or crop.size == 0:
@@ -5164,6 +5179,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                "claude_right": 0, "claude_wrong": 0}
                     s._zones_with_motion = set()
                     s._missing_speech_count = {}
+                    s._empty_scan_count = {}
                     s.table_state_version += 1
                 # Make sure any stale guided session from a prior hand is gone.
                 _stop_guided_deal(s)
@@ -5236,6 +5252,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Reset the per-player adjust-prompt cap so the next round
             # starts fresh (two prompts max per player per round).
             s._missing_speech_count = {}
+            s._empty_scan_count = {}
             # Once the up-card round is confirmed, check Rodney's down slots
             # for anything below the auto-accept threshold. Those slots get
             # queued and (on LED-equipped hardware) will start blinking; the
@@ -5345,6 +5362,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.monitor.recognition_crops[z["name"]] = None
                 s.console_scan_phase = "idle" if beyond_last_up else "watching"
                 s._zones_with_motion = set()
+                s._empty_scan_count = {}
                 if beyond_last_up:
                     log.log("[CONSOLE] No more up rounds — idle until End Hand")
                     s.console_state = "hand_over"
