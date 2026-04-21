@@ -185,11 +185,12 @@ class BaseGame:
         ``_build_table_state``."""
         pass
 
-    def flip_choice(self, state) -> Optional[dict]:
-        """Return a ``{slots: [a,b]}`` prompt payload when the game
-        is waiting on the remote player to pick which down card to
-        flip up (7/27 two-down variant). Return None otherwise."""
-        return None
+    def decorate_table_state(self, doc: dict, state) -> None:
+        """Mutate the full ``/table/state`` document in place to add
+        game-level prompts or annotations (7/27 emits the flip-choice
+        dialog this way — the base class and stud/draw games have no
+        such concept so they no-op)."""
+        pass
 
 
 # Module-level registry. Each real game class inserts itself here via

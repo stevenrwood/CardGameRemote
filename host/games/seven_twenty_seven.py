@@ -188,19 +188,20 @@ class SevenTwentySevenGame(BaseGame):
             if values:
                 entry["values_7_27"] = values
 
-    def flip_choice(self, state):
-        """2-down variant only: prompt Rodney to pick which of his two
-        down cards to flip face-up. Returns None for ``7/27 (one up)``
-        (dealer dealt the up card directly) and once a flip has been
-        resolved."""
+    def decorate_table_state(self, doc, state) -> None:
+        """2-down variant only: once Rodney has both down cards scanned
+        and validated (``len(rodney_downs) == 2``), inject the flip-
+        choice prompt into the /table state doc. Cleared automatically
+        as soon as ``rodney_flipped_up`` is set. No-op for the
+        ``(one up)`` variant (dealer dealt a face-up directly)."""
         if self.template.name != "7/27":
-            return None
+            return
         if state.rodney_flipped_up is not None:
-            return None
+            return
         if len(state.rodney_downs) != 2:
-            return None
+            return
         downs_sorted = sorted(state.rodney_downs.items())
-        return {
+        doc["flip_choice"] = {
             "prompt": "Pick a card to turn face-up",
             "options": [
                 {"slot": sn, "rank": d["rank"], "suit": d["suit"]}

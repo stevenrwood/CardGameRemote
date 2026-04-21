@@ -1060,14 +1060,7 @@ def _build_table_state(s):
         if has_hit_round:
             total_rounds = 0
 
-    # Game-specific decorations + UI prompts. For 7/27 the impl
-    # populates values_7_27 and the flip-choice prompt; for everything
-    # else these are no-ops so flip_choice stays None.
-    impl = s.current_game_impl
-    flip_choice = impl.flip_choice(s) if impl is not None else None
-    if impl is not None:
-        impl.decorate_table_players(players, s)
-    return {
+    doc = {
         "version": s.table_state_version,
         "viewer": next((p.name for p in ge.players if p.is_remote), "Rodney"),
         "game": {
@@ -1084,7 +1077,7 @@ def _build_table_state(s):
         "players": players,
         "log": list(s.table_log[-30:]),
         "pending_verify": s.pending_verify,
-        "flip_choice": flip_choice,
+        "flip_choice": None,
         "guided_deal": (
             dict(s.guided_deal) if s.guided_deal is not None else None
         ),
@@ -1111,6 +1104,14 @@ def _build_table_state(s):
             "total_draws": _total_draw_phases(ge),
         },
     }
+    # Per-game decorations: the game class adds its own fields to the
+    # document (7/27 injects values_7_27 per player and the flip-choice
+    # prompt; base class / stud / draw are no-ops).
+    impl = s.current_game_impl
+    if impl is not None:
+        impl.decorate_table_players(players, s)
+        impl.decorate_table_state(doc, s)
+    return doc
 
 
 def _table_state_bump(s):
