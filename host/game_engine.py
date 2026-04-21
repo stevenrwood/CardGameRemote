@@ -658,6 +658,7 @@ def _default_templates() -> list[GameTemplate]:
         ),
         GameTemplate(
             name="7/27",
+            class_name="SevenTwentySevenGame",
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down", "down"]),
                 Phase(type=PhaseType.BETTING),
@@ -669,6 +670,7 @@ def _default_templates() -> list[GameTemplate]:
         ),
         GameTemplate(
             name="7/27 (one up)",
+            class_name="SevenTwentySevenGame",
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down", "up"]),
                 Phase(type=PhaseType.BETTING),

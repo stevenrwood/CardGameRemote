@@ -486,64 +486,6 @@ def _console_rescan_missing(s, zone_crops):
 # Follow the Queen tracking for overhead camera
 # ---------------------------------------------------------------------------
 
-_RANK_TO_7_27_VALUE = {
-    "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7,
-    "8": 8, "9": 9, "10": 10, "J": 0.5, "Q": 0.5, "K": 0.5,
-    # Ace handled separately.
-}
-
-
-def _compute_7_27_values(cards):
-    """Given a list of (rank, suit) tuples, return the sorted list of
-    possible 7/27 hand totals (<=27), one entry per distinct ace
-    assignment. No aces → single-element list.
-    """
-    base = 0.0
-    aces = 0
-    for rank, _suit in cards:
-        if rank == "A":
-            aces += 1
-            continue
-        v = _RANK_TO_7_27_VALUE.get(rank)
-        if v is None:
-            continue
-        base += v
-    values = set()
-    for k in range(aces + 1):
-        total = base + k * 11 + (aces - k) * 1
-        if total <= 27:
-            # Format as int if whole, else keep .5
-            values.add(total if total != int(total) else int(total))
-    return sorted(values)
-
-
-def _speak_value(v):
-    """Render a 7/27 numeric value for speech. Half-integers become '… and a half'.
-
-    Examples:
-      0.5  -> "a half"
-      7.5  -> "7 and a half"
-      12   -> "12"
-    """
-    if isinstance(v, int) or v == int(v):
-        return str(int(v))
-    whole = int(v)
-    frac = v - whole
-    if abs(frac - 0.5) < 1e-6:
-        return "a half" if whole == 0 else f"{whole} and a half"
-    return f"{v:g}"
-
-
-def _format_values_phrase(values):
-    """Turn [2, 12, 22] into '2, 12, or 22' for speech, preserving half-speak."""
-    strs = [_speak_value(v) for v in values]
-    if len(strs) == 1:
-        return strs[0]
-    if len(strs) == 2:
-        return f"{strs[0]} or {strs[1]}"
-    return ", ".join(strs[:-1]) + f", or {strs[-1]}"
-
-
 _ALL_CARDS = [
     f"{r_long} of {su.capitalize()}"
     for r_long in ["Ace", "2", "3", "4", "5", "6", "7", "8", "9", "10",
@@ -604,81 +546,6 @@ def _dedup_round_cards_against_seen(s, round_cards):
                     f"— leaving as-is (dealer can correct if wrong)"
                 )
         seen.add(card)
-
-
-def _update_7_27_freezes(s, round_cards):
-    """Apply freeze-count changes for a 7/27 hit round.
-
-    round_cards comes from /api/console/confirm and lists the players
-    who have a recognized up card in this round's Brio scan. Players in
-    that list took a card (freeze reset to 0); players not in it and
-    not already frozen tick up by 1. Three-in-a-row means frozen: no
-    more cards this hand.
-    """
-    took = {c["player"] for c in round_cards}
-    newly_frozen = []
-    for name in s.console_active_players:
-        if s.freezes.get(name, 0) >= 3:
-            continue  # already frozen
-        if name in took:
-            s.freezes[name] = 0
-        else:
-            s.freezes[name] = s.freezes.get(name, 0) + 1
-            if s.freezes[name] >= 3:
-                newly_frozen.append(name)
-    for name in newly_frozen:
-        log.log(f"[7/27] {name} is frozen")
-        speech.say(f"{name} is frozen")
-
-
-def _announce_7_27_hand_values(s):
-    """Walk each active player's up cards and announce their 7/27 totals,
-    then announce which player is first-to-bet (highest value)."""
-    ge = s.game_engine
-    if not ge.current_game or not ge.current_game.name.startswith("7/27"):
-        return
-    RANK_SHORT = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}
-    # Gather up cards per player from the hand-wide history.
-    per_player = {}
-    for entry in s.console_hand_cards:
-        txt = entry.get("card", "")
-        parts = txt.split(" of ")
-        if len(parts) != 2:
-            continue
-        rank_full, suit_full = parts[0].strip(), parts[1].strip().lower()
-        rank = RANK_SHORT.get(rank_full, rank_full)
-        per_player.setdefault(entry["player"], []).append((rank, suit_full))
-
-    best_player = None
-    best_high = -1
-    per_player_values = {}
-    for name in s.console_active_players:
-        cards = per_player.get(name, [])
-        if not cards:
-            continue
-        values = _compute_7_27_values(cards)
-        if not values:
-            continue
-        per_player_values[name] = values
-        # Keep a log entry per player for debugging, but only speak the winner.
-        log.log(f"[7/27] {name}: {_format_values_phrase(values)}")
-        high = max(values)
-        if high > best_high:
-            best_high = high
-            best_player = name
-
-    if best_player is not None:
-        best_values = per_player_values.get(best_player, [best_high])
-        # Descending list — highest first. If the player has aces, include
-        # the other valid totals ("high of 25 or 15").
-        ordered = sorted(set(best_values), reverse=True)
-        if len(ordered) == 1:
-            tail = _speak_value(ordered[0])
-        else:
-            tail = _format_values_phrase(ordered)
-        phrase = f"{best_player}, your bet with high of {tail}"
-        log.log(f"[7/27] Bet first: {phrase}")
-        speech.say(phrase)
 
 
 def _announce_poker_hand_bet_first(s):
@@ -1188,59 +1055,13 @@ def _build_table_state(s):
         if has_hit_round:
             total_rounds = 0
 
-    # 7/27: once Rodney has 2 down cards scanned he needs to pick one to
-    # flip face-up (standard 7/27 start). The /table modal consumes this
-    # field. It stays None if the dealer already flipped one himself.
-    flip_choice = None
-    # Flip choice only applies to the 2-down variant ("7/27" proper, not
-    # "7/27 (one up)" where the dealer deals a face-up directly). The
-    # len==2 check naturally gates this.
-    if ge.current_game is not None and ge.current_game.name == "7/27":
-        if s.rodney_flipped_up is None and len(s.rodney_downs) == 2:
-            downs_sorted = sorted(s.rodney_downs.items())
-            flip_choice = {
-                "prompt": "Pick a card to turn face-up",
-                "options": [
-                    {"slot": sn, "rank": d["rank"], "suit": d["suit"]}
-                    for sn, d in downs_sorted
-                ],
-            }
-
-    # 7/27: compute hand values per player. Rodney's value includes both
-    # his up and down cards; everyone else's is up-cards-only (we don't
-    # know their downs).
-    is_7_27 = ge.current_game is not None and ge.current_game.name.startswith("7/27")
-    if is_7_27:
-        RANK_SHORT = {"Ace": "A", "King": "K", "Queen": "Q", "Jack": "J"}
-        up_by_player_cards = {}
-        for entry in s.console_hand_cards:
-            parts = entry.get("card", "").split(" of ")
-            if len(parts) != 2:
-                continue
-            rank_full, suit_full = parts[0].strip(), parts[1].strip().lower()
-            rank = RANK_SHORT.get(rank_full, rank_full)
-            up_by_player_cards.setdefault(entry["player"], []).append((rank, suit_full))
-        remote_name = next((p.name for p in ge.players if p.is_remote), None)
-        flipped_slot = (s.rodney_flipped_up or {}).get("slot")
-        values_by_player = {}
-        for p in ge.players:
-            pairs = list(up_by_player_cards.get(p.name, []))
-            if p.name == remote_name:
-                # Skip the flipped slot — its already counted via the
-                # up_by_player_cards entry fed in by /api/console/confirm
-                # (flip_up sets monitor.last_card[Rodney] to that card).
-                for slot_num, d in s.rodney_downs.items():
-                    if slot_num == flipped_slot:
-                        continue
-                    if d.get("rank") and d.get("suit"):
-                        pairs.append((d["rank"], d["suit"]))
-            if pairs:
-                values_by_player[p.name] = _compute_7_27_values(pairs)
-        # Write onto each player entry so the UI can render.
-        for entry in players:
-            vals = values_by_player.get(entry["name"])
-            if vals:
-                entry["values_7_27"] = vals
+    # Game-specific decorations + UI prompts. For 7/27 the impl
+    # populates values_7_27 and the flip-choice prompt; for everything
+    # else these are no-ops so flip_choice stays None.
+    impl = s.current_game_impl
+    flip_choice = impl.flip_choice(s) if impl is not None else None
+    if impl is not None:
+        impl.decorate_table_players(players, s)
     return {
         "version": s.table_state_version,
         "viewer": next((p.name for p in ge.players if p.is_remote), "Rodney"),

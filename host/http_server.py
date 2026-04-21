@@ -41,7 +41,6 @@ from zone_monitor import TRAINING_DIR
 from games import make_game
 from overhead_test import (
     PLAYER_NAMES,
-    _announce_7_27_hand_values,
     _announce_poker_hand_bet_first,
     _build_table_state,
     _check_follow_the_queen_round,
@@ -76,7 +75,6 @@ from overhead_test import (
     _table_log_add,
     _total_draw_phases,
     _trailing_down_slots,
-    _update_7_27_freezes,
     _update_flash_for_deal_state,
     crop_circle,
     to_jpeg,
@@ -922,18 +920,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if round_cards:
                 for c in round_cards:
                     s.console_hand_cards.append({"player": c["player"], "card": c["card"], "round": round_num})
-            # For 7/27, announce each player's hand value(s) after the
-            # up-cards have been accumulated + indicate who bets first.
-            _announce_7_27_hand_values(s)
+            # Per-game confirm hooks: 7/27 speaks numeric totals + bet-
+            # first and ticks freeze counters; stud/draw variants are a
+            # no-op here (their bet-first speech goes through
+            # _announce_poker_hand_bet_first below).
+            impl = s.current_game_impl
+            if impl is not None:
+                impl.announce_round_summary(s)
+                impl.on_round_confirmed(s, round_cards)
             if not defer_announces:
                 _announce_poker_hand_bet_first(s)
-            # 7/27 freeze tracking: on hit rounds (any round after the
-            # first up-card round), a player who didn't take a card this
-            # round increments their freeze count. Three freezes in a row
-            # means they can't take another card this hand.
-            if (ge.current_game and ge.current_game.name.startswith("7/27")
-                    and round_num > 1):
-                _update_7_27_freezes(s, round_cards)
             s.console_last_round_cards = []
             for z in s.cal.zones:
                 zname = z["name"]

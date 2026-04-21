@@ -112,3 +112,9 @@ def make_game(template, engine) -> BaseGame:
             f"which is not registered. Known: {sorted(GAME_CLASSES)}"
         )
     return cls(template, engine)
+
+
+# Import concrete game modules here so their @register decorators run
+# at package-import time. Keep this block at the bottom so BaseGame and
+# register exist before the submodule tries to subclass/decorate.
+from . import seven_twenty_seven  # noqa: E402,F401
