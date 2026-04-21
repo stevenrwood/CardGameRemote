@@ -593,6 +593,15 @@ def to_jpeg(frame, q=85):
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, q])
     return buf.tobytes() if ok else None
 
+
+def _stats_bump(state, key, delta=1):
+    """Increment a key in state.stats if state exists. Zone monitor uses
+    this to tally YOLO vs Claude recognitions without needing a hard
+    dependency on AppState being initialized yet (first-run safety)."""
+    if state is None or not hasattr(state, "stats"):
+        return
+    state.stats[key] = state.stats.get(key, 0) + delta
+
 # ---------------------------------------------------------------------------
 # Zone monitor
 # ---------------------------------------------------------------------------
@@ -705,6 +714,8 @@ class ZoneMonitor:
                         self.last_card[name] = result
                         self.zone_state[name] = "recognized"
                         details["final"] = result
+                        details["source"] = "yolo"
+                        _stats_bump(_state, "yolo_right")
                         log.log(f"[{name}] RECOGNIZED: {result} (total {total_ms:.0f}ms)")
                         self._save(name, crop, result)
                         speech.say(f"{name}, {result}")
@@ -737,6 +748,8 @@ class ZoneMonitor:
                     self.last_card[name] = yolo_result
                     self.zone_state[name] = "recognized"
                     details["final"] = yolo_result
+                    details["source"] = "yolo"
+                    _stats_bump(_state, "yolo_right")
                     log.log(f"[{name}] RECOGNIZED (low conf, no Claude): {yolo_result}")
                     self._save(name, crop, yolo_result)
                     speech.say(f"{name}, {yolo_result}")
@@ -804,6 +817,8 @@ class ZoneMonitor:
                             result = f"{m.group(1).capitalize()} of {m.group(2).capitalize()}"
                             details["claude"] = result
                             details["final"] = result
+                            details["source"] = "claude"
+                            _stats_bump(_state, "claude_right")
                             self.last_card[name] = result
                             self.zone_state[name] = "recognized"
                             log.log(f"[{name}] RECOGNIZED (Claude): {result}")
@@ -826,6 +841,8 @@ class ZoneMonitor:
                     yolo_result = details.get("yolo", "")
                     if yolo_result and yolo_result != "No card":
                         details["final"] = yolo_result
+                        details["source"] = "yolo"
+                        _stats_bump(_state, "yolo_right")
                         self.last_card[name] = yolo_result
                         self.zone_state[name] = "recognized"
                         log.log(f"[{name}] RECOGNIZED (YOLO fallback): {yolo_result}")
@@ -847,6 +864,8 @@ class ZoneMonitor:
                 yolo_result = details.get("yolo", "")
                 if yolo_result and yolo_result != "No card":
                     details["final"] = yolo_result
+                    details["source"] = "yolo"
+                    _stats_bump(_state, "yolo_right")
                     self.last_card[name] = yolo_result
                     self.zone_state[name] = "recognized"
                     log.log(f"[{name}] RECOGNIZED (YOLO, Claude failed): {yolo_result}")
@@ -1589,6 +1608,13 @@ class AppState:
         # those slots' LEDs light up and guided flow refills them. One
         # draw per hand. betting_round distinguishes pre-draw vs post-draw
         # for games with two betting rounds.
+        # Per-hand recognition stats: how many cards YOLO and Claude each
+        # produced, and of those how many the user corrected. Reset on
+        # every /api/console/deal and logged on /api/console/end.
+        self.stats = {
+            "yolo_right": 0, "yolo_wrong": 0,
+            "claude_right": 0, "claude_wrong": 0,
+        }
         self.rodney_marked_slots: set[int] = set()
         self.rodney_drew_this_hand = False
         # Count of completed draws this hand (3 Toed Pete has 3). Reset on
@@ -4945,6 +4971,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.rodney_draws_done = 0
                     s.console_betting_round = 0
                     s.console_trailing_done = False
+                    s.stats = {"yolo_right": 0, "yolo_wrong": 0,
+                               "claude_right": 0, "claude_wrong": 0}
                     s.table_state_version += 1
                 # Make sure any stale guided session from a prior hand is gone.
                 _stop_guided_deal(s)
@@ -5149,6 +5177,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif p == "/api/console/end":
             _stop_guided_deal(s)
             ge = s.game_engine
+            # Recognition stats for the hand just ending.
+            yr = s.stats.get("yolo_right", 0)
+            yw = s.stats.get("yolo_wrong", 0)
+            cr = s.stats.get("claude_right", 0)
+            cw = s.stats.get("claude_wrong", 0)
+            yolo_total = yr + yw
+            claude_total = cr + cw
+            total = yolo_total + claude_total
+            if total > 0:
+                def _pct(n, d):
+                    return f"{(100.0 * n / d):.0f}%" if d else "—"
+                log.log(
+                    f"[STATS] Hand recognition: {total} cards total, "
+                    f"YOLO {yr}/{yolo_total} right ({_pct(yr, yolo_total)}), "
+                    f"Claude {cr}/{claude_total} right ({_pct(cr, claude_total)})"
+                )
             result = ge.end_hand()
             _skip_inactive_dealer(s)
             result["next_dealer"] = ge.get_dealer().name
@@ -5206,6 +5250,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     suit_name = SUIT_TO_NAME.get(suit, suit)
                     new_card = f"{rank_name} of {suit_name}"
                     old_card = s.monitor.last_card.get(player, "")
+                    # Tally this as a miss for whichever recognizer produced
+                    # the card the user just overrode.
+                    prior_details = s.monitor.recognition_details.get(player, {}) or {}
+                    prior_source = prior_details.get("source")
+                    if old_card != new_card and prior_source in ("yolo", "claude"):
+                        _stats_bump(s, f"{prior_source}_right", -1)
+                        _stats_bump(s, f"{prior_source}_wrong", +1)
                     s.monitor.last_card[player] = new_card
                     s.monitor.zone_state[player] = "corrected"
                     s.monitor.recognition_details[player] = {
