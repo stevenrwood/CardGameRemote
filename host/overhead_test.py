@@ -602,6 +602,15 @@ def _stats_bump(state, key, delta=1):
         return
     state.stats[key] = state.stats.get(key, 0) + delta
 
+
+def _recapture_baselines(s):
+    """Capture zone baselines AND reset any watching-phase bookkeeping so
+    the deal-order gate starts clean for the next round."""
+    if s.cal.ok and s.latest_frame is not None:
+        s.monitor.capture_baselines(s.latest_frame)
+    if hasattr(s, "_zones_with_motion"):
+        s._zones_with_motion = set()
+
 # ---------------------------------------------------------------------------
 # Zone monitor
 # ---------------------------------------------------------------------------
@@ -1093,6 +1102,9 @@ def _console_watch_dealer(s, frame):
                     continue
                 s.monitor.zone_state[nm] = "empty"
                 s.monitor.last_card[nm] = ""
+            # Clear the deal-order gate too; the arm sweep tagged zones
+            # that dont actually have cards yet.
+            s._zones_with_motion = set()
             s.console_scan_phase = "watching"
             return
         missing = []
@@ -1156,12 +1168,42 @@ def _console_watch_dealer(s, frame):
                 s.console_scan_phase = "settling"
                 s.console_settle_time = time.time()
             return
+        # Deal-order gating: the dealer sweeps their own zone repeatedly
+        # while dealing to everyone else. To avoid false triggers we only
+        # treat a dealer-zone motion as "the deal is done" once every
+        # OTHER active brio zone has already shown motion since the last
+        # round reset. Other zones are tracked in s._zones_with_motion.
+        if not hasattr(s, "_zones_with_motion"):
+            s._zones_with_motion = set()
+        for z in s.cal.zones:
+            name = z["name"]
+            if name not in brio_names:
+                continue
+            if name == dealer_zone["name"]:
+                continue
+            if name in s._zones_with_motion:
+                continue
+            if s.monitor.zone_state.get(name) in ("recognized", "corrected"):
+                s._zones_with_motion.add(name)
+                continue
+            if s.monitor.check_single(frame, z) is not None:
+                s._zones_with_motion.add(name)
+                log.log(f"[CONSOLE] Motion seen in {name}'s zone "
+                        f"({len(s._zones_with_motion)}/"
+                        f"{len(brio_names) - 1} others)")
+        others = brio_names - {dealer_zone["name"]}
         crop = s.monitor.check_single(frame, dealer_zone)
-        if crop is not None:
-            log.log(f"[CONSOLE] Dealer card detected in {dealer_zone['name']}'s zone — {s.brio_settle_s:.1f}s settle")
+        if crop is not None and s._zones_with_motion >= others:
+            log.log(f"[CONSOLE] Dealer card detected in {dealer_zone['name']}'s "
+                    f"zone — {s.brio_settle_s:.1f}s settle")
             s.console_scan_phase = "settling"
             s.console_settle_time = time.time()
             return
+        if crop is not None and not (s._zones_with_motion >= others):
+            # Dealer zone moved but not all other zones have received a
+            # card yet — likely dealer's arm crossing their own zone
+            # during deal. Ignore, keep watching.
+            pass
         # Heartbeat diagnostic: once every ~10s while we're stuck in
         # watching, log the per-zone diff from baseline for every active
         # zone so the user can tell whether Brio is seeing changes below
@@ -1321,22 +1363,27 @@ def _dedup_round_cards_against_seen(s, round_cards):
     for d in s.slot_pending.values():
         seen.add(_canonical(d["rank"], d["suit"]))
 
-    import random as _rand
     for entry in round_cards:
         card = entry.get("card", "")
+        player = entry.get("player", "")
         if card in seen:
-            # Pick a random unseen card; if everything's seen, bail out.
-            candidates = [c for c in _ALL_CARDS if c not in seen]
-            if not candidates:
-                continue
-            new_card = _rand.choice(candidates)
-            log.log(f"[CONFIRM] {entry['player']}: {card} collides with seen "
-                    f"card — substituting random {new_card}")
-            entry["card"] = new_card
-            # Also update the monitor so downstream code / training-save
-            # sees the substituted card.
-            s.monitor.last_card[entry["player"]] = new_card
-        seen.add(entry["card"])
+            # If the user has explicitly corrected this zone, trust the
+            # correction and keep the card as-is — the collision is
+            # almost always a misrecognized down card in seen, not the
+            # users value. Otherwise log the collision but still keep
+            # the scan; randomly substituting a card corrupts wild
+            # tracking (fake Queens) and hand evaluation.
+            if s.monitor.zone_state.get(player) == "corrected":
+                log.log(
+                    f"[CONFIRM] {player}: {card} collides with seen card "
+                    f"but was user-corrected — keeping as-is"
+                )
+            else:
+                log.log(
+                    f"[CONFIRM] {player}: {card} collides with seen card "
+                    f"— leaving as-is (dealer can correct if wrong)"
+                )
+        seen.add(card)
 
 
 def _update_7_27_freezes(s, round_cards):
@@ -2508,6 +2555,7 @@ def _guided_deal_loop(s):
                 # Confirm Cards once every player's up card is in.
                 s.monitoring = True
                 s.console_scan_phase = "watching"
+                s._zones_with_motion = set()
                 dname = ge.get_dealer().name if ge.current_game else "dealer"
                 log.log(
                     f"[CONSOLE] 7/27 guided downs done → Brio watching "
@@ -2530,6 +2578,7 @@ def _guided_deal_loop(s):
                 ge = s.game_engine
                 s.monitoring = True
                 s.console_scan_phase = "watching"
+                s._zones_with_motion = set()
                 dname = ge.get_dealer().name if ge.current_game else "dealer"
                 log.log(f"[CONSOLE] Guided downs done → Brio watching {dname}'s zone")
             return
@@ -2991,16 +3040,37 @@ def _enqueue_down_card_verifies(s):
     """Called at the end of an up-card round (console Confirm Cards).
 
     Any slot that has a pending (low-confidence) scan that isn't already
-    verified in rodney_downs gets added to the FIFO verify queue. The Pi
-    will eventually be asked to blink that slot's green LED; for now we
-    just log the intent.
+    verified in rodney_downs gets added to the FIFO verify queue — but
+    only if that slot has actually been dealt. A stale slot_pending
+    entry for a trailing slot that we haven't started guiding yet (e.g.
+    FTQ slot 3 during round 1) would otherwise pop a verify modal for a
+    card that doesn't exist yet.
     """
+    ge = s.game_engine
+    initial = _initial_down_count(ge)
+    # Slots currently valid to verify: the initial guided range plus any
+    # slot the guided loop is presently iterating. Trailing slots get
+    # added once the trailing guided session starts.
+    expected_slots = set(range(1, initial + 1))
+    if s.guided_deal:
+        gd = s.guided_deal
+        if "num_slots" in gd:
+            expected_slots |= set(range(1, int(gd["num_slots"]) + 1))
+        for sn in gd.get("slots") or []:
+            try:
+                expected_slots.add(int(sn))
+            except (TypeError, ValueError):
+                pass
     with s.table_lock:
         newly_queued = []
         for slot_num, guess in s.slot_pending.items():
             if slot_num in s.rodney_downs:
                 continue
             if slot_num in s.verify_queue:
+                continue
+            if slot_num not in expected_slots:
+                # Haven't dealt this slot yet (FTQ/7CS trailing, etc.) —
+                # don't prompt the user to verify a card that isn't there.
                 continue
             s.verify_queue.append(slot_num)
             newly_queued.append(slot_num)
@@ -4975,6 +5045,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         )
                     else:
                         s.console_scan_phase = "watching"
+                        s._zones_with_motion = set()
                         log.log(
                             f"[CONSOLE] Watching {ge.get_dealer().name}'s "
                             f"zone for first card"
@@ -4998,6 +5069,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.console_trailing_done = False
                     s.stats = {"yolo_right": 0, "yolo_wrong": 0,
                                "claude_right": 0, "claude_wrong": 0}
+                    s._zones_with_motion = set()
                     s.table_state_version += 1
                 # Make sure any stale guided session from a prior hand is gone.
                 _stop_guided_deal(s)
@@ -5175,6 +5247,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.monitor.recognition_details[z["name"]] = {}
                     s.monitor.recognition_crops[z["name"]] = None
                 s.console_scan_phase = "idle" if beyond_last_up else "watching"
+                s._zones_with_motion = set()
                 if beyond_last_up:
                     log.log("[CONSOLE] No more up rounds — idle until End Hand")
                     s.console_state = "hand_over"
