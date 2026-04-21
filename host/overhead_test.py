@@ -457,9 +457,18 @@ def _console_watch_dealer(s, frame):
             if s.monitor.zone_state.get(name) in ("recognized", "corrected"):
                 continue
             if s._empty_scan_count.get(name, 0) >= MAX_EMPTY_SCANS:
-                # Treated as "passed" for this round. User can still
-                # manually correct if the player actually took a card.
-                continue
+                # Cap reached — normally skip so YOLO can't burn
+                # through attempts on an empty felt crop. BUT if
+                # there's fresh motion above the baseline threshold
+                # the player has finally placed a card; reset the
+                # count and let this zone back into the batch.
+                if s.monitor.check_single(frame, z) is None:
+                    continue
+                log.log(
+                    f"[CONSOLE] {name}: motion after cap — "
+                    f"resetting scan count"
+                )
+                s._empty_scan_count[name] = 0
             crop = s.monitor._crop(frame, z)
             if crop is None or crop.size == 0:
                 continue

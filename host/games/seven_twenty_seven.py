@@ -141,16 +141,26 @@ class SevenTwentySevenGame(BaseGame):
             speech=f"your bet with high of {tail}",
         )
 
-    def _player_visible_cards(self, state, player_name):
-        """Rodney's score includes his known down cards (minus any
-        flipped one). Everyone else uses the default ``console_hand_cards``
-        view."""
-        cards = super()._player_visible_cards(state, player_name)
+    # NOTE: no _player_visible_cards override. The bet-first
+    # announcement compares VISIBLE up-cards only — the same view every
+    # player at the table sees. Rodney's down cards are known to the
+    # host (they came through the Pi scanner) but must NOT leak into
+    # the public comparison. His personal values_7_27 total — which
+    # includes his down cards — is built separately in
+    # decorate_table_players below so Rodney's own UI sees his real
+    # hand total, but nobody else gets spoilers.
+
+    def _rodney_all_cards(self, state):
+        """Rodney's complete hand (up + his known downs, minus any
+        flipped slot already counted via console_hand_cards). For
+        use inside decorate_table_players when filling Rodney's
+        personal values_7_27 — never for public scoring."""
         remote = next(
             (p for p in self.engine.players if p.is_remote), None
         )
-        if remote is None or player_name != remote.name:
-            return cards
+        if remote is None:
+            return []
+        cards = super()._player_visible_cards(state, remote.name)
         flipped_slot = (state.rodney_flipped_up or {}).get("slot")
         for slot_num, d in state.rodney_downs.items():
             if slot_num == flipped_slot:
@@ -178,10 +188,20 @@ class SevenTwentySevenGame(BaseGame):
 
     def decorate_table_players(self, entries, state) -> None:
         """Add ``values_7_27`` (list of possible totals ≤27) to each
-        player entry. Uses the same per-player card view as scoring
-        but exposes every candidate total rather than just the max."""
+        player entry. Everyone else gets totals from their visible up-
+        cards only; Rodney gets his full private hand (up + his known
+        downs) because this is HIS display and he already knows his
+        downs. Never mix the two views — the public bet-first flow
+        uses visible-only scoring."""
+        remote = next(
+            (p for p in self.engine.players if p.is_remote), None
+        )
+        remote_name = remote.name if remote else None
         for entry in entries:
-            pairs = self._player_visible_cards(state, entry["name"])
+            if entry["name"] == remote_name:
+                pairs = self._rodney_all_cards(state)
+            else:
+                pairs = self._player_visible_cards(state, entry["name"])
             if not pairs:
                 continue
             values = compute_values(pairs)
