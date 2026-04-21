@@ -161,8 +161,18 @@ class SevenTwentySevenGame(BaseGame):
 
     # --- scan policy ---
 
-    def is_frozen(self, state, player_name: str) -> bool:
-        return self.freezes.get(player_name, 0) >= 3
+    def zones_to_scan(self, state):
+        # Round 1 is the initial flip/deal — everyone must place a card
+        # and standing isn't allowed yet. Rounds 2+ are hit rounds: any
+        # non-frozen active player may take or stand.
+        round_num = state.console_up_round + 1
+        if round_num <= 1:
+            return list(state.console_active_players), False
+        active = [
+            n for n in state.console_active_players
+            if self.freezes.get(n, 0) < 3
+        ]
+        return active, True
 
     # --- table decorations ---
 

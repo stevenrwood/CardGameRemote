@@ -234,18 +234,26 @@ def _console_watch_dealer(s, frame):
         # Wait until pending scans are done before deciding anything.
         if any(s.monitor.pending.get(n) for n in brio_names):
             return
+        # Ask the per-game class which zones to evaluate and whether
+        # empty zones are legitimate (standing). stand_allowed=True
+        # subsumes the old "is this a 7/27 hit round?" check: the same
+        # trigger + missing-handling logic falls out of one flag.
+        impl = s.current_game_impl
+        if impl is not None:
+            scan_names, stand_allowed = impl.zones_to_scan(s)
+        else:
+            scan_names, stand_allowed = list(brio_names), False
+        watched = set(scan_names) & set(brio_names)
         # Dealer deals to themselves last, so the motion trigger should
         # have coincided with an actual card in the dealer's own zone.
         # If the dealer zone is still empty post-scan, the trigger was a
         # hand/arm sweep — revert to watching instead of nagging every
-        # player who is also missing.
+        # player who is also missing. Skip this check when standing is
+        # allowed because the trigger could have come from any zone in
+        # watched, not specifically the dealer's.
         dealer_card = s.monitor.last_card.get(dealer_name, "")
         dealer_empty = not dealer_card or dealer_card == "No card"
-        is_hit_round = (
-            ge.current_game and ge.current_game.name.startswith("7/27")
-            and s.console_up_round >= 1
-        )
-        if dealer_empty and not is_hit_round:
+        if dealer_empty and not stand_allowed:
             log.log(
                 f"[CONSOLE] {dealer_name}'s zone empty after scan — "
                 f"likely a false trigger (arm over zone). Resuming watch."
@@ -268,7 +276,7 @@ def _console_watch_dealer(s, frame):
         if not hasattr(s, "_empty_scan_count"):
             s._empty_scan_count = {}
         MAX_EMPTY_SCANS_SCANNED = 3
-        for name in brio_names:
+        for name in watched:
             if s.monitor.zone_state.get(name) == "corrected":
                 continue
             card = s.monitor.last_card.get(name, "")
@@ -283,20 +291,15 @@ def _console_watch_dealer(s, frame):
                 if s._empty_scan_count[name] >= MAX_EMPTY_SCANS_SCANNED:
                     continue
                 missing.append(name)
-        # In hit rounds (7/27), dealer deals one at a time around the
-        # table. The first motion fires a scan long before the later
-        # players get their cards, so a "missing" zone here just means
-        # not yet dealt — frozen or not. Treat any unfrozen missing
-        # zone as "keep watching", so the next motion trigger fires
-        # another scan pass (already-recognized zones stay locked).
-        if is_hit_round:
-            unfrozen_missing = [
-                n for n in missing if s.freezes.get(n, 0) < 3
-            ]
-            if unfrozen_missing:
+        # Standing allowed: dealer deals one at a time so a missing
+        # zone might just mean "dealt to someone else first, we'll see
+        # this player next" — keep watching until the empty-scan cap
+        # absorbs genuinely-standing players.
+        if stand_allowed:
+            if missing:
                 log.log(
-                    f"[CONSOLE] Hit-round partial scan: still waiting on "
-                    f"{', '.join(unfrozen_missing)} — resuming watch"
+                    f"[CONSOLE] Partial scan: still waiting on "
+                    f"{', '.join(missing)} — resuming watch"
                 )
                 s.console_scan_phase = "watching"
             return
@@ -342,18 +345,20 @@ def _console_watch_dealer(s, frame):
         return
 
     if phase == "watching":
-        # 7/27 hit rounds: dealer goes around asking each player for a card
-        # or a freeze. Any LOCAL player's zone — not necessarily the dealer's
-        # — may be the first to change. Skip frozen players (≥3 freezes).
-        is_7_27_hit = (ge.current_game
-                       and ge.current_game.name.startswith("7/27")
-                       and s.console_up_round >= 1)
-        if is_7_27_hit:
+        # stand_allowed rounds (e.g. 7/27 hit rounds): the dealer
+        # hands to one player at a time, so any zone in the scan set
+        # can be the first to change. Frozen / out-of-game players
+        # are omitted from zones_to_scan so their motion is ignored.
+        impl = s.current_game_impl
+        if impl is not None:
+            scan_names, stand_allowed = impl.zones_to_scan(s)
+        else:
+            scan_names, stand_allowed = list(brio_names), False
+        watched = set(scan_names) & set(brio_names)
+        if stand_allowed:
             trigger_zone = None
             for z in s.cal.zones:
-                if z["name"] not in brio_names:
-                    continue
-                if s.freezes.get(z["name"], 0) >= 3:
+                if z["name"] not in watched:
                     continue
                 if s.monitor.check_single(frame, z) is not None:
                     trigger_zone = z

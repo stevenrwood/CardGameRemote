@@ -161,10 +161,21 @@ class BaseGame:
 
     # --- zone + scan policy ---
 
-    def is_frozen(self, state, player_name: str) -> bool:
-        """True if the player is skipped from this round's scan
-        because they have opted out (7/27 three-freeze rule)."""
-        return False
+    def zones_to_scan(self, state) -> tuple[list[str], bool]:
+        """Return ``(zone_names, stand_allowed)`` for this round.
+
+        - ``zone_names``: player names whose Brio zones the watcher
+          should trigger on and include in the batch scan. Frozen /
+          out-of-game players are simply omitted from the list.
+        - ``stand_allowed``: True if an empty zone is a legitimate
+          outcome (the player chose not to take a card — 7/27 hit
+          round "stand"). False if every zone in the list is
+          expected to land a card (stud/draw deal rounds) — empty
+          zones there mean "please adjust, we missed a scan".
+
+        Default: every active player, cards required.
+        """
+        return list(state.console_active_players), False
 
     # --- table UI decorations ---
 

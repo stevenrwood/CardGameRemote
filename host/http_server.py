@@ -735,19 +735,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/force_scan":
             # Dealer clicked "Waiting for cards..." — skip motion detection
-            # and scan every active, non-frozen zone right now.
+            # and scan every zone the game says is in play right now.
             frame = s.latest_frame
             if frame is None:
                 return self._r(503, "application/json",
                                '{"ok":false,"error":"no frame yet"}')
+            impl = s.current_game_impl
+            if impl is not None:
+                scan_names, _ = impl.zones_to_scan(s)
+            else:
+                scan_names = list(s.console_active_players)
+            watched = set(scan_names)
             zone_crops = {}
             for z in s.cal.zones:
                 name = z["name"]
-                if name not in s.console_active_players:
+                if name not in watched:
                     continue
                 if s.monitor.zone_state.get(name) == "corrected":
-                    continue
-                if s.freezes.get(name, 0) >= 3:
                     continue
                 crop = s.monitor._crop(frame, z)
                 if crop is None or crop.size == 0:
