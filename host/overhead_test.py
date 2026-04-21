@@ -1591,7 +1591,7 @@ def _announce_poker_hand_bet_first(s):
         elif cat == "three_of_a_kind":
             hand_phrase = f"Three {plural_of(tb[0])}"
         elif cat == "full_house":
-            hand_phrase = f"Three {plural_of(tb[0])} and two {plural_of(tb[1])}"
+            hand_phrase = f"Full house, {plural_of(tb[0])} over {plural_of(tb[1])}"
         elif cat == "two_pair":
             hand_phrase = f"Two {plural_of(tb[0])} and two {plural_of(tb[1])}"
         elif cat == "pair":
@@ -1599,11 +1599,11 @@ def _announce_poker_hand_bet_first(s):
         elif cat == "straight_flush" and tb[0] == 14:
             hand_phrase = "Royal flush"
         elif cat == "straight_flush":
-            hand_phrase = f"Straight flush, {name_of(tb[0])} high"
+            hand_phrase = f"{name_of(tb[0])} high straight flush"
         elif cat == "flush":
-            hand_phrase = f"Flush, {name_of(tb[0])} high"
+            hand_phrase = f"{name_of(tb[0])} high flush"
         elif cat == "straight":
-            hand_phrase = f"Straight, {name_of(tb[0])} high"
+            hand_phrase = f"{name_of(tb[0])} high straight"
         else:
             # high card: list every card the player actually shows, in
             # descending effective rank (wilds speak as Ace).
