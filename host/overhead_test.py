@@ -5406,6 +5406,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _r(self, code, ct, body):
         try:
             self.send_response(code)
+            # Default text/HTML/JSON responses to UTF-8 so browsers dont
+            # mis-decode em-dashes and other multibyte chars as Windows-1252
+            # (which is what the iPhone Safari view was showing as â€").
+            if (ct.startswith("text/") or ct == "application/json") \
+                    and "charset" not in ct.lower():
+                ct = ct + "; charset=utf-8"
             self.send_header("Content-Type", ct)
             if ct == "image/jpeg":
                 self.send_header("Cache-Control","no-store,no-cache,max-age=0")
