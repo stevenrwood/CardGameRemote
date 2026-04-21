@@ -852,9 +852,18 @@ class AppState:
         # Per-hand recognition stats: how many cards YOLO and Claude each
         # produced, and of those how many the user corrected. Reset on
         # every /api/console/deal and logged on /api/console/end.
+        # pi_auto: count of Pi guided-deal scans that landed ≥ GUIDED_GOOD_CONF
+        #   and were auto-committed without the user seeing a verify modal.
+        # pi_verify_right: user opened the verify modal on a low-conf guess
+        #   and accepted the Pi's suggestion unchanged → Pi was right.
+        # pi_verify_wrong: same modal, but user edited rank/suit → Pi was wrong.
+        # Together these tell us whether GUIDED_GOOD_CONF is set too aggressive
+        # or too conservative across a night of play.
         self.stats = {
             "yolo_right": 0, "yolo_wrong": 0,
             "claude_right": 0, "claude_wrong": 0,
+            "pi_auto": 0,
+            "pi_verify_right": 0, "pi_verify_wrong": 0,
         }
         self.rodney_marked_slots: set[int] = set()
         self.rodney_drew_this_hand = False
@@ -1659,6 +1668,7 @@ def _guided_deal_loop(s):
                     s.pi_prev_slots[expecting] = code
                     gd["expecting"] = expecting + 1
                     s.table_state_version += 1
+                _stats_bump(s, "pi_auto")
                 _table_log_add(s, f"Slot {expecting}: {code} (auto, {int(conf*100)}%)")
                 _pi_slot_led(s, expecting, "off")
                 if expecting + 1 <= N:
@@ -1963,6 +1973,7 @@ def _guided_replace_loop(s):
                     s.pi_prev_slots[expecting] = code
                     gd["index"] = idx + 1
                     s.table_state_version += 1
+                _stats_bump(s, "pi_auto")
                 _table_log_add(s, f"Slot {expecting} (replace): {code} (auto, {int(conf*100)}%)")
                 _pi_slot_led(s, expecting, "off")
                 if idx + 1 < len(slots):
@@ -2106,7 +2117,13 @@ def _enqueue_down_card_verifies(s):
 
 
 def _resolve_verify(s, card_dict):
-    """Set the verified card into rodney_downs[slot] and clear the modal."""
+    """Set the verified card into rodney_downs[slot] and clear the modal.
+
+    Also tallies whether the Pi's guess matched what the user finally
+    submitted — that's our accuracy signal for the low-confidence path
+    (and by extension, a hint about whether GUIDED_GOOD_CONF is set too
+    low or too high).
+    """
     with s.table_lock:
         pv = s.pending_verify
         if not pv:
@@ -2114,6 +2131,12 @@ def _resolve_verify(s, card_dict):
         slot = pv.get("slot")
         if slot is None:
             return False
+        guess = pv.get("guess") or {}
+        guess_matched = (
+            bool(guess.get("rank"))
+            and guess.get("rank") == card_dict.get("rank")
+            and guess.get("suit") == card_dict.get("suit")
+        )
         s.rodney_downs[slot] = {
             "rank": card_dict["rank"],
             "suit": card_dict["suit"],
@@ -2126,6 +2149,7 @@ def _resolve_verify(s, card_dict):
         s.pending_verify = None
         _table_log_add(s, f"Slot {slot}: {code} (verified)")
         s.table_state_version += 1
+    _stats_bump(s, "pi_verify_right" if guess_matched else "pi_verify_wrong")
     return True
 
 

@@ -863,7 +863,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.console_betting_round = 0
                     s.console_trailing_done = False
                     s.stats = {"yolo_right": 0, "yolo_wrong": 0,
-                               "claude_right": 0, "claude_wrong": 0}
+                               "claude_right": 0, "claude_wrong": 0,
+                               "pi_auto": 0,
+                               "pi_verify_right": 0, "pi_verify_wrong": 0}
                     s._zones_with_motion = set()
                     s._missing_speech_count = {}
                     s._empty_scan_count = {}
@@ -1105,13 +1107,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
             yolo_total = yr + yw
             claude_total = cr + cw
             total = yolo_total + claude_total
+
+            def _pct(n, d):
+                return f"{(100.0 * n / d):.0f}%" if d else "—"
+
             if total > 0:
-                def _pct(n, d):
-                    return f"{(100.0 * n / d):.0f}%" if d else "—"
                 log.log(
                     f"[STATS] Hand recognition: {total} cards total, "
                     f"YOLO {yr}/{yolo_total} right ({_pct(yr, yolo_total)}), "
                     f"Claude {cr}/{claude_total} right ({_pct(cr, claude_total)})"
+                )
+            # Pi guided-deal (down cards) stats — helps us decide whether
+            # the GUIDED_GOOD_CONF auto-accept bar of 0.50 is too high
+            # (lots of verify modals, most resolved unchanged) or too low
+            # (auto-accepts we would have corrected).
+            pa = s.stats.get("pi_auto", 0)
+            pvr = s.stats.get("pi_verify_right", 0)
+            pvw = s.stats.get("pi_verify_wrong", 0)
+            pv_total = pvr + pvw
+            if pa or pv_total:
+                log.log(
+                    f"[STATS] Pi guided: {pa} auto-accepted, "
+                    f"{pv_total} verified "
+                    f"({pvr} right / {pvw} wrong, {_pct(pvr, pv_total)})"
                 )
             if s.current_game_impl is not None:
                 s.current_game_impl.on_hand_end(s)
