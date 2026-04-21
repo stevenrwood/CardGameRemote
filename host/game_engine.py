@@ -40,6 +40,13 @@ class GameTemplate:
     # share the stud deal/bet cadence but differ only in wild-card or
     # winning-hand rules.
     phases_from: str = ""
+    # Placeholder names a parent template exposes for child variants to
+    # bind. Child templates pass concrete values via with_params; each
+    # {NAME} token in phase.pattern entries and phase.label strings is
+    # substituted at engine-init time. Used for Challenge variants that
+    # only differ in High/Low choice per round.
+    params: list[str] = field(default_factory=list)
+    with_params: dict = field(default_factory=dict)
     wild_cards: dict = field(default_factory=dict)  # {"ranks": ["2"], "label": "..."}
     dynamic_wild: str = ""  # e.g., "follow_the_queen"
     repeatable: bool = False
@@ -133,6 +140,12 @@ class GameEngine:
                 )
         for name, t in self.templates.items():
             if not t.phases_from:
+                if t.with_params:
+                    raise ValueError(
+                        f"Template {name!r} sets with_params but has no "
+                        f"phases_from — with_params only applies when "
+                        f"inheriting phases"
+                    )
                 continue
             parent = self.templates.get(t.phases_from)
             if parent is None:
@@ -144,7 +157,19 @@ class GameEngine:
                     f"Template {name!r} parents {parent.name!r} which itself "
                     f"uses phases_from — chained inheritance not supported"
                 )
-            t.phases = list(parent.phases)
+            if t.with_params:
+                if set(t.with_params.keys()) != set(parent.params):
+                    raise ValueError(
+                        f"Template {name!r} with_params keys "
+                        f"{sorted(t.with_params.keys())!r} do not match "
+                        f"parent {parent.name!r} params {sorted(parent.params)!r}"
+                    )
+            elif parent.params:
+                raise ValueError(
+                    f"Template {name!r} inherits from {parent.name!r} which "
+                    f"declares params {parent.params!r} but provides no with_params"
+                )
+            t.phases = [_substitute_phase(p, t.with_params) for p in parent.phases]
 
     def _update_dealer(self):
         """Set the is_dealer flag on the current dealer."""
@@ -515,6 +540,24 @@ class GameEngine:
         return phase.type.value
 
 
+def _substitute_phase(phase: Phase, params: dict) -> Phase:
+    """Return a copy of phase with {NAME} tokens in pattern entries and
+    label replaced using params. When params is empty, returns a shallow
+    copy so child templates never share Phase instances with the parent."""
+    def sub(text: str) -> str:
+        for k, v in params.items():
+            text = text.replace("{" + k + "}", v)
+        return text
+    return Phase(
+        type=phase.type,
+        pattern=[sub(p) for p in phase.pattern],
+        max_draw=phase.max_draw,
+        select_cards=phase.select_cards,
+        label=sub(phase.label),
+        card_type=phase.card_type,
+    )
+
+
 def _default_templates() -> list[GameTemplate]:
     """Built-in game templates."""
     return [
@@ -578,19 +621,35 @@ def _default_templates() -> list[GameTemplate]:
                   "8 or under, no pair) qualifies for the low half",
         ),
         GameTemplate(
-            name="High/Low/High Challenge",
+            name="Challenge",
+            params=["R1", "R2", "R3"],
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down"] * 3),
                 Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.CHALLENGE, select_cards=2, label="Best 2-card high hand"),
+                Phase(type=PhaseType.CHALLENGE, select_cards=2, label="Best 2-card {R1} hand"),
                 Phase(type=PhaseType.DEAL, pattern=["down"] * 2),
                 Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.CHALLENGE, select_cards=3, label="Best 3-card low hand"),
+                Phase(type=PhaseType.CHALLENGE, select_cards=3, label="Best 3-card {R2} hand"),
                 Phase(type=PhaseType.DEAL, pattern=["down"] * 2),
                 Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.CHALLENGE, select_cards=5, label="Best 5-card poker hand"),
+                Phase(type=PhaseType.CHALLENGE, select_cards=5, label="Best 5-card {R3} poker hand"),
             ],
             repeatable=True,
+        ),
+        GameTemplate(
+            name="High, Low, High",
+            phases_from="Challenge",
+            with_params={"R1": "High", "R2": "Low", "R3": "High"},
+        ),
+        GameTemplate(
+            name="Low, High, Low",
+            phases_from="Challenge",
+            with_params={"R1": "Low", "R2": "High", "R3": "Low"},
+        ),
+        GameTemplate(
+            name="Low, Low, High",
+            phases_from="Challenge",
+            with_params={"R1": "Low", "R2": "Low", "R3": "High"},
         ),
         GameTemplate(
             name="7/27",
