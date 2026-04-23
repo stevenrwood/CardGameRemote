@@ -891,6 +891,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/confirm":
             ge = s.game_engine
+            # Idempotency guard: after confirm processes a round, scan
+            # phase transitions to "confirmed" (mid-hand) or "idle"
+            # (last up round). A second click before the next scan
+            # arrives would otherwise re-advance console_up_round,
+            # re-announce bet-first, and re-tick 7/27 freezes — a
+            # single spurious double-tap could flip a player from 1
+            # freeze to 3 (frozen) in one round. Treat repeat confirms
+            # as a no-op until new scan data comes in.
+            if s.console_scan_phase in ("confirmed", "idle"):
+                self._r(200, "application/json",
+                        '{"ok":true,"duplicate":true}')
+                return
             # Collect round cards in deal order (clockwise from dealer's left)
             dealer_idx = ge.dealer_index
             round_cards = []

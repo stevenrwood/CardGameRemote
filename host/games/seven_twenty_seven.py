@@ -229,7 +229,21 @@ class SevenTwentySevenGame(BaseGame):
         # non-frozen active player may take or stand.
         round_num = state.console_up_round + 1
         if round_num <= 1:
-            return list(state.console_active_players), False
+            names = list(state.console_active_players)
+            # In the 2-down variant Rodney has no physical card in his
+            # Brio zone until he's picked one to flip up. If we leave
+            # him in the watched set, YOLO hallucinates a "4 of Spades"
+            # or similar on whatever empty-ish diff his zone is
+            # showing, and that phantom gets announced before the real
+            # flip-up overwrites it. Hold his zone out of the scan
+            # batch until rodney_flipped_up is resolved.
+            if self.template.name == "7/27" and state.rodney_flipped_up is None:
+                remote = next(
+                    (p for p in self.engine.players if p.is_remote), None
+                )
+                if remote is not None:
+                    names = [n for n in names if n != remote.name]
+            return names, False
         active = [
             n for n in state.console_active_players
             if self.freezes.get(n, 0) < 3
