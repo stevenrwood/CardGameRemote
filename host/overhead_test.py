@@ -733,10 +733,13 @@ def _announce_trailing_done(s):
         return
     # Re-state the current wild label if it's non-default. For FTQ we
     # suppressed mid-round speech on the last up round; this is where
-    # the player hears the final wild mapping.
+    # the player hears the final wild mapping. ge.wild_label already
+    # contains the "are wild" suffix (set as "Queens and {X}s are
+    # wild") so speak it verbatim — the earlier bug appended a second
+    # " are wild" producing "Queens and sevens are wild are wild".
     label = getattr(ge, "wild_label", "") or ""
     if label and label != "Queens wild":
-        speech.say(label + " are wild")
+        speech.say(label)
     _announce_poker_hand_bet_first(s)
 
 
