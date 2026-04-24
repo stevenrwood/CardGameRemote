@@ -28,6 +28,7 @@ import threading
 import time
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from typing import Optional
 
 # External log function — set by the app to route messages to the web UI
 _external_log = None
@@ -190,14 +191,14 @@ class FoldCommand:
 class PassCommand:
     """'Pass' / '{player}, pass' — Challenge-game vote. player=None means
     'attribute to whoever is currently up to vote'."""
-    player: str | None
+    player: Optional[str]
     raw_text: str
 
 @dataclass
 class GoOutCommand:
     """'I'm out' / '{player}, is out' — Challenge-game go-out declaration.
     player=None means 'attribute to whoever is currently up to vote'."""
-    player: str | None
+    player: Optional[str]
     raw_text: str
 
 @dataclass
