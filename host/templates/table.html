@@ -436,9 +436,16 @@ function renderPlayer(p) {
     if (round === 2) {
       outBtn.textContent = 'Go Out (all 7)';
       outBtn.disabled = locked;
-    } else {
+    } else if (marked === needed) {
       outBtn.textContent = 'Go Out (' + marked + '/' + needed + ')';
-      outBtn.disabled = locked || (marked !== needed);
+      outBtn.disabled = locked;
+    } else if (marked === 0) {
+      outBtn.textContent = 'Go Out — tap ' + needed + ' cards first';
+      outBtn.disabled = true;
+    } else {
+      outBtn.textContent = 'Go Out (' + marked + '/' + needed
+        + ' — pick ' + (needed - marked) + ' more)';
+      outBtn.disabled = true;
     }
     outBtn.onclick = function() {
       fetch('/api/table/go_out', {

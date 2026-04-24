@@ -1904,10 +1904,20 @@ def _start_guided_deal_range(s, slots: list[int]):
 def _begin_challenge_vote(s):
     """Enter the challenge_vote state after a round's deal/replace
     completes. Dealer drives the round via console Pass/Out buttons
-    and the "End Round" button; Rodney uses his /table buttons."""
+    and the "End Round" button; Rodney uses his /table buttons.
+
+    Speaks an opening announcement that names the round's hand type
+    (e.g. "Best 2-card High hand") and the first player to vote (the
+    dealer's left) so everyone at the table knows whose turn it is."""
     s.console_state = "challenge_vote"
     _reset_round_passes(s)
     round_label = (s.challenge_round_index or 0) + 1
+    hand_label = _challenge_phase_label(s) or "challenge hand"
+    first_voter = _challenge_first_voter(s)
+    opener = f"Challenge round. {hand_label}."
+    if first_voter:
+        opener += f" {first_voter}, you are first."
+    _log_and_speak(s, opener)
     log.log(f"[CHALLENGE] Round {round_label} vote begins — "
             "use console Pass/Out buttons")
     _bump_table_version(s)
@@ -2283,6 +2293,47 @@ def _challenge_required_cards(s) -> int:
     except Exception:
         pass
     return 0
+
+
+def _challenge_phase_label(s) -> str:
+    """Return the current round's CHALLENGE phase label with params
+    substituted (e.g. 'Best 2-card High hand'), or a fallback that
+    uses _challenge_required_cards + the round's letter label."""
+    ge = s.game_engine
+    try:
+        from game_engine import PhaseType
+        if ge.current_game is None or s.challenge_round_index is None:
+            return ""
+        idx = 0
+        for ph in ge.current_game.phases:
+            if ph.type == PhaseType.CHALLENGE:
+                if idx == s.challenge_round_index:
+                    return str(getattr(ph, "label", "") or "")
+                idx += 1
+    except Exception:
+        pass
+    return f"Best {_challenge_required_cards(s)}-card hand"
+
+
+def _challenge_first_voter(s) -> str:
+    """Name of the player to the dealer's left — first vote this round."""
+    try:
+        ge = s.game_engine
+        dealer = ge.get_dealer().name
+        active = list(s.console_active_players)
+        if dealer in active:
+            i = active.index(dealer)
+            # Player to dealer's left = next in PLAYER_NAMES order
+            # starting after the dealer. Walk PLAYER_NAMES since the
+            # physical seating order is fixed there.
+            d_idx = PLAYER_NAMES.index(dealer) if dealer in PLAYER_NAMES else 0
+            for offset in range(1, len(PLAYER_NAMES) + 1):
+                cand = PLAYER_NAMES[(d_idx + offset) % len(PLAYER_NAMES)]
+                if cand in active:
+                    return cand
+        return active[0] if active else ""
+    except Exception:
+        return ""
 
 
 def _fmt_money(cents: int) -> str:
