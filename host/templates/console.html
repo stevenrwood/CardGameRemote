@@ -225,7 +225,11 @@ function render(){
 
   var gs=document.getElementById('game-select');
   gs.value=ST.current_game||'';
-  gs.disabled=!ST.night_active||ST.game_in_progress;
+  // Dropdown stays enabled mid-hand so the dealer can correct a
+  // mis-heard game (Whisper sometimes transcribes "High, Low, High
+  // Challenge" as "7 Card Stud" etc). Picking a new value confirms
+  // first — see onPickGame.
+  gs.disabled=!ST.night_active;
 
   var sbtn=document.getElementById('start-btn');
   sbtn.textContent=ST.night_active?'Setup':'Start';
@@ -407,6 +411,20 @@ function onExit(){
 function onPickGame(){
   var g=document.getElementById('game-select').value;
   if(!g) return;
+  // If a hand is already in progress, confirm before cancelling it.
+  if(ST && ST.game_in_progress){
+    var curr=ST.current_game||'current hand';
+    if(!confirm('Cancel '+curr+' and start '+g+'?')){
+      // Revert dropdown so it doesn't linger on the rejected choice.
+      document.getElementById('game-select').value=ST.current_game||'';
+      return;
+    }
+    // End the current hand, then start the new one.
+    api('/api/console/end').then(function(){
+      api('/api/console/deal',{game:g}).then(refresh);
+    });
+    return;
+  }
   api('/api/console/deal',{game:g}).then(refresh);
 }
 
