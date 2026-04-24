@@ -107,6 +107,41 @@ class BaseGame:
         """
         if announce:
             self._announce_round(state)
+            self._maybe_announce_hand_over(state)
+
+    def min_players_to_continue(self, state) -> int:
+        """Minimum non-folded player count required to keep dealing.
+
+        Default 2: single-winner games are resolved once everyone but
+        one has folded. 7/27 overrides to 3 because it's a split-pot
+        (best high + best low) — with only 2 remaining, the split is
+        decided without further dealing.
+        """
+        return 2
+
+    def _maybe_announce_hand_over(self, state) -> None:
+        """Speak + log a hand-over notice once the active count drops
+        below ``min_players_to_continue``. Doesn't change console_state
+        or force /api/console/end — the dealer still clicks End Hand
+        to advance the dealer rotation and rotate the log. Just a
+        heads-up so the table knows play is decided."""
+        remaining = [
+            n for n in state.console_active_players
+            if n not in state.folded_players
+        ]
+        if len(remaining) >= self.min_players_to_continue(state):
+            return
+        tag = type(self).__name__
+        if len(remaining) == 1:
+            log.log(f"[{tag}] Hand over — {remaining[0]} wins uncontested")
+            speech.say(f"Hand over. {remaining[0]} wins.")
+        elif len(remaining) >= 2:
+            names = " and ".join(remaining)
+            log.log(f"[{tag}] Hand over — {names} to showdown")
+            speech.say(f"Hand over. {names} to showdown.")
+        else:
+            log.log(f"[{tag}] Hand over — no players remaining")
+            speech.say("Hand over.")
 
     # --- scoring + announce (plumbed through on_round_confirmed) ---
 
@@ -173,9 +208,13 @@ class BaseGame:
           expected to land a card (stud/draw deal rounds) — empty
           zones there mean "please adjust, we missed a scan".
 
-        Default: every active player, cards required.
+        Default: every active non-folded player, cards required.
         """
-        return list(state.console_active_players), False
+        names = [
+            n for n in state.console_active_players
+            if n not in state.folded_players
+        ]
+        return names, False
 
     # --- table UI decorations ---
 

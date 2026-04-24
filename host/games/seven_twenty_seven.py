@@ -229,7 +229,10 @@ class SevenTwentySevenGame(BaseGame):
         # non-frozen active player may take or stand.
         round_num = state.console_up_round + 1
         if round_num <= 1:
-            names = list(state.console_active_players)
+            names = [
+                n for n in state.console_active_players
+                if n not in state.folded_players
+            ]
             # In the 2-down variant Rodney has no physical card in his
             # Brio zone until he's picked one to flip up. If we leave
             # him in the watched set, YOLO hallucinates a "4 of Spades"
@@ -246,9 +249,16 @@ class SevenTwentySevenGame(BaseGame):
             return names, False
         active = [
             n for n in state.console_active_players
-            if self.freezes.get(n, 0) < 3
+            if n not in state.folded_players
+            and self.freezes.get(n, 0) < 3
         ]
         return active, True
+
+    def min_players_to_continue(self, state) -> int:
+        # 7/27 is split-pot (closest to 7 low half, closest to 27 high
+        # half). Once only 2 are left the split is already decided —
+        # no reason to keep dealing hit rounds between them.
+        return 3
 
     # --- table decorations ---
 
