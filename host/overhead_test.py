@@ -1908,9 +1908,14 @@ def _begin_challenge_vote(s):
 
     Speaks an opening announcement that names the round's hand type
     (e.g. "Best 2-card High hand") and the first player to vote (the
-    dealer's left) so everyone at the table knows whose turn it is."""
+    dealer's left) so everyone at the table knows whose turn it is.
+
+    Does NOT call _reset_round_passes — the reset happens before the
+    deal in _start_next_challenge_round (round 2+) or at hand-start
+    in /api/console/deal (round 1). Resetting here would wipe any
+    mid-deal commit Rodney made via his /table before the deal fully
+    finished."""
     s.console_state = "challenge_vote"
-    _reset_round_passes(s)
     round_label = (s.challenge_round_index or 0) + 1
     hand_label = _challenge_phase_label(s) or "challenge hand"
     first_voter = _challenge_first_voter(s)
@@ -2260,10 +2265,16 @@ def _game_is_challenge(ge) -> bool:
 def _challenge_can_mark(s, ge) -> bool:
     """True when Rodney can mark cards toward a Go Out. Rounds 1-2
     only (round 3 takes all 7 cards, no selection). Disabled once
-    Rodney has committed (went_out) or locked in a pass."""
+    Rodney has committed (went_out) or locked in a pass.
+
+    Marking is also allowed during the guided deal for rounds 2/3
+    so Rodney can pre-select cards while the dealer is still laying
+    down physical cards — the selection carries into the vote."""
     if not _game_is_challenge(ge):
         return False
-    if s.console_state != "challenge_vote":
+    if s.challenge_round_index is None:
+        return False
+    if s.console_state not in ("challenge_vote", "dealing"):
         return False
     if s.rodney_out_slots:
         return False
@@ -2395,7 +2406,13 @@ def _set_challenge_vote(s, name: str, vote: str) -> tuple:
 
     Returns (ok: bool, error: str).
     """
-    if s.console_state != "challenge_vote":
+    ge = s.game_engine
+    in_challenge_deal = (
+        s.console_state == "dealing"
+        and _game_is_challenge(ge)
+        and s.challenge_round_index is not None
+    )
+    if s.console_state != "challenge_vote" and not in_challenge_deal:
         return False, "not in challenge vote"
     st = s.challenge_per_player.get(name)
     if st is None:
