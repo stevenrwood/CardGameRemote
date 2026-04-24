@@ -409,8 +409,11 @@ class GameEngine:
         self._advance_to_next_actionable_phase()
         return self._phase_entry_messages()
 
-    def end_hand(self) -> dict:
-        """End the current hand and rotate dealer."""
+    def end_hand(self, advance_dealer: bool = True) -> dict:
+        """End the current hand. Rotates the dealer by default; pass
+        advance_dealer=False to end the hand without rotation (for
+        cancelling a mis-selected game so the real dealer keeps the
+        deal)."""
         self.state = GameState.HAND_OVER
         self.current_game = None
         self.phase_index = 0
@@ -420,7 +423,8 @@ class GameEngine:
         self.wild_label = ""
         self.last_up_was_queen = False
         self.slots = []
-        self.advance_dealer()
+        if advance_dealer:
+            self.advance_dealer()
         return {
             "type": "hand_over",
             "next_dealer": self.get_dealer().name,

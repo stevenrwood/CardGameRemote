@@ -1333,9 +1333,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 )
             if s.current_game_impl is not None:
                 s.current_game_impl.on_hand_end(s)
-            result = ge.end_hand()
+            # Body flag: advance_dealer=false keeps the deal with the
+            # current player. Used by the dropdown-cancel flow so the
+            # dealer who got a mis-heard game doesn't lose their turn.
+            advance = bool(data.get("advance_dealer", True))
+            result = ge.end_hand(advance_dealer=advance)
             s.current_game_impl = None
-            _skip_inactive_dealer(s)
+            if advance:
+                _skip_inactive_dealer(s)
             result["next_dealer"] = ge.get_dealer().name
             s.console_last_round_cards = []
             s.console_hand_cards = []
@@ -1364,6 +1369,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.pi_prev_slots = {}
                 s.folded_players = set()
                 s.freezes = {}
+                # On cancel (advance=False) we also reset Challenge
+                # state + roll back any antes added for this aborted
+                # hand, so the dealer can redeal cleanly. Normal end
+                # (resolution path) leaves pot_cents alone — resolve
+                # logic handles that.
+                if not advance and s.challenge_round_index is not None:
+                    # Rounds 0/1/2 mean we've added 1/2/3 antes.
+                    antes_added = (s.challenge_round_index or 0) + 1
+                    rollback = 50 * len(s.console_active_players) * antes_added
+                    s.pot_cents = max(0, s.pot_cents - rollback)
+                    s.challenge_round_index = None
+                    s.challenge_per_player = {}
+                    s.rodney_out_slots = []
+                    s.rodney_overflow = []
+                    s.rodney_marked_slots = set()
+                    log.log(
+                        f"[CHALLENGE] Hand cancelled — rolled back "
+                        f"{_fmt_money(rollback)} of antes. "
+                        f"Pot now {_fmt_money(s.pot_cents)}."
+                    )
                 s.table_state_version += 1
             _update_flash_for_deal_state(s)
             self._r(200, "application/json", json.dumps(result))

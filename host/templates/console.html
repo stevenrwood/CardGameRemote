@@ -419,8 +419,10 @@ function onPickGame(){
       document.getElementById('game-select').value=ST.current_game||'';
       return;
     }
-    // End the current hand, then start the new one.
-    api('/api/console/end').then(function(){
+    // End the current hand without rotating the dealer — the deal
+    // stays with whoever was about to deal the mis-selected game —
+    // then start the new one.
+    api('/api/console/end',{advance_dealer:false}).then(function(){
       api('/api/console/deal',{game:g}).then(refresh);
     });
     return;
