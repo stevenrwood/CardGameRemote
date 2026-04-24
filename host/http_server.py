@@ -651,11 +651,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     for st in s.challenge_per_player.values():
                         st["passes_this_round"] = 0
                     s.table_state_version += 1
-                ante_cents = 50 * len(s.console_active_players)
-                s.pot_cents += ante_cents
+                per_player_cents = 50
+                n_players = len(s.console_active_players)
+                s.pot_cents += per_player_cents * n_players
                 _log_and_speak(s,
                     f"Reshuffle #{s.challenge_shuffle_count}. "
-                    f"Round 1 ante: {_fmt_money(ante_cents)}. "
+                    f"Round 1 ante: {_fmt_money(per_player_cents)} each. "
                     f"Pot is now {_fmt_money(s.pot_cents)}.")
                 s.console_state = "dealing"
                 _start_guided_deal(s, 3)
@@ -1038,10 +1039,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     }
                     s.rodney_out_slots = []
                     s.rodney_overflow = []
-                    ante_cents = 50 * len(s.console_active_players)
-                    s.pot_cents += ante_cents
+                    per_player_cents = 50
+                    n_players = len(s.console_active_players)
+                    s.pot_cents += per_player_cents * n_players
                     _log_and_speak(s,
-                        f"Round 1 ante: {_fmt_money(ante_cents)}. "
+                        f"Round 1 ante: {_fmt_money(per_player_cents)} each. "
                         f"Pot is now {_fmt_money(s.pot_cents)}.")
                 else:
                     s.challenge_round_index = None

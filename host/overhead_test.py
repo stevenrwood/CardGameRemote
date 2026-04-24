@@ -2443,10 +2443,13 @@ def _start_next_challenge_round(s):
     """Auto-ante + deal the next round's cards. Assumes challenge_round_index
     is already set to the round we're entering (1 or 2 — round 0 is handled
     by new-hand init)."""
-    ante_cents = 50 * len(s.console_active_players)
+    n_players = len(s.console_active_players)
+    per_player_cents = 50
+    ante_cents = per_player_cents * n_players
     s.pot_cents += ante_cents
     _log_and_speak(s,
-        f"Round {s.challenge_round_index + 1} ante: {_fmt_money(ante_cents)}. "
+        f"Round {s.challenge_round_index + 1} ante: "
+        f"{_fmt_money(per_player_cents)} each. "
         f"Pot is now {_fmt_money(s.pot_cents)}.")
     _reset_round_passes(s)
     if s.challenge_round_index == 1:
