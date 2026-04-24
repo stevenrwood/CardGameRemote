@@ -3671,6 +3671,7 @@ def main():
     # checkpoint to ~/.cache), so this is gated behind --listen to
     # keep the normal boot path fast.
     if args.listen:
+        log.log("[VOICE] --listen set; initialising speech listener")
         try:
             from speech_recognition_module import (
                 SpeechListener, set_log_function,
@@ -3680,8 +3681,15 @@ def main():
             listener.start()
             log.log("[VOICE] speech-input listener started (--listen)")
         except Exception as e:
-            log.log(f"[VOICE] could not start listener: {type(e).__name__}: {e}")
-            log.log("[VOICE] install deps with: pip3 install mlx-whisper SpeechRecognition pyaudio")
+            import traceback
+            log.log(f"[VOICE] FAILED to start listener: "
+                    f"{type(e).__name__}: {e}")
+            for line in traceback.format_exc().splitlines():
+                log.log(f"[VOICE]   {line}")
+            log.log("[VOICE] install deps with: "
+                    "pip3 install mlx-whisper SpeechRecognition pyaudio")
+    else:
+        log.log("[VOICE] --listen NOT set; speech input disabled")
 
     # Open browser
     time.sleep(1)

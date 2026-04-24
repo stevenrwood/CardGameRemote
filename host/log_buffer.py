@@ -69,21 +69,32 @@ class LogBuffer:
             pass
 
     def start_night(self):
-        """Rotate the working log and start a dated archive for this
-        poker night. Returns the archive filename."""
+        """Start a dated archive for this poker night. Seeds the new
+        archive with the pre-night section of the live log (so
+        startup events like '[VOICE] speech-input listener started'
+        or early errors are preserved for post-session analysis).
+        Does NOT truncate the live log — the session-long log.txt
+        remains intact across Start-Night / End-Night boundaries.
+        Returns the archive filename."""
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         archive = LOG_ARCHIVE_DIR / f"poker_{stamp}.txt"
         try:
-            LOG_FILE.write_text("")
-        except Exception:
-            pass
-        try:
             LOG_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-            archive.write_text("")
+            prenight = ""
+            try:
+                prenight = LOG_FILE.read_text()
+            except Exception:
+                prenight = ""
+            with open(archive, "w") as f:
+                if prenight:
+                    f.write("=== Pre-night (live log up to this point) ===\n")
+                    f.write(prenight)
+                    if not prenight.endswith("\n"):
+                        f.write("\n")
+                    f.write("=== End pre-night ===\n")
         except Exception:
             pass
         with self._lock:
-            self._lines = []
             self._archive_path = archive
         self.log(f"=== Poker night started {stamp} → {archive.name} ===")
         return archive.name
