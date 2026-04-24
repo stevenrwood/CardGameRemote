@@ -1837,6 +1837,7 @@ def _guided_replace_loop(s):
     # Light every selected slot at once. The main loop polls each
     # uncommitted slot in round-robin, so the dealer can place cards in
     # any order.
+    now0 = time.time()
     for n in slots:
         _pi_slot_led(s, n, "on")
 
@@ -1853,9 +1854,13 @@ def _guided_replace_loop(s):
             "settle_until": None,
             "settled": False,
             "committed": False,
+            # Last LED-on POST timestamp. Re-sent periodically so a Pi
+            # restart mid-replace doesn't strand the LED off.
+            "led_on_ts": now0,
         }
         for n in slots
     }
+    LED_REFRESH_S = 10.0
 
     def _remaining():
         return [n for n in slots if not per_slot[n]["committed"]]
@@ -1912,6 +1917,16 @@ def _guided_replace_loop(s):
             st = per_slot[n]
             if st["committed"]:
                 continue
+
+            # Periodic LED refresh — if the Pi restarted between the
+            # initial LED-on POST and now, the slot LED would have gone
+            # dark. Re-send every LED_REFRESH_S seconds for any slot
+            # that's not currently in the verify modal (where it should
+            # be blinking instead).
+            if (st["stable_count"] == 0
+                    and now - st["led_on_ts"] >= LED_REFRESH_S):
+                _pi_slot_led(s, n, "on")
+                st["led_on_ts"] = now
 
             # Settle window — skip scans while the dealer is still seating
             # the card we just saw arrive.

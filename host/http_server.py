@@ -1017,8 +1017,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if has_draw and s.rodney_draws_done < total_draws:
                     with s.table_lock:
                         s.console_state = "draw"
+                        # On the FIRST draw transition, preserve any marks
+                        # Rodney set during dealing/betting. Only clear
+                        # stale marks between draws in multi-draw games
+                        # (3 Toed Pete) where rodney_drew_this_hand is
+                        # True from the previous draw.
+                        if s.rodney_drew_this_hand:
+                            s.rodney_marked_slots = set()
                         s.rodney_drew_this_hand = False
-                        s.rodney_marked_slots = set()
                         s.table_state_version += 1
                     log.log(
                         f"[CONSOLE] Betting round {s.console_betting_round} "
