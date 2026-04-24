@@ -305,6 +305,30 @@ _WHISPER_FIXES = [
 ]
 
 
+def _is_hallucinated_loop(text: str) -> bool:
+    """Detect Whisper's 'stuck phrase' failure mode — e.g. transcripts
+    where a short phrase repeats 5+ times in a row like
+    'Henry folds. Henry folds. Henry folds. Henry folds. Henry folds.'
+    That pattern virtually never corresponds to real speech at a poker
+    table and fires when the mic is picking up low-level room noise.
+    We drop these entire transcripts as if they were silence.
+
+    Returns True if the whole text is dominated by a repeated short
+    phrase (2-4 words, repeated >=5 times)."""
+    # Split on sentence separators — Whisper loops tend to end each
+    # repetition with . or ! and sometimes leave spaces.
+    chunks = [c.strip() for c in re.split(r"[.!?]+", text) if c.strip()]
+    if len(chunks) < 5:
+        return False
+    # Count repeats of any single chunk
+    from collections import Counter
+    counts = Counter(chunks)
+    top_phrase, top_count = counts.most_common(1)[0]
+    # Hallucinated if the top phrase accounts for >=5 chunks and makes
+    # up at least half the total chunks.
+    return top_count >= 5 and top_count >= len(chunks) / 2
+
+
 def _apply_whisper_fixes(text_lower: str) -> str:
     """Pre-process a lowercased transcript by applying the shared
     Whisper-mishear rewrite table. Returns a string ready for rank +
@@ -744,7 +768,13 @@ class SpeechListener:
         while self._running:
             try:
                 with mic as source:
-                    audio = recognizer.listen(source, timeout=10, phrase_time_limit=8)
+                    # phrase_time_limit capped at 4s — Whisper hallucinations
+                    # ("Henry folds. Henry folds. Henry folds..." repeated
+                    # 100+ times) tend to accumulate in long open phrases.
+                    # Cap to 4s so at most a short burst gets transcribed.
+                    audio = recognizer.listen(
+                        source, timeout=10, phrase_time_limit=4,
+                    )
 
                 _log("Speech detected, transcribing with Whisper...")
 
@@ -762,9 +792,22 @@ class SpeechListener:
                         path_or_hf_repo=model_name,
                         language="en",
                         initial_prompt=whisper_prompt,
+                        # no_speech_threshold is mlx-whisper's cutoff for
+                        # marking a segment as silence; the default is 0.6.
+                        # Bumping to 0.8 drops more borderline segments,
+                        # especially the ambient-room-noise ones that
+                        # spiral into looped hallucinations.
+                        no_speech_threshold=0.8,
                     )
                     text = result.get("text", "").strip()
                     elapsed = time.time() - t0
+
+                    if text and _is_hallucinated_loop(text):
+                        _log(
+                            f"Dropping hallucinated loop "
+                            f"({elapsed:.1f}s): \"{text[:80]}...\""
+                        )
+                        text = ""
 
                     if text:
                         _log(f"Heard ({elapsed:.1f}s): \"{text}\"")
