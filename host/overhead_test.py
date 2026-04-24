@@ -34,7 +34,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from threading import Thread, Lock
+from threading import Thread, Lock, Timer
 from queue import Queue, Empty
 
 import cv2
@@ -2715,6 +2715,79 @@ def _voice_post(path, body=None):
         return False
 
 
+_RANK_SPOKEN = {
+    "A": "Ace", "K": "King", "Q": "Queen", "J": "Jack",
+    "2": "2", "3": "3", "4": "4", "5": "5", "6": "6",
+    "7": "7", "8": "8", "9": "9", "10": "10",
+}
+
+
+def _speak_card(player: str, rank: str, suit: str) -> None:
+    """Audio echo of a card set via voice. Matches the Brio-side
+    phrasing so voice-driven and camera-driven calls sound the same
+    to the dealer. `rank` is the short form ('K', '10', 'A') and
+    `suit` is lowercase ('spades')."""
+    rank_word = _RANK_SPOKEN.get(rank.upper(), rank)
+    suit_word = suit.capitalize()
+    speech.say(f"{player}, {rank_word} of {suit_word}")
+
+
+# Debounce timer for the "waiting on …" summary speech. Multi-card
+# utterances (e.g. "Bill, 5 of clubs. David, Jack of clubs.") parse
+# into a list of CardCallCommand — we want each card spoken back
+# immediately but only ONE aggregate summary at the end of the burst.
+_voice_status_timer = None
+_voice_status_lock = Lock()
+
+
+def _schedule_voice_status_speech(delay_s: float = 0.8) -> None:
+    """Arm (or re-arm) the debounce timer that will speak which
+    players are still waiting once the flurry of voice card calls
+    goes quiet."""
+    global _voice_status_timer
+    with _voice_status_lock:
+        if _voice_status_timer is not None:
+            _voice_status_timer.cancel()
+        _voice_status_timer = Timer(delay_s, _speak_voice_status)
+        _voice_status_timer.daemon = True
+        _voice_status_timer.start()
+
+
+def _speak_voice_status() -> None:
+    """Speak a compact audio summary of which players still need a
+    card this round. Runs on the debounce Timer thread — the global
+    _state may have moved on between the voice calls and the timer
+    firing, so always re-check phase and re-derive the watched set."""
+    s = _state
+    if s is None:
+        return
+    phase = _derive_voice_phase(s)
+    if phase not in ("up_round", "pre_confirm"):
+        return  # round probably ended; nothing to announce
+    impl = getattr(s, "current_game_impl", None)
+    if impl is not None:
+        scan_names, _stand = impl.zones_to_scan(s)
+    else:
+        scan_names = list(s.console_active_players)
+    waiting = []
+    for name in scan_names:
+        card = s.monitor.last_card.get(name, "")
+        if not card or card == "No card":
+            waiting.append(name)
+    if not waiting:
+        speech.say("All cards in")
+        log.log("[VOICE] Status: all cards in")
+        return
+    if len(waiting) == 1:
+        phrase = f"Waiting on {waiting[0]}"
+    elif len(waiting) == 2:
+        phrase = f"Waiting on {waiting[0]} and {waiting[1]}"
+    else:
+        phrase = f"Waiting on {', '.join(waiting[:-1])}, and {waiting[-1]}"
+    speech.say(phrase)
+    log.log(f"[VOICE] Status: {phrase}")
+
+
 def _process_voice_command(cmd):
     """Phase-filtered dispatch for a single parsed voice command.
 
@@ -2769,6 +2842,14 @@ def _process_voice_command(cmd):
         _voice_post("/api/console/correct", {
             "corrections": [{"player": cmd.player, "rank": cmd.rank, "suit": cmd.suit}],
         })
+        # Speak back so the dealer can catch a misheard call without
+        # having to glance at the console. Brio already speaks its
+        # own recognitions; before this, voice calls were silent.
+        _speak_card(cmd.player, cmd.rank, cmd.suit)
+        # Arm the debounced status summary — if more card calls
+        # arrive in the same burst the timer resets; on quiet it
+        # fires with a single "Waiting on …" line.
+        _schedule_voice_status_speech()
         return
 
     if isinstance(cmd, CorrectionCommand):
@@ -2782,6 +2863,8 @@ def _process_voice_command(cmd):
         _voice_post("/api/console/correct", {
             "corrections": [{"player": cmd.player, "rank": cmd.rank, "suit": cmd.suit}],
         })
+        _speak_card(cmd.player, cmd.rank, cmd.suit)
+        _schedule_voice_status_speech()
         return
 
     if isinstance(cmd, ConfirmCommand):
