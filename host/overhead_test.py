@@ -2774,7 +2774,10 @@ def _speak_voice_status() -> None:
     if getattr(s, "_voice_announced_round", -1) != current_round:
         s._voice_announced_cards = {}
         s._voice_announced_all_in = False
+        s._voice_inferred_this_round = set()
         s._voice_announced_round = current_round
+    if not hasattr(s, "_voice_inferred_this_round"):
+        s._voice_inferred_this_round = set()
 
     waiting = []
     for name in ordered:
@@ -2791,10 +2794,18 @@ def _speak_voice_status() -> None:
             continue
         # zone_state = "corrected" — voice call or manual console
         # correction. Speak only if the value differs from what we
-        # already announced this round.
+        # already announced this round. Prefix "Inferred:" when the
+        # card was resolved from an orphan voice call (no player
+        # name spoken), so the dealer knows this one is a guess and
+        # worth verifying before they Confirm.
         if s._voice_announced_cards.get(name) != card:
-            speech.say(f"{name}, {card}")
-            log.log(f"[VOICE] Announce: {name}, {card}")
+            if name in s._voice_inferred_this_round:
+                speech.say(f"Inferred: {name}, {card}")
+                log.log(f"[VOICE] Announce: Inferred: {name}, {card}")
+                s._voice_inferred_this_round.discard(name)
+            else:
+                speech.say(f"{name}, {card}")
+                log.log(f"[VOICE] Announce: {name}, {card}")
             s._voice_announced_cards[name] = card
 
     # "All cards in" fires once per round, the first time every
@@ -2905,11 +2916,24 @@ def _process_voice_command(cmd):
                 f"[VOICE] Can't infer player for '{cmd.rank}{cmd.suit[0]}' — "
                 f"every active zone already has a card"
             )
+            # Audible cue: dealer said a card we can't place. Usually
+            # means Whisper dropped a player name earlier and the
+            # subsequent orphan has no home. Short "orphan card" lets
+            # them know without staring at the log.
+            speech.say("Orphan card")
             return
         log.log(
             f"[VOICE] Inferred {target} for '{cmd.rank}{cmd.suit[0]}' "
             f"(next in deal order)"
         )
+        # Immediate warning so the dealer catches the orphan before
+        # the debounced readback fires. The readback will then speak
+        # "Inferred: <target>, <rank> of <suit>" (the Inferred prefix
+        # is applied via the _voice_inferred_this_round tracker).
+        speech.say("Orphan card")
+        if not hasattr(s, "_voice_inferred_this_round"):
+            s._voice_inferred_this_round = set()
+        s._voice_inferred_this_round.add(target)
         _voice_post("/api/console/correct", {
             "corrections": [{"player": target, "rank": cmd.rank, "suit": cmd.suit}],
         })

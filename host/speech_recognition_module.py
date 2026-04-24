@@ -212,32 +212,70 @@ def _fuzzy_match_game(text):
     return None
 
 
+# Whisper-mishear → canonical text rewrites, applied before rank/suit
+# extraction in both `_parse_card_call` and `_extract_card_only`. Each
+# entry is (pattern, replacement) — replacement can be a string or a
+# callable (per `re.sub`). Keep rules narrow (`\b` word boundaries) to
+# avoid eating legitimate content.
+_WHISPER_FIXES = [
+    # Speech-dictation artifacts + rank substitutions we've seen in the
+    # wild. Preserved from the original inline tables.
+    (r'^oh,?\s+', ''),
+    (r'\bto a\b', 'two of'),
+    (r'\bto your\b', 'two of'),
+    (r'\b80\b', 'eight of'),
+    (r'\bat a\b', 'eight of'),
+    (r'\bfive at\b', 'five of'),
+    (r"\bo'clock\b", 'of clubs'),
+    (r'\bfly with\b', 'five of'),
+    (r"\bit's a\b", 'ace of'),
+    (r"\bin his\b", 'ace of'),
+    (r'\band diamond\b', 'ace of diamonds'),
+    (r'\band spade\b', 'ace of spades'),
+    (r'\band heart\b', 'ace of hearts'),
+    (r'\band club\b', 'ace of clubs'),
+    (r'\bi spade\b', 'ace of spades'),
+    (r'\bi heart\b', 'ace of hearts'),
+    (r'\bi diamond\b', 'ace of diamonds'),
+    (r'\bi club\b', 'ace of clubs'),
+    (r'\bin space\b', 'nine of spades'),
+    (r'\bfor diamond\b', 'four of diamonds'),
+    (r'\bfor heart\b', 'four of hearts'),
+    (r'\bfor spade\b', 'four of spades'),
+    (r'\bfor club\b', 'four of clubs'),
+    # New rules targeting the 2026-04-24 FTQ log drops:
+    #   "Fix the spades" → "Six of Spades"  (Whisper mishear of "Six")
+    #   "Four words of spades" → "Four of Spades"
+    (r'\bfix\b', 'six'),
+    (r'\bsticks\b', 'six'),
+    (r'\bsix the\b', 'six of'),
+    (r'\bfour the\b', 'four of'),
+    (r'\bseven the\b', 'seven of'),
+    (r'\bten the\b', 'ten of'),
+    (r'\bmine\b', 'nine'),
+    (r'\bline\b', 'nine'),
+    (r'\bsent\b', 'seven'),
+    (r'\bset\b', 'seven'),
+    # "four words of spades" / "4 word of hearts" — strip the spurious
+    # "word"/"words" that Whisper inserts between the rank and "of".
+    (r'\b(\d+|ace|king|queen|jack|ten|nine|eight|seven|six|five|four|three|two)\s+words?\s+of\b',
+     r'\1 of'),
+]
+
+
+def _apply_whisper_fixes(text_lower: str) -> str:
+    """Pre-process a lowercased transcript by applying the shared
+    Whisper-mishear rewrite table. Returns a string ready for rank +
+    suit extraction."""
+    for pattern, replacement in _WHISPER_FIXES:
+        text_lower = re.sub(pattern, replacement, text_lower)
+    return text_lower
+
+
 def _parse_card_call(text):
     text_lower = text.lower().strip()
     # Fix common dictation/Whisper substitutions before parsing
-    text_lower = re.sub(r'^oh,?\s+', '', text_lower)
-    text_lower = re.sub(r'\bto a\b', 'two of', text_lower)
-    text_lower = re.sub(r'\bto your\b', 'two of', text_lower)
-    text_lower = re.sub(r'\b80\b', 'eight of', text_lower)
-    text_lower = re.sub(r'\bat a\b', 'eight of', text_lower)
-    text_lower = re.sub(r'\bfive at\b', 'five of', text_lower)
-    text_lower = re.sub(r"\bo'clock\b", 'of clubs', text_lower)
-    text_lower = re.sub(r'\bfly with\b', 'five of', text_lower)
-    text_lower = re.sub(r"\bit's a\b", 'ace of', text_lower)
-    text_lower = re.sub(r"\bin his\b", 'ace of', text_lower)
-    text_lower = re.sub(r'\band diamond\b', 'ace of diamonds', text_lower)
-    text_lower = re.sub(r'\band spade\b', 'ace of spades', text_lower)
-    text_lower = re.sub(r'\band heart\b', 'ace of hearts', text_lower)
-    text_lower = re.sub(r'\band club\b', 'ace of clubs', text_lower)
-    text_lower = re.sub(r'\bi spade\b', 'ace of spades', text_lower)
-    text_lower = re.sub(r'\bi heart\b', 'ace of hearts', text_lower)
-    text_lower = re.sub(r'\bi diamond\b', 'ace of diamonds', text_lower)
-    text_lower = re.sub(r'\bi club\b', 'ace of clubs', text_lower)
-    text_lower = re.sub(r'\bin space\b', 'nine of spades', text_lower)
-    text_lower = re.sub(r'\bfor diamond\b', 'four of diamonds', text_lower)
-    text_lower = re.sub(r'\bfor heart\b', 'four of hearts', text_lower)
-    text_lower = re.sub(r'\bfor spade\b', 'four of spades', text_lower)
-    text_lower = re.sub(r'\bfor club\b', 'four of clubs', text_lower)
+    text_lower = _apply_whisper_fixes(text_lower)
     matched_player = None
     remaining = text_lower
     # Try exact player names first, then aliases
@@ -401,14 +439,7 @@ def _canonical_player(name_lower):
 def _extract_card_only(text):
     """Try to extract rank+suit from text that has no player name. Returns (rank, suit) or None."""
     text_lower = text.lower().strip()
-    text_lower = re.sub(r'^oh,?\s+', '', text_lower)
-    text_lower = re.sub(r'\bto a\b', 'two of', text_lower)
-    text_lower = re.sub(r'\bto your\b', 'two of', text_lower)
-    text_lower = re.sub(r'\b80\b', 'eight of', text_lower)
-    text_lower = re.sub(r'\bat a\b', 'eight of', text_lower)
-    text_lower = re.sub(r"\bo'clock\b", 'of clubs', text_lower)
-    text_lower = re.sub(r"\bit's a\b", 'ace of', text_lower)
-    text_lower = re.sub(r"\bin his\b", 'ace of', text_lower)
+    text_lower = _apply_whisper_fixes(text_lower)
 
     matched_rank = None
     rank_end = 0
@@ -579,6 +610,9 @@ class SpeechListener:
             "Ace of spades. King of hearts. Queen of diamonds. Jack of clubs. "
             "Two of hearts. Three of spades. Four of clubs. Five of diamonds. "
             "Six of hearts. Seven of spades. Eight of clubs. Nine of diamonds. Ten of hearts. "
+            "Ranks are Ace, King, Queen, Jack, Ten, Nine, Eight, Seven, Six, "
+            "Five, Four, Three, Two — never Fix, Sticks, Mine, Line, Sent, or "
+            "Words in place of a rank. "
             "The game is Follow the Queen. The game is 5 Card Draw. "
             "The game is 7 Card Stud. The game is 3 Toed Pete. "
             "Same game again. Let's run that back. "
