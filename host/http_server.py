@@ -1250,6 +1250,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # this announces the new wild rank.
             if changed_any:
                 _recompute_follow_the_queen(s)
+                # Bump the /table version so the remote /table poll picks
+                # up the new card immediately. Without this, voice-driven
+                # card calls that arrive before any Brio scan this round
+                # would leave Rodney's UI showing the stale pre-correction
+                # state until the next natural version bump.
+                with s.table_lock:
+                    s.table_state_version += 1
             self._r(200, "application/json", '{"ok":true}')
 
         elif p == "/api/console/yolo_conf":
