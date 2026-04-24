@@ -133,15 +133,15 @@ class BaseGame:
             return
         tag = type(self).__name__
         if len(remaining) == 1:
-            log.log(f"[{tag}] Hand over — {remaining[0]} wins uncontested")
-            speech.say(f"Hand over. {remaining[0]} wins.")
+            log.log(f"[{tag}] Game over — {remaining[0]} wins")
+            speech.say(f"Game over. {remaining[0]} wins")
         elif len(remaining) >= 2:
             names = " and ".join(remaining)
-            log.log(f"[{tag}] Hand over — {names} to showdown")
-            speech.say(f"Hand over. {names} to showdown.")
+            log.log(f"[{tag}] Game over — {names} split")
+            speech.say(f"Game over. {names} split")
         else:
-            log.log(f"[{tag}] Hand over — no players remaining")
-            speech.say("Hand over.")
+            log.log(f"[{tag}] Game over — no players remaining")
+            speech.say("Game over")
 
     # --- scoring + announce (plumbed through on_round_confirmed) ---
 
