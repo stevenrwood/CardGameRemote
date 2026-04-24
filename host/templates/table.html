@@ -399,18 +399,22 @@ function renderPlayer(p) {
     box.appendChild(row);
   }
 
-  // Challenge-game pass/go-out buttons: visible for Rodney when it's
-  // his turn to vote and he hasn't committed to going out yet.
+  // Challenge-game pass/go-out buttons: always visible for Rodney
+  // during the vote phase if he hasn't committed yet. Disabled when
+  // it's not his turn — he can still pre-mark cards, then the buttons
+  // become active once his turn arrives.
   var challengeState = (window._lastState && window._lastState.challenge);
   if (challengeState
-      && challengeState.current_player === p.name
       && p.is_remote
       && !(challengeState.per_player[p.name] || {}).went_out) {
+    var myTurn = (challengeState.current_player === p.name);
+    var turnHint = myTurn ? '' : ' (waiting for turn)';
     var chRow = document.createElement('div');
     chRow.id = 'challenge-vote-row';
     var passBtn = document.createElement('button');
     passBtn.id = 'challenge-pass-btn';
-    passBtn.textContent = 'Pass';
+    passBtn.textContent = 'Pass' + turnHint;
+    passBtn.disabled = !myTurn;
     passBtn.onclick = function() {
       fetch('/api/table/pass', {
         method: 'POST',
@@ -423,14 +427,14 @@ function renderPlayer(p) {
     var outBtn = document.createElement('button');
     outBtn.id = 'challenge-out-btn';
     var round = challengeState.round_index;  // 0 / 1 / 2
+    var marked = (drawState.marked_slots || []).length;
+    var needed = challengeState.required_cards || 0;
     if (round === 2) {
-      outBtn.textContent = 'Go Out (all 7)';
-      outBtn.disabled = false;
+      outBtn.textContent = 'Go Out (all 7)' + turnHint;
+      outBtn.disabled = !myTurn;
     } else {
-      var marked = (drawState.marked_slots || []).length;
-      var needed = challengeState.required_cards || 0;
-      outBtn.textContent = 'Go Out (' + marked + '/' + needed + ')';
-      outBtn.disabled = (marked !== needed);
+      outBtn.textContent = 'Go Out (' + marked + '/' + needed + ')' + turnHint;
+      outBtn.disabled = !myTurn || (marked !== needed);
     }
     outBtn.onclick = function() {
       fetch('/api/table/go_out', {

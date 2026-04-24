@@ -2253,9 +2253,11 @@ def _game_is_challenge(ge) -> bool:
 
 
 def _challenge_can_mark(s, ge) -> bool:
-    """True when Rodney can mark cards for a Go Out. Only during the
-    challenge vote, when it's his turn, before he's committed, and only
-    in rounds 1-2 (round 3 has no selection — Go Out takes all 7)."""
+    """True when Rodney can mark cards toward a Go Out. Rodney can
+    pre-mark anytime during the vote phase — waiting for his turn to
+    act doesn't block selection. Commit happens when he clicks Go Out,
+    which is only enabled on his turn. Rounds 1-2 only (round 3 has no
+    selection — Go Out takes all 7)."""
     if not _game_is_challenge(ge):
         return False
     if s.console_state != "challenge_vote":
@@ -2264,10 +2266,10 @@ def _challenge_can_mark(s, ge) -> bool:
         return False
     if (s.challenge_round_index or 0) >= 2:
         return False
-    if (not s.challenge_turn_order
-            or s.challenge_current_idx >= len(s.challenge_turn_order)):
+    rodney_state = s.challenge_per_player.get("Rodney") or {}
+    if rodney_state.get("went_out"):
         return False
-    return s.challenge_turn_order[s.challenge_current_idx] == "Rodney"
+    return True
 
 
 def _challenge_required_cards(s) -> int:
@@ -2340,6 +2342,19 @@ def _apply_challenge_vote(s, name: str, cmd):
     st = s.challenge_per_player.get(name)
     if st is None or st["went_out"]:
         log.log(f"[CHALLENGE] {name} vote ignored (already out or unknown)")
+        return
+    # Only the current turn player may vote. Out-of-order attribution
+    # (e.g. dealer mis-reads order, Whisper mis-hears a name) gets
+    # logged but doesn't skip the real current voter.
+    current = None
+    if (s.challenge_turn_order
+            and 0 <= s.challenge_current_idx < len(s.challenge_turn_order)):
+        current = s.challenge_turn_order[s.challenge_current_idx]
+    if current is not None and name != current:
+        log.log(
+            f"[CHALLENGE] {name} vote ignored — not their turn "
+            f"(current: {current})"
+        )
         return
     # Import at use site — PassCommand/GoOutCommand live in speech module
     # which may not yet be importable during slice 1 smoke tests.
