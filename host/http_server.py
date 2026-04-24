@@ -918,20 +918,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Rodney's down cards) before the round is announced and
             # accumulated — a duplicate is almost always a misread.
             _dedup_round_cards_against_seen(s, round_cards)
-            # For stud games (7CS, FTQ, High Chicago, Eight or Better) the
-            # last up-card round is followed by a trailing down (7th street).
-            # Defer the wild + bet-first announces so the final betting
-            # round gets one consolidated announcement *after* the trailing
-            # card is on the table. See _announce_trailing_done.
             round_num = s.console_up_round + 1
-            defer_announces = (
-                s.console_total_up_rounds > 0
-                and round_num >= s.console_total_up_rounds
-                and bool(_trailing_down_slots(ge))
-            )
-            # Check Follow the Queen wild cards — state update always
-            # runs; speech is silenced when we're deferring.
-            _check_follow_the_queen_round(s, round_cards, announce=not defer_announces)
+            # Announce every round's wild updates + bet-first. Earlier
+            # code deferred the final-up-round announce past the 7th-
+            # street deal, but that silenced the 4th-street betting
+            # round's bet-first call entirely — the dealer had no
+            # audio cue that bet 4 had started. _announce_trailing_done
+            # still fires after the 7th card lands so the final betting
+            # round gets its own cue (usually the same high hand).
+            _check_follow_the_queen_round(s, round_cards)
             # Accumulate into hand-wide history, then clear the current-round
             # data so it stops re-appearing as "just dealt" cards (which were
             # triggering the duplicate detector against the exact same cards
@@ -939,22 +934,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if round_cards:
                 for c in round_cards:
                     s.console_hand_cards.append({"player": c["player"], "card": c["card"], "round": round_num})
-            # Single per-round hook: the game class updates internal
-            # state (freezes, wild tracking) and speaks its bet-first
-            # announcement via the base class's score_hand flow.
-            # ``announce=False`` is the stud "defer past trailing down"
-            # case: state updates still run, speech is held until
-            # _announce_trailing_done fires. Stud/draw games still
-            # announced via _announce_poker_hand_bet_first below — that
-            # free function will migrate to the BaseGame path once the
-            # poker-hand announcer lands in step 4 of the refactor.
+            # Per-round hook: game class updates state (freezes, wild
+            # tracking) and speaks its bet-first announcement via the
+            # base class's score_hand flow. Stud/draw games additionally
+            # route through _announce_poker_hand_bet_first below until
+            # the poker-hand announcer migrates into the BaseGame path.
             impl = s.current_game_impl
             if impl is not None:
-                impl.on_round_confirmed(
-                    s, round_cards, announce=not defer_announces
-                )
-            if not defer_announces:
-                _announce_poker_hand_bet_first(s)
+                impl.on_round_confirmed(s, round_cards)
+            _announce_poker_hand_bet_first(s)
             s.console_last_round_cards = []
             for z in s.cal.zones:
                 zname = z["name"]
