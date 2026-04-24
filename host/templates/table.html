@@ -399,22 +399,23 @@ function renderPlayer(p) {
     box.appendChild(row);
   }
 
-  // Challenge-game pass/go-out buttons: always visible for Rodney
-  // during the vote phase if he hasn't committed yet. Disabled when
-  // it's not his turn — he can still pre-mark cards, then the buttons
-  // become active once his turn arrives.
+  // Challenge-game pass/go-out buttons for Rodney. Visible while the
+  // game is in challenge_vote and he hasn't already committed. No
+  // turn ordering — dealer drives the round and hits End Round when
+  // everyone's decisions are in.
   var challengeState = (window._lastState && window._lastState.challenge);
+  var rodneyState = challengeState
+    ? (challengeState.per_player[p.name] || {})
+    : null;
   if (challengeState
       && p.is_remote
-      && !(challengeState.per_player[p.name] || {}).went_out) {
-    var myTurn = (challengeState.current_player === p.name);
-    var turnHint = myTurn ? '' : ' (waiting for turn)';
+      && !rodneyState.went_out) {
     var chRow = document.createElement('div');
     chRow.id = 'challenge-vote-row';
     var passBtn = document.createElement('button');
     passBtn.id = 'challenge-pass-btn';
-    passBtn.textContent = 'Pass' + turnHint;
-    passBtn.disabled = !myTurn;
+    passBtn.textContent = rodneyState.passed ? 'Passed ✓' : 'Pass';
+    passBtn.disabled = !!rodneyState.passed;
     passBtn.onclick = function() {
       fetch('/api/table/pass', {
         method: 'POST',
@@ -430,11 +431,11 @@ function renderPlayer(p) {
     var marked = (drawState.marked_slots || []).length;
     var needed = challengeState.required_cards || 0;
     if (round === 2) {
-      outBtn.textContent = 'Go Out (all 7)' + turnHint;
-      outBtn.disabled = !myTurn;
+      outBtn.textContent = 'Go Out (all 7)';
+      outBtn.disabled = false;
     } else {
-      outBtn.textContent = 'Go Out (' + marked + '/' + needed + ')' + turnHint;
-      outBtn.disabled = !myTurn || (marked !== needed);
+      outBtn.textContent = 'Go Out (' + marked + '/' + needed + ')';
+      outBtn.disabled = (marked !== needed);
     }
     outBtn.onclick = function() {
       fetch('/api/table/go_out', {

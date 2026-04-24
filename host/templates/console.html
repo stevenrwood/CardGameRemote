@@ -9,6 +9,8 @@ body{font-family:-apple-system,sans-serif;background:#1a1a2e;color:#e0e0e0;
 h1{font-size:1.25em;text-align:center;margin:2px 0 8px;color:#e0e0e0}
 button{font-family:inherit;font-weight:600;border:none;border-radius:8px;cursor:pointer;
   -webkit-tap-highlight-color:transparent}
+.sml-btn{padding:6px 10px;font-size:.85em;background:#2a3258;color:#e0e0e0}
+.sml-btn:disabled{opacity:.4;cursor:not-allowed}
 select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;color:#e0e0e0;
   font-size:1em;width:100%;-webkit-appearance:none;appearance:none}
 select:disabled{opacity:.55}
@@ -263,29 +265,55 @@ function render(){
       +' — Round '+((ch.round_index||0)+1)+' of 3'+shuffleTxt;
     var board=document.getElementById('challenge-board');
     board.innerHTML='';
-    var pending=(ch.pending_votes||{});
     (ST.active_players||[]).forEach(function(n){
       var pp=(ch.per_player||{})[n]||{};
       var nameCell=document.createElement('div');
-      nameCell.textContent=n+(ch.current_player===n?' ←':'');
-      nameCell.style.fontWeight=(ch.current_player===n)?'700':'400';
-      var passCell=document.createElement('div');
-      passCell.textContent='passes: '+(pp.passes_this_round||0)+'/2';
-      var outCell=document.createElement('div');
+      nameCell.textContent=n;
+      nameCell.style.fontWeight='600';
+      var btnCell=document.createElement('div');
+      btnCell.style.display='flex';
+      btnCell.style.gap='4px';
       if(pp.went_out){
         var slotsTxt=(pp.out_slots||[]).length
           ? (' slots '+(pp.out_slots||[]).join(',')) : '';
-        outCell.textContent='OUT r'+((pp.out_round||0)+1)+slotsTxt;
-        outCell.style.color='#a5d6a7';
-      } else if(pending[n]){
-        outCell.textContent='queued: '+pending[n];
-        outCell.style.color='#ffd54f';
+        var outTxt=document.createElement('span');
+        outTxt.textContent='OUT r'+((pp.out_round||0)+1)+slotsTxt;
+        outTxt.style.color='#a5d6a7';
+        outTxt.style.fontWeight='700';
+        btnCell.appendChild(outTxt);
       } else {
-        outCell.textContent='';
+        var passBtn=document.createElement('button');
+        passBtn.textContent='Pass';
+        passBtn.className='sml-btn';
+        if(pp.passed) passBtn.style.background='#a5d6a7';
+        passBtn.onclick=(function(nm){return function(){
+          api('/api/console/challenge_vote',
+              {player:nm, vote: pp.passed ? 'clear' : 'pass'})
+            .then(refresh);
+        };})(n);
+        var outBtn=document.createElement('button');
+        outBtn.textContent='Out';
+        outBtn.className='sml-btn';
+        // Dealer can't click Out for Rodney — that needs slot selection
+        // on Rodney's /table.
+        if(n==='Rodney') outBtn.disabled=true;
+        outBtn.onclick=(function(nm){return function(){
+          api('/api/console/challenge_vote',{player:nm, vote:'out'})
+            .then(function(d){
+              if(d && !d.ok && d.error) alert(d.error);
+              refresh();
+            });
+        };})(n);
+        btnCell.appendChild(passBtn);
+        btnCell.appendChild(outBtn);
       }
+      var statusCell=document.createElement('div');
+      statusCell.style.color='#888';
+      if(!pp.went_out && pp.passed) statusCell.textContent='passed';
+      else statusCell.textContent='';
       board.appendChild(nameCell);
-      board.appendChild(passCell);
-      board.appendChild(outCell);
+      board.appendChild(btnCell);
+      board.appendChild(statusCell);
     });
     chSec.style.display='block';
   } else {
