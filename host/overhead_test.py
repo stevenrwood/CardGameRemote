@@ -807,6 +807,10 @@ class AppState:
         self.console_total_up_rounds = 0  # total up-card rounds in this game
         self.console_scan_phase = "idle"  # "idle" | "watching" | "settling" | "scanned" | "confirmed"
         self.console_settle_time = 0.0
+        # Name of the most recently-dealt game this session. Used by the
+        # "Same game again" / "Let's run that back" voice command to
+        # repeat the previous hand without having to say its name again.
+        self.last_game_name = ""
         # ---- Remote-player table view ("/table") ----
         # state_version is bumped whenever anything the observer needs changes.
         # Rodney's down cards come from the Pi scanner; other players only
@@ -2667,6 +2671,149 @@ def _process_deal_text(s, text):
 
 
 # ---------------------------------------------------------------------------
+# Voice command dispatcher
+# ---------------------------------------------------------------------------
+
+def _derive_voice_phase(s):
+    """Map the current console state to the voice-grammar phase.
+
+    Returns one of:
+      'pre_game'     — no game in progress; accepts game-selection commands
+      'up_round'     — cards being scanned; accepts "{player}, {card}"
+      'pre_confirm'  — every watched zone has a card; accepts Correction / Confirmed
+      'pre_pot'      — betting round in progress; accepts Pot Is Right + Fold
+      'other'        — anything else (draw / replacing / hand_over / idle mid-setup)
+    """
+    ge = s.game_engine
+    if ge is None or ge.current_game is None:
+        return "pre_game"
+    if s.console_state == "dealing":
+        if s.console_scan_phase == "scanned":
+            return "pre_confirm"
+        return "up_round"
+    if s.console_state == "betting":
+        return "pre_pot"
+    return "other"
+
+
+def _voice_post(path, body=None):
+    """Internal-HTTP helper so voice commands go through the same
+    endpoints the buttons do — guarantees identical side effects
+    (state transitions, announce, stats, table version bumps)."""
+    import urllib.request
+    url = f"http://localhost:8888{path}"
+    data = json.dumps(body or {}).encode()
+    req = urllib.request.Request(
+        url, data=data, method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=3).read()
+        return True
+    except Exception as e:
+        log.log(f"[VOICE] POST {path} failed: {type(e).__name__}: {e}")
+        return False
+
+
+def _process_voice_command(cmd):
+    """Phase-filtered dispatch for a single parsed voice command.
+
+    Commands spoken in the wrong phase are logged and ignored — no
+    action fires. That way a stray "Confirmed" during a betting round
+    doesn't accidentally skip ahead, and a "Pot is right" during deal
+    doesn't short-circuit the scan phase.
+    """
+    s = _state
+    if s is None:
+        return
+    from speech_recognition_module import (
+        GameCommand, RepeatGameCommand, CardCallCommand, CorrectionCommand,
+        ConfirmCommand, PotIsRightCommand, FoldCommand, UnrecognizedCommand,
+    )
+    phase = _derive_voice_phase(s)
+
+    if isinstance(cmd, GameCommand):
+        if phase != "pre_game":
+            log.log(f"[VOICE] Ignoring 'game is {cmd.game_name}' in phase {phase}")
+            return
+        log.log(f"[VOICE] Starting new hand: {cmd.game_name}")
+        _voice_post("/api/console/deal", {"game": cmd.game_name})
+        return
+
+    if isinstance(cmd, RepeatGameCommand):
+        if phase != "pre_game":
+            log.log(f"[VOICE] Ignoring 'same game again' in phase {phase}")
+            return
+        last = getattr(s, "last_game_name", "") or ""
+        if not last:
+            log.log("[VOICE] 'Same game again' heard but no previous game recorded")
+            speech.say("No previous game to repeat")
+            return
+        log.log(f"[VOICE] Repeating previous game: {last}")
+        _voice_post("/api/console/deal", {"game": last})
+        return
+
+    if isinstance(cmd, CardCallCommand):
+        # Voice-assigning a card during an up-card round (or pre-confirm
+        # if the user didn't use the "Correction:" prefix). Routes
+        # through /api/console/correct so the monitor picks it up
+        # exactly like a typed correction — locks the zone from the
+        # next Brio scan, updates training_data, etc.
+        if phase not in ("up_round", "pre_confirm"):
+            log.log(
+                f"[VOICE] Ignoring card call "
+                f"'{cmd.player}, {cmd.rank}{cmd.suit[0]}' in phase {phase}"
+            )
+            return
+        log.log(f"[VOICE] {cmd.player}: {cmd.rank} of {cmd.suit}")
+        _voice_post("/api/console/correct", {
+            "corrections": [{"player": cmd.player, "rank": cmd.rank, "suit": cmd.suit}],
+        })
+        return
+
+    if isinstance(cmd, CorrectionCommand):
+        if phase != "pre_confirm":
+            log.log(
+                f"[VOICE] Ignoring 'Correction: {cmd.player}, "
+                f"{cmd.rank}{cmd.suit[0]}' in phase {phase}"
+            )
+            return
+        log.log(f"[VOICE] Correction: {cmd.player} {cmd.rank} of {cmd.suit}")
+        _voice_post("/api/console/correct", {
+            "corrections": [{"player": cmd.player, "rank": cmd.rank, "suit": cmd.suit}],
+        })
+        return
+
+    if isinstance(cmd, ConfirmCommand):
+        if phase != "pre_confirm":
+            log.log(f"[VOICE] Ignoring 'Confirmed' in phase {phase}")
+            return
+        log.log("[VOICE] Confirmed → /api/console/confirm")
+        _voice_post("/api/console/confirm")
+        return
+
+    if isinstance(cmd, PotIsRightCommand):
+        if phase != "pre_pot":
+            log.log(f"[VOICE] Ignoring 'Pot is right' in phase {phase}")
+            return
+        log.log("[VOICE] Pot is right → /api/console/next_round")
+        _voice_post("/api/console/next_round")
+        return
+
+    if isinstance(cmd, FoldCommand):
+        if phase != "pre_pot":
+            log.log(f"[VOICE] Ignoring '{cmd.player} folds' in phase {phase}")
+            return
+        log.log(f"[VOICE] {cmd.player} folds → /api/table/fold")
+        _voice_post("/api/table/fold", {"player": cmd.player, "folded": True})
+        return
+
+    if isinstance(cmd, UnrecognizedCommand):
+        log.log(f"[VOICE] ? {cmd.raw_text!r}")
+        return
+
+
+# ---------------------------------------------------------------------------
 # Background capture
 # ---------------------------------------------------------------------------
 
@@ -2782,6 +2929,13 @@ def main():
                         help="Base voice name for `say`. The actual voice used "
                              "is the highest-quality installed variant "
                              "(Premium > Enhanced > base). Overrides SPEECH_VOICE env.")
+    parser.add_argument("--listen", action="store_true",
+                        help="Enable phase-filtered speech-input commands via "
+                             "MLX Whisper on the Mac mic (\"The game is …\", "
+                             "\"{player}, {card}\", \"Correction: …\", "
+                             "\"Confirmed\", \"Pot is right\", \"{player} folds\", "
+                             "\"Same game again\"). Requires mlx-whisper, "
+                             "SpeechRecognition, pyaudio, and portaudio.")
     args = parser.parse_args()
 
     if args.voice:
@@ -2880,6 +3034,25 @@ def main():
 
     # Start background capture
     Thread(target=bg_loop, daemon=True).start()
+
+    # Optional speech-input listener. The SpeechListener runs on its
+    # own background thread; _process_voice_command is the callback
+    # for each parsed command. Mic calibration takes ~2s at startup
+    # and model load ~30s on first run (downloads a whisper-small
+    # checkpoint to ~/.cache), so this is gated behind --listen to
+    # keep the normal boot path fast.
+    if args.listen:
+        try:
+            from speech_recognition_module import (
+                SpeechListener, set_log_function,
+            )
+            set_log_function(log.log)
+            listener = SpeechListener(callback=_process_voice_command)
+            listener.start()
+            log.log("[VOICE] speech-input listener started (--listen)")
+        except Exception as e:
+            log.log(f"[VOICE] could not start listener: {type(e).__name__}: {e}")
+            log.log("[VOICE] install deps with: pip3 install mlx-whisper SpeechRecognition pyaudio")
 
     # Open browser
     time.sleep(1)

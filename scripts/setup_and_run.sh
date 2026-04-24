@@ -103,6 +103,10 @@ fi
 info "Installing/updating dependencies..."
 pip install --quiet --upgrade pip
 pip install --quiet opencv-python numpy anthropic SpeechRecognition pyaudio
+# mlx-whisper is the on-device speech-to-text used by the optional
+# --listen flag. Apple Silicon only — installs fine on Intel Macs
+# but errors at runtime; --listen stays off if it fails to import.
+pip install --quiet mlx-whisper
 # pyobjc-framework-AVFoundation gives us the macOS camera-name lookup so the
 # overhead capture opens the Logitech Brio rather than whichever other 4K
 # webcam OpenCV happens to enumerate first.

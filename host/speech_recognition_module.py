@@ -129,10 +129,47 @@ class GameCommand:
     confidence: float
 
 @dataclass
+class RepeatGameCommand:
+    """'Same game again' / 'Let's run that back' — the host looks up the
+    last game that was dealt and starts a fresh hand of it."""
+    raw_text: str
+
+@dataclass
 class CardCallCommand:
+    """'{player}, {card}' spoken during an up-card round to fill in a
+    card the Brio scanner missed or to pre-empt a bad recognition."""
     player: str
     rank: str
     suit: str
+    raw_text: str
+    confidence: float
+
+@dataclass
+class CorrectionCommand:
+    """'Correction: {player}, {card}' — same semantic as CardCallCommand
+    but valid post-scan / pre-confirm when the scanner got a zone wrong
+    and the dealer wants to overwrite it before hitting Confirm."""
+    player: str
+    rank: str
+    suit: str
+    raw_text: str
+    confidence: float
+
+@dataclass
+class ConfirmCommand:
+    """'Confirmed' — voice equivalent of the Confirm Cards button."""
+    raw_text: str
+
+@dataclass
+class PotIsRightCommand:
+    """'Pot is right' — voice equivalent of the Pot Is Right button
+    that ends the betting round."""
+    raw_text: str
+
+@dataclass
+class FoldCommand:
+    """'{player}, folds' — mark a player as folded during betting."""
+    player: str
     raw_text: str
     confidence: float
 
@@ -241,8 +278,52 @@ def _parse_card_call(text):
 def parse_speech(text):
     """Parse speech text. Returns a list of commands (may find multiple card calls in one chunk)."""
     results = []
+    text_stripped = text.strip()
+    text_lower = text_stripped.lower()
 
-    # Check for game selection
+    # --- Single-phrase commands first (cheapest to check) --------------
+
+    # "Confirmed" — voice equivalent of the Confirm Cards button. Also
+    # tolerate slight mis-transcriptions like "confirm" or "confirmed."
+    # standalone, but NOT inside a longer phrase like "confirmed bill 4
+    # of clubs" (which would be a weird sentence anyway).
+    if re.fullmatch(r"(confirmed?|confirm cards?)[.!]?", text_lower):
+        return [ConfirmCommand(raw_text=text)]
+
+    # "Pot is right" (sometimes mis-heard as "pot is writes" etc.)
+    if re.fullmatch(r"(the\s+)?pot[\s,]*is\s+(right|write|ripe)[.!]?", text_lower):
+        return [PotIsRightCommand(raw_text=text)]
+
+    # "Same game again" / "Let's run that back" / "Run that back"
+    if re.fullmatch(
+        r"(same game( again)?|let'?s run that back|run that back)[.!]?",
+        text_lower,
+    ):
+        return [RepeatGameCommand(raw_text=text)]
+
+    # --- Fold: "{player}, folds" / "{player} folds out" etc. -----------
+    fold_match = re.match(
+        r"^([a-z]+)[\s,]+fold(s|ed|ing)?\b", text_lower
+    )
+    if fold_match:
+        player = _canonical_player(fold_match.group(1))
+        if player is not None:
+            return [FoldCommand(player=player, raw_text=text, confidence=1.0)]
+
+    # --- Correction prefix: "Correction: {player}, {card}" -------------
+    if re.match(r"^correction[\s,:]+", text_lower):
+        stripped = re.sub(r"^correction[\s,:]+", "", text_stripped, flags=re.IGNORECASE)
+        card = _parse_card_call(stripped)
+        if card is not None:
+            return [CorrectionCommand(
+                player=card.player, rank=card.rank, suit=card.suit,
+                raw_text=text, confidence=card.confidence,
+            )]
+        # Fall through — maybe Whisper heard "correction" at the start
+        # of a game phrase. Don't swallow it silently.
+
+    # --- Game selection -----------------------------------------------
+
     game_match = re.search(r'(?:the\s+)?game\s+is\s+(.+)', text, re.IGNORECASE)
     if game_match:
         result = _fuzzy_match_game(game_match.group(1))
@@ -254,6 +335,8 @@ def parse_speech(text):
     if result and result[1] >= 0.75:
         results.append(GameCommand(game_name=result[0], raw_text=text, confidence=result[1]))
         return results
+
+    # --- Card calls ---------------------------------------------------
 
     # Try to extract multiple card calls from one chunk
     # Split on player names to find individual calls
@@ -267,6 +350,29 @@ def parse_speech(text):
         return [card]
 
     return [UnrecognizedCommand(raw_text=text)]
+
+
+def _canonical_player(name_lower):
+    """Map a fuzzily-heard first name back to the canonical player list.
+    Returns the capitalized canonical name, or None if no player looks
+    remotely like what we heard."""
+    if not name_lower:
+        return None
+    # Prefer an exact alias match (handles common Whisper mis-hears
+    # like "eve" → "Steve") before falling back to a fuzzy ratio.
+    alias_hit = PLAYER_ALIASES.get(name_lower)
+    if alias_hit:
+        return alias_hit
+    best = None
+    best_score = 0.0
+    for canonical in PLAYER_NAMES:
+        score = SequenceMatcher(None, name_lower, canonical.lower()).ratio()
+        if score > best_score:
+            best_score = score
+            best = canonical
+    if best is not None and best_score >= 0.75:
+        return best
+    return None
 
 
 def _extract_card_only(text):
@@ -437,7 +543,11 @@ class SpeechListener:
             "Two of hearts. Three of spades. Four of clubs. Five of diamonds. "
             "Six of hearts. Seven of spades. Eight of clubs. Nine of diamonds. Ten of hearts. "
             "The game is Follow the Queen. The game is 5 Card Draw. "
-            "The game is 7 Card Stud. The game is 3 Toed Pete."
+            "The game is 7 Card Stud. The game is 3 Toed Pete. "
+            "Same game again. Let's run that back. "
+            "Correction: David, 4 of clubs. "
+            "Confirmed. Pot is right. "
+            "Bill folds. Steve folds."
         )
         _log("Loading Whisper model (first run downloads ~500MB)...")
         try:

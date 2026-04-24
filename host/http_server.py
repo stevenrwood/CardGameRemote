@@ -775,6 +775,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._r(400, "application/json", json.dumps({"error": f"Unknown game: {game_name}"}))
             else:
                 result = ge.new_hand(game_name)
+                s.last_game_name = game_name
                 # Stand up the per-game class instance. Empty class_name
                 # falls back to BaseGame, so templates that have no
                 # dedicated class behave exactly as before.
