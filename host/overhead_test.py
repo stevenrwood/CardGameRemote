@@ -925,6 +925,13 @@ class AppState:
         # face-down in front of Rodney off-scanner. We log them so the
         # resolve UI can surface what was there.
         self.rodney_overflow: list[dict] = []
+        # Pending challenge votes: {player_name: "pass" | "out"}.
+        # Populated when the user voices "{name} passes" / "{name} is
+        # out" during the guided deal OR out of turn; applied
+        # automatically when that player's turn arrives. Cleared at
+        # round end. Gives the dealer room to call ahead without
+        # losing votes.
+        self.challenge_pending_votes: dict = {}
 
 _state = None
 
@@ -1191,6 +1198,7 @@ def _build_table_state(s):
             },
             "rodney_out_slots": list(s.rodney_out_slots),
             "rodney_overflow": list(s.rodney_overflow),
+            "pending_votes": dict(s.challenge_pending_votes),
         }
     # Per-game decorations: the game class adds its own fields to the
     # document (7/27 injects values_7_27 per player and the flip-choice
@@ -1909,13 +1917,49 @@ def _start_guided_deal_range(s, slots: list[int]):
 
 
 def _begin_challenge_vote(s):
-    """Enter the challenge_vote state. Seeds turn_order, resets laps, logs."""
+    """Enter the challenge_vote state. Seeds turn_order, resets laps, logs,
+    then drains any pre-queued votes (dealer called passes while the
+    guided deal was still finishing)."""
     s.console_state = "challenge_vote"
     _reset_round_passes(s)
     round_label = (s.challenge_round_index or 0) + 1
     log.log(f"[CHALLENGE] Round {round_label} vote begins "
             f"(turn_order={s.challenge_turn_order})")
     _bump_table_version(s)
+    _drain_pending_challenge_votes(s)
+
+
+def _drain_pending_challenge_votes(s):
+    """Apply queued votes for the current turn player, then for any
+    subsequent players whose votes landed ahead of time. Stops when it
+    runs out of matching pending votes or the vote phase exits.
+
+    Reads s.challenge_pending_votes; consumes entries as they fire."""
+    if s.console_state != "challenge_vote":
+        return
+    try:
+        from speech_recognition_module import PassCommand, GoOutCommand
+    except Exception:
+        return
+    while s.console_state == "challenge_vote":
+        if (not s.challenge_turn_order
+                or s.challenge_current_idx >= len(s.challenge_turn_order)):
+            return
+        current = s.challenge_turn_order[s.challenge_current_idx]
+        pending = s.challenge_pending_votes.get(current)
+        if pending is None:
+            return
+        # Pop before apply to avoid re-queue loops.
+        del s.challenge_pending_votes[current]
+        if pending == "pass":
+            cmd = PassCommand(player=current, raw_text="[queued]")
+        elif pending == "out":
+            cmd = GoOutCommand(player=current, raw_text="[queued]")
+        else:
+            log.log(f"[CHALLENGE] unknown queued vote kind: {pending}")
+            return
+        log.log(f"[CHALLENGE] replaying queued vote: {current} {pending}")
+        _apply_challenge_vote(s, current, cmd)
 
 
 def _guided_replace_loop(s):
@@ -2315,7 +2359,10 @@ def _bump_table_version(s):
 
 def _reset_round_passes(s):
     """Start-of-round reset: clear passes, rebuild turn order excluding
-    already-out players, rewind lap and idx."""
+    already-out players, rewind lap and idx. Does NOT clear
+    challenge_pending_votes — those are drained by
+    _drain_pending_challenge_votes at vote_begin / turn-advance, and
+    explicitly cleared at round-to-round transitions + new hand."""
     for st in s.challenge_per_player.values():
         st["passes_this_round"] = 0
     dealer = None
@@ -2338,23 +2385,45 @@ def _reset_round_passes(s):
 
 
 def _apply_challenge_vote(s, name: str, cmd):
-    """Apply a pass/go-out vote for the named player."""
+    """Apply a pass/go-out vote for the named player.
+
+    If the vote arrives early (during guided deal) or out of turn, it
+    gets queued in s.challenge_pending_votes and is replayed when the
+    player's turn arrives — so the dealer can call passes ahead
+    without losing them."""
+    try:
+        from speech_recognition_module import PassCommand, GoOutCommand
+    except Exception:
+        PassCommand = GoOutCommand = None
+    vote_kind = None
+    if PassCommand is not None and isinstance(cmd, PassCommand):
+        vote_kind = "pass"
+    elif GoOutCommand is not None and isinstance(cmd, GoOutCommand):
+        vote_kind = "out"
     st = s.challenge_per_player.get(name)
-    if st is None or st["went_out"]:
+    if st is None or st.get("went_out"):
         log.log(f"[CHALLENGE] {name} vote ignored (already out or unknown)")
         return
-    # Only the current turn player may vote. Out-of-order attribution
-    # (e.g. dealer mis-reads order, Whisper mis-hears a name) gets
-    # logged but doesn't skip the real current voter.
+    # Queue the vote if we're not yet in the vote phase (Challenge game
+    # still dealing cards — dealer called ahead) OR if this isn't the
+    # named player's turn yet. The queue drains automatically on turn
+    # advance + vote-phase entry.
     current = None
     if (s.challenge_turn_order
             and 0 <= s.challenge_current_idx < len(s.challenge_turn_order)):
         current = s.challenge_turn_order[s.challenge_current_idx]
-    if current is not None and name != current:
-        log.log(
-            f"[CHALLENGE] {name} vote ignored — not their turn "
-            f"(current: {current})"
+    should_queue = (
+        s.console_state != "challenge_vote"
+        or (current is not None and name != current)
+    )
+    if should_queue and vote_kind is not None:
+        s.challenge_pending_votes[name] = vote_kind
+        reason = (
+            "early — deal still in progress"
+            if s.console_state != "challenge_vote"
+            else f"out of turn (current: {current})"
         )
+        _log_and_speak(s, f"{name} {vote_kind} queued ({reason})")
         return
     # Import at use site — PassCommand/GoOutCommand live in speech module
     # which may not yet be importable during slice 1 smoke tests.
@@ -2405,7 +2474,9 @@ def _apply_challenge_vote(s, name: str, cmd):
 
 
 def _advance_challenge_turn(s):
-    """Move to the next non-out voter. If both laps are done, resolve."""
+    """Move to the next non-out voter. If both laps are done, resolve.
+    After landing on a new current player, drains any pre-queued vote
+    for them so the dealer's ahead-of-turn passes auto-fire."""
     s.challenge_current_idx += 1
     while s.challenge_current_idx < len(s.challenge_turn_order):
         nm = s.challenge_turn_order[s.challenge_current_idx]
@@ -2422,10 +2493,12 @@ def _advance_challenge_turn(s):
                        s.challenge_turn_order[s.challenge_current_idx]]["went_out"]):
                 s.challenge_current_idx += 1
             _bump_table_version(s)
+            _drain_pending_challenge_votes(s)
             return
         _resolve_challenge_round(s)
         return
     _bump_table_version(s)
+    _drain_pending_challenge_votes(s)
 
 
 def _resolve_challenge_round(s):
@@ -2433,6 +2506,9 @@ def _resolve_challenge_round(s):
     outs = [nm for nm, st in s.challenge_per_player.items() if st["went_out"]]
     if len(outs) == 0:
         next_idx = (s.challenge_round_index or 0) + 1
+        # Clear any stragglers from round N before entering round N+1 —
+        # votes queued in one round shouldn't auto-apply in the next.
+        s.challenge_pending_votes = {}
         if next_idx >= 3:
             s.console_state = "reshuffle"
             _log_and_speak(s, "No one went out. Reshuffle and redeal.")
@@ -3412,7 +3488,15 @@ def _process_voice_command(cmd):
         return
 
     if isinstance(cmd, (PassCommand, GoOutCommand)):
-        if phase != "challenge_vote":
+        # Accept pass/out during the vote phase OR during Challenge-game
+        # dealing (dealer calling ahead while guided deal finishes). In
+        # the dealing case the command is queued in pending_votes and
+        # applied once the vote phase enters.
+        ge = s.game_engine
+        in_challenge_deal = (
+            phase == "up_round" and _game_is_challenge(ge)
+        )
+        if phase != "challenge_vote" and not in_challenge_deal:
             log.log(
                 f"[VOICE] Ignoring {type(cmd).__name__} in phase {phase}"
             )
@@ -3423,7 +3507,10 @@ def _process_voice_command(cmd):
                     and 0 <= s.challenge_current_idx < len(s.challenge_turn_order)):
                 name = s.challenge_turn_order[s.challenge_current_idx]
         if name is None:
-            log.log("[VOICE] pass/out with no attributable player")
+            log.log(
+                "[VOICE] pass/out with no attributable player "
+                "(call out the name explicitly while dealing)"
+            )
             return
         _apply_challenge_vote(s, name, cmd)
         return

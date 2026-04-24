@@ -263,6 +263,7 @@ function render(){
       +' — Round '+((ch.round_index||0)+1)+' of 3'+shuffleTxt;
     var board=document.getElementById('challenge-board');
     board.innerHTML='';
+    var pending=(ch.pending_votes||{});
     (ST.active_players||[]).forEach(function(n){
       var pp=(ch.per_player||{})[n]||{};
       var nameCell=document.createElement('div');
@@ -276,6 +277,9 @@ function render(){
           ? (' slots '+(pp.out_slots||[]).join(',')) : '';
         outCell.textContent='OUT r'+((pp.out_round||0)+1)+slotsTxt;
         outCell.style.color='#a5d6a7';
+      } else if(pending[n]){
+        outCell.textContent='queued: '+pending[n];
+        outCell.style.color='#ffd54f';
       } else {
         outCell.textContent='';
       }

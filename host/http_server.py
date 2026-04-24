@@ -648,6 +648,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.pending_verify = None
                     s.challenge_round_index = 0
                     s.challenge_shuffle_count += 1
+                    s.challenge_pending_votes = {}
                     for st in s.challenge_per_player.values():
                         st["passes_this_round"] = 0
                     s.table_state_version += 1
@@ -829,6 +830,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 "out_slots": list(st["out_slots"]),
                             } for nm, st in s.challenge_per_player.items()
                         },
+                        "pending_votes": dict(s.challenge_pending_votes),
                     }
                     if (_game_is_challenge(ge)
                         and s.challenge_round_index is not None)
@@ -1039,6 +1041,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     }
                     s.rodney_out_slots = []
                     s.rodney_overflow = []
+                    s.challenge_pending_votes = {}
                     per_player_cents = 50
                     n_players = len(s.console_active_players)
                     s.pot_cents += per_player_cents * n_players
