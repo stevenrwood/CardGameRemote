@@ -2310,12 +2310,23 @@ MAX_PASSES_PER_ROUND = 2
 
 
 def _reset_round_passes(s):
-    """Start-of-round reset: reset the per-player pass counter to 0.
-    went_out is hand-wide — once set, stays set for the whole hand.
-    In a 0-out-advance-to-next-round scenario, went_out is already
-    False for everyone, so nothing to undo."""
+    """Start-of-round reset: every player starts each round fresh.
+    Pass counter → 0, went_out → False, committed out_slots cleared.
+    Rodney's committed-slot LEDs are turned off (he can pick a new
+    set of cards from his now-larger hand in the next round)."""
+    # Turn off any LEDs that were lit for Rodney's previous-round
+    # commitment before we clear the state.
+    for slot in list(s.rodney_out_slots or []):
+        try:
+            _pi_slot_led(s, int(slot), "off")
+        except Exception:
+            pass
+    s.rodney_out_slots = []
     for st in s.challenge_per_player.values():
         st["passes"] = 0
+        st["went_out"] = False
+        st["out_round"] = None
+        st["out_slots"] = []
 
 
 def _set_challenge_vote(s, name: str, vote: str) -> tuple:
@@ -2425,28 +2436,20 @@ def _start_next_challenge_round(s):
     is already set to the round we're entering (1 or 2 — round 0 is handled
     by new-hand init).
 
-    Only non-out players ante (outs have settled and dropped out of the
-    hand). If Rodney is already out, skip his scanner-driven deal and
-    enter the vote directly — the dealer still deals physical cards to
-    the remaining non-out players at the table."""
+    Every active player antes every round (only folding would exempt
+    someone and that isn't part of this game). The per-player
+    pass/out state reset happens inside _reset_round_passes — players
+    who committed in the previous round get to re-vote this round
+    with the new cards added to their hand."""
     per_player_cents = 50
-    non_out = [nm for nm in s.console_active_players
-               if not s.challenge_per_player.get(nm, {}).get("went_out")]
-    n = len(non_out)
+    n = len(s.console_active_players)
     ante_cents = per_player_cents * n
     s.pot_cents += ante_cents
     _log_and_speak(s,
         f"Round {s.challenge_round_index + 1} ante: "
-        f"{_fmt_money(per_player_cents)} each from {n} player"
-        f"{'s' if n != 1 else ''}. "
+        f"{_fmt_money(per_player_cents)} each. "
         f"Pot is now {_fmt_money(s.pot_cents)}.")
     _reset_round_passes(s)
-    rodney_out = s.challenge_per_player.get("Rodney", {}).get("went_out", False)
-    if rodney_out:
-        # No scanner deal for Rodney — dealer handles other players'
-        # physical cards. Go straight to the vote.
-        _begin_challenge_vote(s)
-        return
     if s.challenge_round_index == 1:
         _start_guided_deal_range(s, [4, 5])
     elif s.challenge_round_index == 2:
