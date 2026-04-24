@@ -432,12 +432,15 @@ function render(state) {
   var banner = document.getElementById('guided-banner');
   if (gd) {
     if (gd.slots) {
-      // Replacement flow: explicit slot list + index into it.
-      var idx = gd.index || 0;
-      var slots = gd.slots;
-      if (idx < slots.length) {
-        banner.textContent = 'Replacement: place card in slot ' + slots[idx]
-          + ' (' + (idx + 1) + ' of ' + slots.length + ')';
+      // Replacement flow: all selected slots accept cards in parallel.
+      var remaining = gd.remaining || gd.slots;
+      var total = gd.total || gd.slots.length;
+      if (remaining.length > 0) {
+        var done = total - remaining.length;
+        banner.textContent = 'Replacement: place cards in slot'
+          + (remaining.length === 1 ? ' ' : 's ')
+          + remaining.join(', ')
+          + ' (' + done + ' of ' + total + ' done)';
       } else {
         banner.textContent = 'Replacement done';
       }

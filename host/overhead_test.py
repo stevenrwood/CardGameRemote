@@ -1113,7 +1113,7 @@ def _build_table_state(s):
                 _game_has_draw_phase(ge)
                 and s.rodney_draws_done < _total_draw_phases(ge)
                 and not s.rodney_drew_this_hand
-                and s.console_state in ("betting", "draw")
+                and s.console_state in ("dealing", "betting", "draw")
             ),
             "can_request": (
                 s.console_state == "draw"
@@ -1822,8 +1822,8 @@ def _start_guided_trailing_deal(s, slots: list[int]):
 
 def _guided_replace_loop(s):
     """Variant of _guided_deal_loop driven by an explicit slot list.
-    LEDs light in the order given; cleared rodney_downs entries refill
-    as new cards are scanned.
+    All selected slots light up simultaneously; replacements are scanned
+    as they arrive in any order.
 
     Shared by draw-phase replacement (mode='replace') and the trailing-down
     deal for stud games (mode='trailing'); only the completion transition
@@ -1834,28 +1834,44 @@ def _guided_replace_loop(s):
     slots = list(gd["slots"])
     mode = gd.get("mode", "replace")
     log.log(f"[GUIDED/{mode}] Started — slots {slots}")
-    # Strict single-slot: only the slot being processed right now has its
-    # LED lit, every other slot is off. Previously upcoming slots blinked,
-    # which looked like we were trying to process them in parallel.
-    for i, n in enumerate(slots):
-        _pi_slot_led(s, n, "on" if i == 0 else "off")
-    stable_count = 0
-    best_card = None
-    settled = False
+    # Light every selected slot at once. The main loop polls each
+    # uncommitted slot in round-robin, so the dealer can place cards in
+    # any order.
+    for n in slots:
+        _pi_slot_led(s, n, "on")
+
     # In replace mode the old card may still be physically in the slot
     # when guided starts — require a present=false transition before we
     # accept a present=true reading, otherwise the old card gets re-
     # committed as "new". Trailing mode starts from an empty slot.
     require_empty_first = (mode == "replace")
-    saw_empty = not require_empty_first
+    per_slot = {
+        n: {
+            "saw_empty": not require_empty_first,
+            "stable_count": 0,
+            "best_card": None,
+            "settle_until": None,
+            "settled": False,
+            "committed": False,
+        }
+        for n in slots
+    }
+
+    def _remaining():
+        return [n for n in slots if not per_slot[n]["committed"]]
+
+    with s.table_lock:
+        gd["remaining"] = _remaining()
+        gd["total"] = len(slots)
+        s.table_state_version += 1
 
     while True:
         gd = s.guided_deal
         if gd is None:
             log.log(f"[GUIDED/{mode}] Stopped externally")
             return
-        idx = gd.get("index", 0)
-        if idx >= len(slots):
+
+        if all(st["committed"] for st in per_slot.values()):
             for n in slots:
                 _pi_slot_led(s, n, "off")
             log.log(f"[GUIDED/{mode}] Complete")
@@ -1889,144 +1905,169 @@ def _guided_replace_loop(s):
                         f"done → betting round {s.console_betting_round}"
                     )
             return
-        expecting = slots[idx]
 
-        with s.table_lock:
-            already_filled = expecting in s.rodney_downs
-            pv = s.pending_verify
-            waiting_verify = pv is not None and pv.get("slot") == expecting
+        progress = False
+        now = time.time()
+        for n in slots:
+            st = per_slot[n]
+            if st["committed"]:
+                continue
 
-        if already_filled:
-            _pi_slot_led(s, expecting, "off")
+            # Settle window — skip scans while the dealer is still seating
+            # the card we just saw arrive.
+            if st["settle_until"] is not None and now < st["settle_until"]:
+                continue
+
             with s.table_lock:
-                gd["index"] = idx + 1
-                s.table_state_version += 1
-            if idx + 1 < len(slots):
-                _pi_slot_led(s, slots[idx + 1], "on")
-            stable_count = 0
-            best_card = None
-            settled = False
-            saw_empty = not require_empty_first
-            continue
+                already_filled = n in s.rodney_downs
+                pv = s.pending_verify
+                waiting_verify_here = pv is not None and pv.get("slot") == n
+                any_pending_verify = pv is not None
 
-        if waiting_verify:
-            time.sleep(0.3)
-            continue
-
-        result = _pi_slot_scan(s, expecting)
-        if result is None:
-            time.sleep(1.5)
-            continue
-
-        present = bool(result.get("present"))
-        cur = result.get("card") or {}
-        cur_code = (
-            f"{cur['rank']}{cur['suit'][0]}"
-            if cur.get("rank") and cur.get("suit") else ""
-        )
-        log.log(
-            f"[GUIDED/{mode}] Slot {expecting}: present={present} "
-            f"card={cur_code or '-'} "
-            f"conf={cur.get('confidence', 0.0):.2f} "
-            f"saw_empty={saw_empty}"
-        )
-
-        if not present:
-            if not saw_empty:
-                log.log(f"[GUIDED/{mode}] Slot {expecting}: empty — ready for new card")
-            saw_empty = True
-            stable_count = 0
-            best_card = None
-            settled = False
-            time.sleep(GUIDED_POLL_S)
-            continue
-
-        # Replace mode: the old card may still be in the slot at loop
-        # start. Accept the scan only after either (a) we saw present=
-        # false at some point, or (b) YOLO reads a DIFFERENT card code
-        # than the one that was in the slot before the replace started
-        # — user swapped the card faster than our polling.
-        if not saw_empty:
-            prev_code = gd.get("previous_cards", {}).get(expecting, "")
-            if cur_code and prev_code and cur_code != prev_code:
-                log.log(
-                    f"[GUIDED/{mode}] Slot {expecting}: card changed "
-                    f"{prev_code} → {cur_code} (no empty seen) — accepting"
-                )
-                saw_empty = True
-            else:
-                time.sleep(GUIDED_POLL_S)
-                continue
-
-        if not settled:
-            time.sleep(GUIDED_SETTLE_S)
-            settled = True
-            continue
-
-        stable_count += 1
-        card = result.get("card")
-        if card:
-            conf = float(card.get("confidence", 0.0))
-            if best_card is None or conf > float(best_card.get("confidence", 0.0)):
-                best_card = card
-            code = f"{card['rank']}{card['suit'][0]}"
-            if conf >= GUIDED_GOOD_CONF:
+            # Frontend correction arrived via /api/console/correct —
+            # rodney_downs[n] was filled out from under us.
+            if already_filled and not waiting_verify_here:
+                _pi_slot_led(s, n, "off")
+                st["committed"] = True
                 with s.table_lock:
-                    s.rodney_downs[expecting] = {
-                        "rank": card["rank"],
-                        "suit": card["suit"],
-                        "confidence": round(conf, 2),
-                    }
-                    s.pi_prev_slots[expecting] = code
-                    gd["index"] = idx + 1
+                    gd["remaining"] = _remaining()
                     s.table_state_version += 1
-                _stats_bump(s, "pi_auto")
-                _table_log_add(s, f"Slot {expecting} (replace): {code} (auto, {int(conf*100)}%)")
-                _pi_slot_led(s, expecting, "off")
-                if idx + 1 < len(slots):
-                    _pi_slot_led(s, slots[idx + 1], "on")
-                stable_count = 0
-                best_card = None
-                settled = False
-                saw_empty = not require_empty_first
+                progress = True
                 continue
 
-        if stable_count < GUIDED_STABLE_SCANS:
-            time.sleep(GUIDED_POLL_S)
-            continue
+            # This slot is currently parked in the verify modal.
+            if waiting_verify_here:
+                continue
 
-        if best_card is None:
-            log.log(
-                f"[GUIDED/{mode}] Slot {expecting}: present but nothing "
-                f"recognized after {GUIDED_STABLE_SCANS} scans — continuing"
+            result = _pi_slot_scan(s, n)
+            if result is None:
+                continue
+
+            present = bool(result.get("present"))
+            cur = result.get("card") or {}
+            cur_code = (
+                f"{cur['rank']}{cur['suit'][0]}"
+                if cur.get("rank") and cur.get("suit") else ""
             )
-            stable_count = 0
-            settled = False
-            time.sleep(GUIDED_POLL_S)
-            continue
+            log.log(
+                f"[GUIDED/{mode}] Slot {n}: present={present} "
+                f"card={cur_code or '-'} "
+                f"conf={cur.get('confidence', 0.0):.2f} "
+                f"saw_empty={st['saw_empty']}"
+            )
 
-        conf = float(best_card.get("confidence", 0.0))
-        guess = {
-            "rank": best_card["rank"],
-            "suit": best_card["suit"],
-            "confidence": round(conf, 2),
-        }
-        prompt = (
-            f"Slot {expecting} (replacement): low confidence "
-            f"({int(conf*100)}%). Confirm or correct."
-        )
+            if not present:
+                if not st["saw_empty"]:
+                    log.log(
+                        f"[GUIDED/{mode}] Slot {n}: empty — ready for new card"
+                    )
+                st["saw_empty"] = True
+                st["stable_count"] = 0
+                st["best_card"] = None
+                st["settle_until"] = None
+                st["settled"] = False
+                continue
 
-        with s.table_lock:
-            s.pending_verify = {
-                "slot": expecting,
-                "guess": guess,
-                "prompt": prompt,
-                "image_url": f"/api/table/slot_image/{expecting}",
+            # Replace mode: old card may still be in the slot at loop
+            # start. Accept the scan only after (a) present=false was
+            # seen, or (b) YOLO reads a DIFFERENT code than the previous
+            # — user swapped faster than our polling caught empty.
+            if not st["saw_empty"]:
+                prev_code = gd.get("previous_cards", {}).get(n, "")
+                if cur_code and prev_code and cur_code != prev_code:
+                    log.log(
+                        f"[GUIDED/{mode}] Slot {n}: card changed "
+                        f"{prev_code} → {cur_code} (no empty seen) — accepting"
+                    )
+                    st["saw_empty"] = True
+                else:
+                    continue
+
+            # First present=true after empty → start the settle clock and
+            # skip this scan. Subsequent passes wait until it expires.
+            if not st["settled"]:
+                if st["settle_until"] is None:
+                    st["settle_until"] = now + GUIDED_SETTLE_S
+                    continue
+                if now < st["settle_until"]:
+                    continue
+                st["settled"] = True
+                continue
+
+            st["stable_count"] += 1
+            card = result.get("card")
+            if card:
+                conf = float(card.get("confidence", 0.0))
+                if (st["best_card"] is None
+                        or conf > float(st["best_card"].get("confidence", 0.0))):
+                    st["best_card"] = card
+                code = f"{card['rank']}{card['suit'][0]}"
+                if conf >= GUIDED_GOOD_CONF:
+                    with s.table_lock:
+                        s.rodney_downs[n] = {
+                            "rank": card["rank"],
+                            "suit": card["suit"],
+                            "confidence": round(conf, 2),
+                        }
+                        s.pi_prev_slots[n] = code
+                        s.table_state_version += 1
+                    _stats_bump(s, "pi_auto")
+                    _table_log_add(
+                        s,
+                        f"Slot {n} (replace): {code} (auto, {int(conf*100)}%)",
+                    )
+                    _pi_slot_led(s, n, "off")
+                    st["committed"] = True
+                    with s.table_lock:
+                        gd["remaining"] = _remaining()
+                        s.table_state_version += 1
+                    progress = True
+                    continue
+
+            if st["stable_count"] < GUIDED_STABLE_SCANS:
+                continue
+
+            if st["best_card"] is None:
+                log.log(
+                    f"[GUIDED/{mode}] Slot {n}: present but nothing "
+                    f"recognized after {GUIDED_STABLE_SCANS} scans — continuing"
+                )
+                st["stable_count"] = 0
+                st["settle_until"] = None
+                st["settled"] = False
+                continue
+
+            # Low-confidence handoff to the verify modal. Only one slot
+            # can own pending_verify at a time; if another slot already
+            # does, wait our turn.
+            if any_pending_verify:
+                continue
+
+            best = st["best_card"]
+            conf = float(best.get("confidence", 0.0))
+            guess = {
+                "rank": best["rank"],
+                "suit": best["suit"],
+                "confidence": round(conf, 2),
             }
-            if guess["rank"]:
-                s.slot_pending[expecting] = dict(guess)
-            s.table_state_version += 1
-        _pi_slot_led(s, expecting, "blink")
+            prompt = (
+                f"Slot {n} (replacement): low confidence "
+                f"({int(conf*100)}%). Confirm or correct."
+            )
+            with s.table_lock:
+                s.pending_verify = {
+                    "slot": n,
+                    "guess": guess,
+                    "prompt": prompt,
+                    "image_url": f"/api/table/slot_image/{n}",
+                }
+                if guess["rank"]:
+                    s.slot_pending[n] = dict(guess)
+                s.table_state_version += 1
+            _pi_slot_led(s, n, "blink")
+
+        if not progress:
+            time.sleep(GUIDED_POLL_S)
 
 
 def _game_has_draw_phase(ge) -> bool:
