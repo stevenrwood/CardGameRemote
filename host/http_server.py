@@ -967,7 +967,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if (s.console_total_up_rounds > 0
                     and round_num >= s.console_total_up_rounds):
                 s.console_scan_phase = "idle"
-                log.log(f"[CONSOLE] Final up round ({round_num}) confirmed — idle until End Hand")
+                # Message the dealer on what comes next — trailing-
+                # down games (7 Card Stud / FTQ) still owe a 7th
+                # street + one more betting round before hand_over,
+                # so "click End Hand" would skip those steps.
+                has_trailing = bool(_trailing_down_slots(ge))
+                if has_trailing:
+                    log.log(
+                        f"[CONSOLE] Final up round ({round_num}) confirmed — "
+                        f"click Pot is right to start 7th-street trailing deal"
+                    )
+                else:
+                    log.log(
+                        f"[CONSOLE] Final up round ({round_num}) confirmed — "
+                        f"click Pot is right to advance to End Hand"
+                    )
             else:
                 s.console_scan_phase = "confirmed"
                 log.log(f"[CONSOLE] Cards confirmed for up round {round_num}")
