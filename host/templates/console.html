@@ -34,7 +34,11 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
 .zone-card{flex:1;color:#4caf50}
 .zone-empty{color:#555}
 .zone-dup{color:#e53935 !important}
-.zone-arrow{color:#555;font-size:1.2em}
+.zone-challenge{margin-left:auto}
+.zone-challenge button{padding:6px 12px;font-size:.9em;margin-left:4px;
+  background:#0f3460;color:#fff;border-radius:6px}
+.zone-challenge button:disabled{opacity:.35;cursor:not-allowed}
+.zone-arrow{color:#555;font-size:1.2em;margin-left:6px}
 .modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:100;
   overflow-y:auto;padding:16px}
 .modal-inner{background:#16213e;border-radius:12px;padding:14px;max-width:400px;margin:10px auto}
@@ -76,16 +80,11 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
     <button class="action-btn" id="action-btn" onclick="onAction()" disabled>—</button>
   </div>
 
-  <div id="challenge-section" style="display:none;margin:8px 0">
-    <div id="challenge-pot"
-         style="background:#3d2c5a;color:#f3e9ff;padding:6px 10px;
-                border-radius:6px;text-align:center;font-weight:600"></div>
-    <div id="challenge-board"
-         style="margin-top:6px;display:grid;grid-template-columns:1fr auto auto;
-                gap:4px 12px;font-size:.9em"></div>
-  </div>
+  <div id="challenge-pot" style="display:none;background:#3d2c5a;
+       color:#f3e9ff;padding:8px 12px;border-radius:8px;text-align:center;
+       font-weight:600;font-size:1.05em;margin:8px 0"></div>
 
-  <h2>Up cards seen</h2>
+  <h2 id="players-heading">Up cards seen</h2>
   <div id="zone-cards"></div>
 </div>
 
@@ -208,7 +207,13 @@ function buildZoneRows(){
     var name=document.createElement('span');name.className='zone-name';name.textContent=n;
     var card=document.createElement('span');card.className='zone-card zone-empty';card.id='zc-'+n;card.textContent='—';
     var arr=document.createElement('span');arr.className='zone-arrow';arr.textContent='›';
-    div.appendChild(name);div.appendChild(card);div.appendChild(arr);
+    // Challenge-vote cell — populated per refresh with Pass/Out
+    // buttons when console_state == "challenge_vote". Sits inside
+    // the zone-row so dealer sees it right where the player name
+    // already is.
+    var ch=document.createElement('span');ch.className='zone-challenge';ch.id='zch-'+n;
+    ch.style.display='none';
+    div.appendChild(name);div.appendChild(card);div.appendChild(ch);div.appendChild(arr);
     zc.appendChild(div);
   });
 }
@@ -252,73 +257,74 @@ function render(){
     cs.className='zone-card'+(txt?'':' zone-empty')+(zi.duplicate?' zone-dup':'');
   });
 
-  // Challenge-game section: pot banner + per-player pass/out scoreboard.
-  var chSec=document.getElementById('challenge-section');
+  // Challenge-game UI: big pot banner at top + per-player Pass/Out
+  // buttons rendered inline inside each zone-row.
+  var pot=document.getElementById('challenge-pot');
+  var heading=document.getElementById('players-heading');
   var ch=ST.challenge;
   if(ch){
     var dollars=Math.floor((ch.pot_cents||0)/100);
     var cents=(ch.pot_cents||0)%100;
     var centsStr=(cents<10?'0':'')+cents;
     var shuffleTxt=(ch.shuffle_count>0)?(' (shuffle #'+ch.shuffle_count+')'):'';
-    document.getElementById('challenge-pot').textContent=
-      'Pot: $'+dollars+'.'+centsStr
+    pot.textContent='Pot: $'+dollars+'.'+centsStr
       +' — Round '+((ch.round_index||0)+1)+' of 3'+shuffleTxt;
-    var board=document.getElementById('challenge-board');
-    board.innerHTML='';
-    (ST.active_players||[]).forEach(function(n){
-      var pp=(ch.per_player||{})[n]||{};
-      var nameCell=document.createElement('div');
-      nameCell.textContent=n;
-      nameCell.style.fontWeight='600';
-      var btnCell=document.createElement('div');
-      btnCell.style.display='flex';
-      btnCell.style.gap='4px';
-      if(pp.went_out){
-        var slotsTxt=(pp.out_slots||[]).length
-          ? (' slots '+(pp.out_slots||[]).join(',')) : '';
-        var outTxt=document.createElement('span');
-        outTxt.textContent='OUT r'+((pp.out_round||0)+1)+slotsTxt;
-        outTxt.style.color='#a5d6a7';
-        outTxt.style.fontWeight='700';
-        btnCell.appendChild(outTxt);
-      } else {
-        var passBtn=document.createElement('button');
-        passBtn.textContent='Pass';
-        passBtn.className='sml-btn';
-        if(pp.passed) passBtn.style.background='#a5d6a7';
-        passBtn.onclick=(function(nm){return function(){
-          api('/api/console/challenge_vote',
-              {player:nm, vote: pp.passed ? 'clear' : 'pass'})
-            .then(refresh);
-        };})(n);
-        var outBtn=document.createElement('button');
-        outBtn.textContent='Out';
-        outBtn.className='sml-btn';
-        // Dealer can't click Out for Rodney — that needs slot selection
-        // on Rodney's /table.
-        if(n==='Rodney') outBtn.disabled=true;
-        outBtn.onclick=(function(nm){return function(){
-          api('/api/console/challenge_vote',{player:nm, vote:'out'})
-            .then(function(d){
-              if(d && !d.ok && d.error) alert(d.error);
-              refresh();
-            });
-        };})(n);
-        btnCell.appendChild(passBtn);
-        btnCell.appendChild(outBtn);
-      }
-      var statusCell=document.createElement('div');
-      statusCell.style.color='#888';
-      if(!pp.went_out && pp.passed) statusCell.textContent='passed';
-      else statusCell.textContent='';
-      board.appendChild(nameCell);
-      board.appendChild(btnCell);
-      board.appendChild(statusCell);
-    });
-    chSec.style.display='block';
+    pot.style.display='block';
+    heading.textContent='Challenge — tap Pass or Out per player';
   } else {
-    chSec.style.display='none';
+    pot.style.display='none';
+    heading.textContent='Up cards seen';
   }
+  (ST.active_players||[]).forEach(function(n){
+    var chCell=document.getElementById('zch-'+n);
+    if(!chCell) return;
+    if(!ch){
+      chCell.style.display='none';
+      chCell.innerHTML='';
+      return;
+    }
+    var pp=(ch.per_player||{})[n]||{};
+    chCell.innerHTML='';
+    chCell.style.display='inline-flex';
+    chCell.style.gap='4px';
+    chCell.style.alignItems='center';
+    chCell.style.marginLeft='8px';
+    if(pp.went_out){
+      var slotsTxt=(pp.out_slots||[]).length
+        ? (' '+(pp.out_slots||[]).join(',')) : '';
+      var outTxt=document.createElement('span');
+      outTxt.textContent='OUT r'+((pp.out_round||0)+1)+slotsTxt;
+      outTxt.style.color='#a5d6a7';
+      outTxt.style.fontWeight='700';
+      chCell.appendChild(outTxt);
+      return;
+    }
+    var passBtn=document.createElement('button');
+    passBtn.textContent=pp.passed?'Passed ✓':'Pass';
+    passBtn.className='sml-btn';
+    if(pp.passed) passBtn.style.background='#2e7d32';
+    passBtn.onclick=(function(nm,currentlyPassed){return function(ev){
+      ev.stopPropagation();
+      api('/api/console/challenge_vote',
+          {player:nm, vote: currentlyPassed ? 'clear' : 'pass'})
+        .then(refresh);
+    };})(n, !!pp.passed);
+    var outBtn=document.createElement('button');
+    outBtn.textContent='Out';
+    outBtn.className='sml-btn';
+    outBtn.style.background='#b71c1c';
+    if(n==='Rodney') outBtn.disabled=true;
+    outBtn.onclick=(function(nm){return function(ev){
+      ev.stopPropagation();
+      api('/api/console/challenge_vote',{player:nm, vote:'out'})
+        .then(function(d){
+          if(d && !d.ok && d.error) alert(d.error);
+          refresh();
+        });
+    };})(n);
+    chCell.appendChild(passBtn);
+    chCell.appendChild(outBtn);
+  });
 }
 
 function populateSetupModal(){

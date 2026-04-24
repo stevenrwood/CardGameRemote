@@ -2421,16 +2421,25 @@ def _start_next_challenge_round(s):
     if s.challenge_round_index == 1:
         _start_guided_deal_range(s, [4, 5])
     elif s.challenge_round_index == 2:
+        # Round 3: slots 4 and 5 get physically replaced. Save the old
+        # cards as rodney_overflow (for the resolve UI), then pop them
+        # from rodney_downs + pi_prev_slots so the guided-replace loop
+        # doesn't short-circuit with "already filled" on the scan.
         prev = {}
         overflow = []
-        for slot in (4, 5):
-            code = s.pi_prev_slots.get(slot, "")
-            if code:
-                prev[slot] = code
-            card = s.rodney_downs.get(slot)
-            if card:
-                overflow.append({"slot": slot, "card": dict(card)})
-        s.rodney_overflow = overflow
+        with s.table_lock:
+            for slot in (4, 5):
+                code = s.pi_prev_slots.get(slot, "")
+                if code:
+                    prev[slot] = code
+                card = s.rodney_downs.get(slot)
+                if card:
+                    overflow.append({"slot": slot, "card": dict(card)})
+                s.rodney_downs.pop(slot, None)
+                s.pi_prev_slots.pop(slot, None)
+                s.slot_pending.pop(slot, None)
+            s.rodney_overflow = overflow
+            s.table_state_version += 1
         _start_guided_replace(s, [4, 5], prev)
 
 
