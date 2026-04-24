@@ -66,8 +66,16 @@ from overhead_test import (
     _start_collect_mode,
     _start_deal_mode,
     _start_guided_deal,
+    _start_guided_deal_range,
     _start_guided_replace,
     _start_guided_trailing_deal,
+    _game_is_challenge,
+    _fmt_money,
+    _log_and_speak,
+    _apply_challenge_vote,
+    _handle_challenge_winner,
+    _begin_challenge_vote,
+    _challenge_required_cards,
     _stats_bump,
     _stop_collect_mode,
     _stop_deal_mode,
@@ -484,22 +492,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._r(200, "application/json", json.dumps(resp))
 
         elif p == "/api/table/mark":
-            # Rodney toggles a slot's "to replace" mark during betting.
+            # Rodney toggles a slot's "to replace" mark during betting,
+            # or a "to go out with" mark during a Challenge vote.
             # Body: {"slot": N, "marked": true/false}
             try:
                 slot_num = int(data.get("slot", 0))
             except (TypeError, ValueError):
                 slot_num = 0
             marked = bool(data.get("marked", False))
+            ge = s.game_engine
+            in_challenge_vote = (
+                s.console_state == "challenge_vote"
+                and _game_is_challenge(ge)
+                and not s.rodney_out_slots
+            )
             if slot_num <= 0 or slot_num not in s.rodney_downs:
                 self._r(400, "application/json",
                         '{"ok":false,"error":"invalid slot"}')
-            elif s.rodney_drew_this_hand:
+            elif (not in_challenge_vote) and s.rodney_drew_this_hand:
                 self._r(400, "application/json",
                         '{"ok":false,"error":"draw already taken this hand"}')
             else:
-                ge = s.game_engine
-                max_marks = _max_draw_for_game(ge, s.rodney_draws_done)
+                if in_challenge_vote:
+                    max_marks = _challenge_required_cards(s)
+                else:
+                    max_marks = _max_draw_for_game(ge, s.rodney_draws_done)
                 with s.table_lock:
                     if marked:
                         if len(s.rodney_marked_slots) >= max_marks and \
@@ -564,6 +581,85 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._r(200, "application/json", json.dumps({
                     "ok": True, "slots": slots_to_replace,
                 }))
+
+        elif p == "/api/table/pass":
+            # Rodney's Pass button during a Challenge vote. Clears any
+            # in-progress marks then records the pass via the shared
+            # _apply_challenge_vote path.
+            from speech_recognition_module import PassCommand
+            ge = s.game_engine
+            if (s.console_state != "challenge_vote"
+                    or not _game_is_challenge(ge)):
+                self._r(400, "application/json",
+                        '{"ok":false,"error":"not in challenge vote"}')
+            elif (not s.challenge_turn_order
+                  or s.challenge_current_idx >= len(s.challenge_turn_order)
+                  or s.challenge_turn_order[s.challenge_current_idx] != "Rodney"):
+                self._r(400, "application/json",
+                        '{"ok":false,"error":"not Rodney\'s turn"}')
+            else:
+                cmd = PassCommand(player="Rodney", raw_text="[button]")
+                _apply_challenge_vote(s, "Rodney", cmd)
+                self._r(200, "application/json", '{"ok":true}')
+
+        elif p == "/api/table/go_out":
+            # Rodney's Go Out button. Round 1-2: validate marks match
+            # required count; round 3: no count requirement.
+            from speech_recognition_module import GoOutCommand
+            ge = s.game_engine
+            if (s.console_state != "challenge_vote"
+                    or not _game_is_challenge(ge)):
+                self._r(400, "application/json",
+                        '{"ok":false,"error":"not in challenge vote"}')
+            elif (not s.challenge_turn_order
+                  or s.challenge_current_idx >= len(s.challenge_turn_order)
+                  or s.challenge_turn_order[s.challenge_current_idx] != "Rodney"):
+                self._r(400, "application/json",
+                        '{"ok":false,"error":"not Rodney\'s turn"}')
+            else:
+                round_idx = s.challenge_round_index or 0
+                if round_idx != 2:
+                    needed = _challenge_required_cards(s)
+                    marks = sorted(s.rodney_marked_slots)
+                    if len(marks) != needed:
+                        self._r(400, "application/json", json.dumps({
+                            "ok": False,
+                            "error": f"select exactly {needed} cards",
+                        }))
+                        return
+                cmd = GoOutCommand(player="Rodney", raw_text="[button]")
+                _apply_challenge_vote(s, "Rodney", cmd)
+                self._r(200, "application/json", '{"ok":true}')
+
+        elif p == "/api/console/reshuffled":
+            # Dealer clicks Reshuffled after round 3 ended with 0 out.
+            if s.console_state != "reshuffle":
+                self._r(400, "application/json",
+                        '{"ok":false,"error":"not in reshuffle state"}')
+            else:
+                with s.table_lock:
+                    s.rodney_downs = {}
+                    s.rodney_marked_slots = set()
+                    s.rodney_out_slots = []
+                    s.rodney_overflow = []
+                    s.pi_prev_slots = {}
+                    s.slot_pending = {}
+                    s.slot_empty = {}
+                    s.pending_verify = None
+                    s.challenge_round_index = 0
+                    s.challenge_shuffle_count += 1
+                    for st in s.challenge_per_player.values():
+                        st["passes_this_round"] = 0
+                    s.table_state_version += 1
+                ante_cents = 50 * len(s.console_active_players)
+                s.pot_cents += ante_cents
+                _log_and_speak(s,
+                    f"Reshuffle #{s.challenge_shuffle_count}. "
+                    f"Round 1 ante: {_fmt_money(ante_cents)}. "
+                    f"Pot is now {_fmt_money(s.pot_cents)}.")
+                s.console_state = "dealing"
+                _start_guided_deal(s, 3)
+                self._r(200, "application/json", '{"ok":true}')
 
         # --- Console (dealer phone UI) ---
 
@@ -648,6 +744,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 action_label = ""
                 action_endpoint = ""
                 action_enabled = False
+            elif s.console_state == "challenge_vote":
+                cur = None
+                if (s.challenge_turn_order
+                        and 0 <= s.challenge_current_idx
+                        < len(s.challenge_turn_order)):
+                    cur = s.challenge_turn_order[s.challenge_current_idx]
+                lap = (s.challenge_vote_lap or 0) + 1
+                phase_label = (
+                    f"Challenge vote — {cur}'s turn (lap {lap} of 2)"
+                    if cur else "Challenge vote"
+                )
+                action_label = ""
+                action_endpoint = ""
+                action_enabled = False
+            elif s.console_state == "challenge_resolve":
+                outs = [nm for nm, st in s.challenge_per_player.items()
+                        if st.get("went_out")]
+                phase_label = (
+                    f"Challenge resolve — say \"{{name}} wins\" "
+                    f"({', '.join(outs)})"
+                )
+                action_label = ""
+                action_endpoint = ""
+                action_enabled = False
+            elif s.console_state == "reshuffle":
+                phase_label = "Collect + shuffle + cut, then Reshuffled"
+                action_label = "Reshuffled"
+                action_endpoint = "/api/console/reshuffled"
+                action_enabled = True
             elif s.console_state == "hand_over":
                 phase_label = "Hand over"
                 action_label = "New Hand"
@@ -681,6 +806,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "action_endpoint": action_endpoint,
                 "action_enabled": action_enabled,
                 "current_game": ge.current_game.name if ge.current_game else "",
+                "challenge": (
+                    {
+                        "round_index": s.challenge_round_index,
+                        "shuffle_count": s.challenge_shuffle_count,
+                        "pot_cents": s.pot_cents,
+                        "vote_lap": s.challenge_vote_lap,
+                        "current_player": (
+                            s.challenge_turn_order[s.challenge_current_idx]
+                            if (s.console_state == "challenge_vote"
+                                and s.challenge_turn_order
+                                and 0 <= s.challenge_current_idx
+                                < len(s.challenge_turn_order))
+                            else None
+                        ),
+                        "per_player": {
+                            nm: {
+                                "passes_this_round": st["passes_this_round"],
+                                "went_out": st["went_out"],
+                                "out_round": st["out_round"],
+                                "out_slots": list(st["out_slots"]),
+                            } for nm, st in s.challenge_per_player.items()
+                        },
+                    }
+                    if (_game_is_challenge(ge)
+                        and s.challenge_round_index is not None)
+                    else None
+                ),
             }))
 
         elif p == "/api/console/players":
@@ -871,6 +1023,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s._missing_speech_count = {}
                     s._empty_scan_count = {}
                     s.table_state_version += 1
+                # Challenge-game per-hand reset. pot_cents is NOT reset —
+                # it accumulates across hands until a 1-out-all-pass award.
+                if _game_is_challenge(ge):
+                    s.challenge_round_index = 0
+                    s.challenge_shuffle_count = 0
+                    s.challenge_vote_lap = 0
+                    s.challenge_current_idx = 0
+                    s.challenge_turn_order = []
+                    s.challenge_per_player = {
+                        nm: {"passes_this_round": 0, "went_out": False,
+                             "out_round": None, "out_slots": []}
+                        for nm in s.console_active_players
+                    }
+                    s.rodney_out_slots = []
+                    s.rodney_overflow = []
+                    ante_cents = 50 * len(s.console_active_players)
+                    s.pot_cents += ante_cents
+                    _log_and_speak(s,
+                        f"Round 1 ante: {_fmt_money(ante_cents)}. "
+                        f"Pot is now {_fmt_money(s.pot_cents)}.")
+                else:
+                    s.challenge_round_index = None
                 # Let the per-game class wire up its own per-hand state
                 # (freeze counters, local flags) now that common state is
                 # reset and the engine knows the current game.

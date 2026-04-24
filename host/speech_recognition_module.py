@@ -187,6 +187,27 @@ class FoldCommand:
     confidence: float
 
 @dataclass
+class PassCommand:
+    """'Pass' / '{player}, pass' — Challenge-game vote. player=None means
+    'attribute to whoever is currently up to vote'."""
+    player: str | None
+    raw_text: str
+
+@dataclass
+class GoOutCommand:
+    """'I'm out' / '{player}, is out' — Challenge-game go-out declaration.
+    player=None means 'attribute to whoever is currently up to vote'."""
+    player: str | None
+    raw_text: str
+
+@dataclass
+class ChallengeWinnerCommand:
+    """'{player} wins' — dealer announces the winner after a 2+ compare.
+    Always has an explicit player name."""
+    player: str
+    raw_text: str
+
+@dataclass
 class UnrecognizedCommand:
     raw_text: str
 
@@ -344,6 +365,50 @@ def parse_speech(text):
     # "Pot is right" (sometimes mis-heard as "pot is writes" etc.)
     if re.fullmatch(r"(the\s+)?pot[\s,]*is\s+(right|write|ripe)[.!]?", text_lower):
         return [PotIsRightCommand(raw_text=text)]
+
+    # --- Challenge-game votes -----------------------------------------
+
+    # Standalone "pass" / "I pass" — implicit attribution.
+    if re.fullmatch(r"(i\s+pass|pass|passing)[.!]?", text_lower):
+        return [PassCommand(player=None, raw_text=text)]
+
+    # "{player}, pass" / "{player} passes" / "{player} is passing"
+    pass_match = re.match(
+        r"^([a-z]+)[\s,]+(pass|passes|passing|is\s+passing)\b[.!]?",
+        text_lower,
+    )
+    if pass_match:
+        p = _canonical_player(pass_match.group(1))
+        if p is not None:
+            return [PassCommand(player=p, raw_text=text)]
+
+    # Standalone "I'm out" / "going" / "going out" / etc.
+    if re.fullmatch(
+        r"(i'?m\s+(out|going(\s+out)?)|going(\s+out)?|out)[.!]?",
+        text_lower,
+    ):
+        return [GoOutCommand(player=None, raw_text=text)]
+
+    # "{player} is out" / "{player} goes out" / "{player} is going"
+    out_match = re.match(
+        r"^([a-z]+)[\s,]+(is\s+out|goes\s+out|is\s+going(\s+out)?"
+        r"|going\s+out)\b[.!]?",
+        text_lower,
+    )
+    if out_match:
+        p = _canonical_player(out_match.group(1))
+        if p is not None:
+            return [GoOutCommand(player=p, raw_text=text)]
+
+    # "{player} wins" / "{player} takes it" / "{player} wins challenge"
+    winner_match = re.match(
+        r"^([a-z]+)[\s,]+(wins(\s+challenge)?|takes\s+it)\b[.!]?",
+        text_lower,
+    )
+    if winner_match:
+        p = _canonical_player(winner_match.group(1))
+        if p is not None:
+            return [ChallengeWinnerCommand(player=p, raw_text=text)]
 
     # "Same game again" / "Let's run that back" / "Run that back"
     if re.fullmatch(

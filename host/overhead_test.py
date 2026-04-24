@@ -906,6 +906,25 @@ class AppState:
         # Created in /api/console/deal from the template's class_name and
         # cleared on end_hand. None when idle / between hands.
         self.current_game_impl = None
+        # ---- Challenge-game state (High, Low, High etc.) ----
+        # Persists across hands; only resets on the 1-out-all-pass award.
+        self.pot_cents: int = 0
+        # None when the current hand isn't a Challenge variant. Otherwise
+        # 0/1/2 for rounds 1/2/3. Resets to 0 on reshuffle.
+        self.challenge_round_index = None
+        self.challenge_shuffle_count = 0
+        self.challenge_vote_lap = 0
+        self.challenge_turn_order: list[str] = []
+        self.challenge_current_idx = 0
+        # {name: {"passes_this_round": int, "went_out": bool,
+        #         "out_round": int|None, "out_slots": list[int]}}
+        self.challenge_per_player: dict[str, dict] = {}
+        # Rodney's committed go-out slots (empty until he commits).
+        self.rodney_out_slots: list[int] = []
+        # Round 3 overflow: the two cards displaced from slots 4/5 sit
+        # face-down in front of Rodney off-scanner. We log them so the
+        # resolve UI can surface what was there.
+        self.rodney_overflow: list[dict] = []
 
 _state = None
 
@@ -1110,23 +1129,69 @@ def _build_table_state(s):
             # long as more DRAW phases remain and the current draw has not
             # been taken yet.
             "can_mark": (
-                _game_has_draw_phase(ge)
-                and s.rodney_draws_done < _total_draw_phases(ge)
-                and not s.rodney_drew_this_hand
-                and s.console_state in ("dealing", "betting", "draw")
+                (
+                    _game_has_draw_phase(ge)
+                    and s.rodney_draws_done < _total_draw_phases(ge)
+                    and not s.rodney_drew_this_hand
+                    and s.console_state in ("dealing", "betting", "draw")
+                )
+                or _challenge_can_mark(s, ge)
             ),
             "can_request": (
                 s.console_state == "draw"
                 and s.rodney_draws_done < _total_draw_phases(ge)
                 and not s.rodney_drew_this_hand
             ),
-            "max_marks": _max_draw_for_game(ge, s.rodney_draws_done),
+            "max_marks": (
+                _challenge_required_cards(s)
+                if _challenge_can_mark(s, ge)
+                else _max_draw_for_game(ge, s.rodney_draws_done)
+            ),
             "marked_slots": sorted(s.rodney_marked_slots),
             "drew_this_hand": s.rodney_drew_this_hand,
             "draws_done": s.rodney_draws_done,
             "total_draws": _total_draw_phases(ge),
         },
     }
+    # Challenge-game block — populated only for Challenge variants.
+    if _game_is_challenge(ge) and s.challenge_round_index is not None:
+        cur_player = None
+        if (s.console_state == "challenge_vote"
+                and s.challenge_turn_order
+                and 0 <= s.challenge_current_idx < len(s.challenge_turn_order)):
+            cur_player = s.challenge_turn_order[s.challenge_current_idx]
+        round_label = None
+        try:
+            gname = ge.current_game.name if ge.current_game else ""
+            labels = {
+                "High, Low, High": ["High", "Low", "High"],
+                "Low, High, Low": ["Low", "High", "Low"],
+                "Low, Low, High": ["Low", "Low", "High"],
+            }.get(gname)
+            if labels and s.challenge_round_index < len(labels):
+                round_label = labels[s.challenge_round_index]
+        except Exception:
+            pass
+        doc["challenge"] = {
+            "round_index": s.challenge_round_index,
+            "round_label": round_label,
+            "required_cards": _challenge_required_cards(s),
+            "shuffle_count": s.challenge_shuffle_count,
+            "pot_cents": s.pot_cents,
+            "vote_lap": s.challenge_vote_lap,
+            "current_player": cur_player,
+            "turn_order": list(s.challenge_turn_order),
+            "per_player": {
+                nm: {
+                    "passes_this_round": st["passes_this_round"],
+                    "went_out": st["went_out"],
+                    "out_round": st["out_round"],
+                    "out_slots": list(st["out_slots"]),
+                } for nm, st in s.challenge_per_player.items()
+            },
+            "rodney_out_slots": list(s.rodney_out_slots),
+            "rodney_overflow": list(s.rodney_overflow),
+        }
     # Per-game decorations: the game class adds its own fields to the
     # document (7/27 injects values_7_27 per player and the flip-choice
     # prompt; base class / stud / draw are no-ops).
@@ -1565,7 +1630,11 @@ def _guided_deal_loop(s):
                     for ph in ge.current_game.phases
                 )
             )
-            if (s.console_state == "dealing"
+            if s.console_state == "dealing" and _game_is_challenge(ge):
+                # Challenge games (High Low High etc.): skip betting, go
+                # straight to the vote phase.
+                _begin_challenge_vote(s)
+            elif (s.console_state == "dealing"
                     and s.console_total_up_rounds == 0
                     and not first_phase_has_up
                     and not has_hit_round_game):
@@ -1820,6 +1889,35 @@ def _start_guided_trailing_deal(s, slots: list[int]):
     t.start()
 
 
+def _start_guided_deal_range(s, slots: list[int]):
+    """Challenge round 2: deal new cards into an explicit slot list.
+    Slots start empty (no require_empty_first). Completion transitions to
+    challenge_vote for the next round of voting."""
+    if s.guided_deal is not None:
+        return
+    ordered = sorted(set(int(x) for x in slots if isinstance(x, int) or str(x).isdigit()))
+    if not ordered:
+        return
+    with s.table_lock:
+        s.guided_deal = {"slots": ordered, "index": 0, "mode": "challenge_deal"}
+        s.console_state = "dealing"
+        s.table_state_version += 1
+    _pi_flash(s, True)
+    t = Thread(target=_guided_replace_loop, args=(s,), daemon=True)
+    s.guided_deal_thread = t
+    t.start()
+
+
+def _begin_challenge_vote(s):
+    """Enter the challenge_vote state. Seeds turn_order, resets laps, logs."""
+    s.console_state = "challenge_vote"
+    _reset_round_passes(s)
+    round_label = (s.challenge_round_index or 0) + 1
+    log.log(f"[CHALLENGE] Round {round_label} vote begins "
+            f"(turn_order={s.challenge_turn_order})")
+    _bump_table_version(s)
+
+
 def _guided_replace_loop(s):
     """Variant of _guided_deal_loop driven by an explicit slot list.
     All selected slots light up simultaneously; replacements are scanned
@@ -1880,10 +1978,15 @@ def _guided_replace_loop(s):
             for n in slots:
                 _pi_slot_led(s, n, "off")
             log.log(f"[GUIDED/{mode}] Complete")
+            ge = s.game_engine
+            is_challenge = _game_is_challenge(ge)
             with s.table_lock:
                 s.guided_deal = None
                 s.table_state_version += 1
-                if mode == "trailing":
+                if mode == "challenge_deal":
+                    # Challenge round 2 deal done — enter vote.
+                    pass  # call below, after lock released
+                elif mode == "trailing":
                     # 7CS/FTQ 7th street done — one more betting round before
                     # hand_over. console_trailing_done tells next_round to
                     # skip the trailing branch second time through.
@@ -1898,17 +2001,26 @@ def _guided_replace_loop(s):
                     # card is on the table.
                     _announce_trailing_done(s)
                 elif s.console_state == "replacing":
-                    # Record this draw as done. Multi-draw games (3 Toed
-                    # Pete) use this to know whether another DRAW phase
-                    # follows; post-draw betting round number is the
-                    # count of draws completed so far + 1.
-                    s.rodney_draws_done += 1
-                    s.console_state = "betting"
-                    s.console_betting_round = s.rodney_draws_done + 1
-                    log.log(
-                        f"[CONSOLE] Draw {s.rodney_draws_done} replacement "
-                        f"done → betting round {s.console_betting_round}"
-                    )
+                    if is_challenge:
+                        # Challenge round 3 replace done — enter final vote.
+                        pass  # call below, after lock released
+                    else:
+                        # Record this draw as done. Multi-draw games (3 Toed
+                        # Pete) use this to know whether another DRAW phase
+                        # follows; post-draw betting round number is the
+                        # count of draws completed so far + 1.
+                        s.rodney_draws_done += 1
+                        s.console_state = "betting"
+                        s.console_betting_round = s.rodney_draws_done + 1
+                        log.log(
+                            f"[CONSOLE] Draw {s.rodney_draws_done} replacement "
+                            f"done → betting round {s.console_betting_round}"
+                        )
+            # Challenge transitions call _begin_challenge_vote outside the
+            # lock (it takes the lock internally via _bump_table_version).
+            if mode == "challenge_deal" or (
+                    mode == "replace" and is_challenge):
+                _begin_challenge_vote(s)
             return
 
         progress = False
@@ -2127,6 +2239,248 @@ def _max_draw_for_game(ge, draws_done: int = 0) -> int:
     except Exception:
         pass
     return 0
+
+
+def _game_is_challenge(ge) -> bool:
+    """True if the current game has at least one CHALLENGE phase."""
+    try:
+        from game_engine import PhaseType
+        if ge.current_game is None:
+            return False
+        return any(ph.type == PhaseType.CHALLENGE for ph in ge.current_game.phases)
+    except Exception:
+        return False
+
+
+def _challenge_can_mark(s, ge) -> bool:
+    """True when Rodney can mark cards for a Go Out. Only during the
+    challenge vote, when it's his turn, before he's committed, and only
+    in rounds 1-2 (round 3 has no selection — Go Out takes all 7)."""
+    if not _game_is_challenge(ge):
+        return False
+    if s.console_state != "challenge_vote":
+        return False
+    if s.rodney_out_slots:
+        return False
+    if (s.challenge_round_index or 0) >= 2:
+        return False
+    if (not s.challenge_turn_order
+            or s.challenge_current_idx >= len(s.challenge_turn_order)):
+        return False
+    return s.challenge_turn_order[s.challenge_current_idx] == "Rodney"
+
+
+def _challenge_required_cards(s) -> int:
+    """How many cards Rodney must select to Go Out in the current round.
+    Returns 2/3/5 based on the challenge_round_index, by looking at the
+    game engine's CHALLENGE phases in order. 0 if unavailable."""
+    ge = s.game_engine
+    try:
+        from game_engine import PhaseType
+        if ge.current_game is None or s.challenge_round_index is None:
+            return 0
+        idx = 0
+        for ph in ge.current_game.phases:
+            if ph.type == PhaseType.CHALLENGE:
+                if idx == s.challenge_round_index:
+                    return int(getattr(ph, "select_cards", 0) or 0)
+                idx += 1
+    except Exception:
+        pass
+    return 0
+
+
+def _fmt_money(cents: int) -> str:
+    """$1.50 from 150 cents."""
+    dollars = cents // 100
+    rem = cents % 100
+    return f"${dollars}.{rem:02d}"
+
+
+def _log_and_speak(s, msg: str):
+    """Log a [CHALLENGE] line and say the same string."""
+    log.log(f"[CHALLENGE] {msg}")
+    try:
+        speech.say(msg)
+    except Exception:
+        pass
+
+
+def _bump_table_version(s):
+    with s.table_lock:
+        s.table_state_version += 1
+
+
+def _reset_round_passes(s):
+    """Start-of-round reset: clear passes, rebuild turn order excluding
+    already-out players, rewind lap and idx."""
+    for st in s.challenge_per_player.values():
+        st["passes_this_round"] = 0
+    dealer = None
+    try:
+        dealer = s.game_engine.get_dealer().name
+    except Exception:
+        pass
+    active = list(s.console_active_players)
+    if dealer in active:
+        d_idx = active.index(dealer)
+        rotated = active[d_idx + 1:] + active[:d_idx + 1]
+        # Exclude the dealer from the challenge order? No — dealer votes last.
+        # Rotation above already puts dealer at the end.
+    else:
+        rotated = active
+    s.challenge_turn_order = [nm for nm in rotated
+                              if not s.challenge_per_player.get(nm, {}).get("went_out")]
+    s.challenge_vote_lap = 0
+    s.challenge_current_idx = 0
+
+
+def _apply_challenge_vote(s, name: str, cmd):
+    """Apply a pass/go-out vote for the named player."""
+    st = s.challenge_per_player.get(name)
+    if st is None or st["went_out"]:
+        log.log(f"[CHALLENGE] {name} vote ignored (already out or unknown)")
+        return
+    # Import at use site — PassCommand/GoOutCommand live in speech module
+    # which may not yet be importable during slice 1 smoke tests.
+    try:
+        from speech_recognition_module import PassCommand, GoOutCommand
+    except Exception:
+        PassCommand = GoOutCommand = None
+    is_pass = (PassCommand is not None and isinstance(cmd, PassCommand))
+    is_out = (GoOutCommand is not None and isinstance(cmd, GoOutCommand))
+    if is_pass:
+        st["passes_this_round"] += 1
+        if name == "Rodney":
+            with s.table_lock:
+                s.rodney_marked_slots = set()
+        _log_and_speak(s, f"{name} passes")
+    elif is_out:
+        round_idx = s.challenge_round_index
+        if name == "Rodney" and round_idx != 2:
+            required = _challenge_required_cards(s)
+            marks = sorted(s.rodney_marked_slots)
+            if len(marks) != required:
+                _log_and_speak(s,
+                    f"Rodney, select exactly {required} cards before going out")
+                return
+            st["out_slots"] = marks
+            s.rodney_out_slots = list(marks)
+            for slot in marks:
+                _pi_slot_led(s, slot, "on")
+            with s.table_lock:
+                s.rodney_marked_slots = set()
+        elif name == "Rodney" and round_idx == 2:
+            # Round 3: all 7 cards. Light LEDs on the 5 physical slots;
+            # the other 2 are off-scanner in front of Rodney.
+            slots = [1, 2, 3, 4, 5]
+            st["out_slots"] = slots
+            s.rodney_out_slots = list(slots)
+            for slot in slots:
+                _pi_slot_led(s, slot, "on")
+            with s.table_lock:
+                s.rodney_marked_slots = set()
+        st["went_out"] = True
+        st["out_round"] = round_idx
+        _log_and_speak(s, f"{name} is out")
+    else:
+        log.log(f"[CHALLENGE] {name}: unrecognised vote cmd {type(cmd).__name__}")
+        return
+    _advance_challenge_turn(s)
+
+
+def _advance_challenge_turn(s):
+    """Move to the next non-out voter. If both laps are done, resolve."""
+    s.challenge_current_idx += 1
+    while s.challenge_current_idx < len(s.challenge_turn_order):
+        nm = s.challenge_turn_order[s.challenge_current_idx]
+        if s.challenge_per_player[nm]["went_out"]:
+            s.challenge_current_idx += 1
+            continue
+        break
+    if s.challenge_current_idx >= len(s.challenge_turn_order):
+        if s.challenge_vote_lap == 0:
+            s.challenge_vote_lap = 1
+            s.challenge_current_idx = 0
+            while (s.challenge_current_idx < len(s.challenge_turn_order)
+                   and s.challenge_per_player[
+                       s.challenge_turn_order[s.challenge_current_idx]]["went_out"]):
+                s.challenge_current_idx += 1
+            _bump_table_version(s)
+            return
+        _resolve_challenge_round(s)
+        return
+    _bump_table_version(s)
+
+
+def _resolve_challenge_round(s):
+    """End-of-round-two-laps resolve."""
+    outs = [nm for nm, st in s.challenge_per_player.items() if st["went_out"]]
+    if len(outs) == 0:
+        next_idx = (s.challenge_round_index or 0) + 1
+        if next_idx >= 3:
+            s.console_state = "reshuffle"
+            _log_and_speak(s, "No one went out. Reshuffle and redeal.")
+            _bump_table_version(s)
+            return
+        s.challenge_round_index = next_idx
+        _start_next_challenge_round(s)
+        return
+    if len(outs) == 1:
+        winner = outs[0]
+        amount = s.pot_cents
+        _log_and_speak(s, f"{winner} wins the pot: {_fmt_money(amount)}.")
+        s.pot_cents = 0
+        s.console_state = "hand_over"
+        _bump_table_version(s)
+        return
+    s.console_state = "challenge_resolve"
+    _log_and_speak(s, f"Challenge between {', '.join(outs)}. Call the winner.")
+    _bump_table_version(s)
+
+
+def _start_next_challenge_round(s):
+    """Auto-ante + deal the next round's cards. Assumes challenge_round_index
+    is already set to the round we're entering (1 or 2 — round 0 is handled
+    by new-hand init)."""
+    ante_cents = 50 * len(s.console_active_players)
+    s.pot_cents += ante_cents
+    _log_and_speak(s,
+        f"Round {s.challenge_round_index + 1} ante: {_fmt_money(ante_cents)}. "
+        f"Pot is now {_fmt_money(s.pot_cents)}.")
+    _reset_round_passes(s)
+    if s.challenge_round_index == 1:
+        _start_guided_deal_range(s, [4, 5])
+    elif s.challenge_round_index == 2:
+        prev = {}
+        overflow = []
+        for slot in (4, 5):
+            code = s.pi_prev_slots.get(slot, "")
+            if code:
+                prev[slot] = code
+            card = s.rodney_downs.get(slot)
+            if card:
+                overflow.append({"slot": slot, "card": dict(card)})
+        s.rodney_overflow = overflow
+        _start_guided_replace(s, [4, 5], prev)
+
+
+def _handle_challenge_winner(s, winner_name: str) -> bool:
+    """Dealer-announced winner for a 2+ compare. Returns True on success."""
+    if s.console_state != "challenge_resolve":
+        return False
+    outs = [nm for nm, st in s.challenge_per_player.items() if st["went_out"]]
+    if winner_name not in outs:
+        _log_and_speak(s, f"{winner_name} was not out. Try again.")
+        return False
+    losers = [nm for nm in outs if nm != winner_name]
+    per_loser = s.pot_cents
+    _log_and_speak(s,
+        f"{winner_name} wins challenge vs {', '.join(losers)}. "
+        f"Each owes {winner_name} {_fmt_money(per_loser)}.")
+    s.console_state = "hand_over"
+    _bump_table_version(s)
+    return True
 
 
 def _enqueue_down_card_verifies(s):
@@ -2749,6 +3103,10 @@ def _derive_voice_phase(s):
         return "up_round"
     if s.console_state == "betting":
         return "pre_pot"
+    if s.console_state == "challenge_vote":
+        return "challenge_vote"
+    if s.console_state == "challenge_resolve":
+        return "challenge_resolve"
     return "other"
 
 
@@ -2886,6 +3244,7 @@ def _process_voice_command(cmd):
     from speech_recognition_module import (
         GameCommand, RepeatGameCommand, CardCallCommand, InferredCardCommand,
         CorrectionCommand, ConfirmCommand, PotIsRightCommand, FoldCommand,
+        PassCommand, GoOutCommand, ChallengeWinnerCommand,
         UnrecognizedCommand,
     )
     phase = _derive_voice_phase(s)
@@ -3032,6 +3391,32 @@ def _process_voice_command(cmd):
             return
         log.log(f"[VOICE] {cmd.player} folds → /api/table/fold")
         _voice_post("/api/table/fold", {"player": cmd.player, "folded": True})
+        return
+
+    if isinstance(cmd, (PassCommand, GoOutCommand)):
+        if phase != "challenge_vote":
+            log.log(
+                f"[VOICE] Ignoring {type(cmd).__name__} in phase {phase}"
+            )
+            return
+        name = cmd.player
+        if name is None:
+            if (s.challenge_turn_order
+                    and 0 <= s.challenge_current_idx < len(s.challenge_turn_order)):
+                name = s.challenge_turn_order[s.challenge_current_idx]
+        if name is None:
+            log.log("[VOICE] pass/out with no attributable player")
+            return
+        _apply_challenge_vote(s, name, cmd)
+        return
+
+    if isinstance(cmd, ChallengeWinnerCommand):
+        if phase != "challenge_resolve":
+            log.log(
+                f"[VOICE] Ignoring '{cmd.player} wins' in phase {phase}"
+            )
+            return
+        _handle_challenge_winner(s, cmd.player)
         return
 
     if isinstance(cmd, UnrecognizedCommand):

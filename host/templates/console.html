@@ -74,6 +74,15 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
     <button class="action-btn" id="action-btn" onclick="onAction()" disabled>—</button>
   </div>
 
+  <div id="challenge-section" style="display:none;margin:8px 0">
+    <div id="challenge-pot"
+         style="background:#3d2c5a;color:#f3e9ff;padding:6px 10px;
+                border-radius:6px;text-align:center;font-weight:600"></div>
+    <div id="challenge-board"
+         style="margin-top:6px;display:grid;grid-template-columns:1fr auto auto;
+                gap:4px 12px;font-size:.9em"></div>
+  </div>
+
   <h2>Up cards seen</h2>
   <div id="zone-cards"></div>
 </div>
@@ -240,6 +249,44 @@ function render(){
     cs.textContent=txt?(zi.duplicate?txt+' DUP!':txt):'—';
     cs.className='zone-card'+(txt?'':' zone-empty')+(zi.duplicate?' zone-dup':'');
   });
+
+  // Challenge-game section: pot banner + per-player pass/out scoreboard.
+  var chSec=document.getElementById('challenge-section');
+  var ch=ST.challenge;
+  if(ch){
+    var dollars=Math.floor((ch.pot_cents||0)/100);
+    var cents=(ch.pot_cents||0)%100;
+    var centsStr=(cents<10?'0':'')+cents;
+    var shuffleTxt=(ch.shuffle_count>0)?(' (shuffle #'+ch.shuffle_count+')'):'';
+    document.getElementById('challenge-pot').textContent=
+      'Pot: $'+dollars+'.'+centsStr
+      +' — Round '+((ch.round_index||0)+1)+' of 3'+shuffleTxt;
+    var board=document.getElementById('challenge-board');
+    board.innerHTML='';
+    (ST.active_players||[]).forEach(function(n){
+      var pp=(ch.per_player||{})[n]||{};
+      var nameCell=document.createElement('div');
+      nameCell.textContent=n+(ch.current_player===n?' ←':'');
+      nameCell.style.fontWeight=(ch.current_player===n)?'700':'400';
+      var passCell=document.createElement('div');
+      passCell.textContent='passes: '+(pp.passes_this_round||0)+'/2';
+      var outCell=document.createElement('div');
+      if(pp.went_out){
+        var slotsTxt=(pp.out_slots||[]).length
+          ? (' slots '+(pp.out_slots||[]).join(',')) : '';
+        outCell.textContent='OUT r'+((pp.out_round||0)+1)+slotsTxt;
+        outCell.style.color='#a5d6a7';
+      } else {
+        outCell.textContent='';
+      }
+      board.appendChild(nameCell);
+      board.appendChild(passCell);
+      board.appendChild(outCell);
+    });
+    chSec.style.display='block';
+  } else {
+    chSec.style.display='none';
+  }
 }
 
 function populateSetupModal(){

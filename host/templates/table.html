@@ -86,6 +86,10 @@ header button:hover{background:#1a5a9a}
      style="display:none;background:#1b4d2a;color:#e8f5e9;padding:8px 14px;
             text-align:center;font-weight:600;letter-spacing:.02em"></div>
 
+<div id="challenge-banner"
+     style="display:none;background:#3d2c5a;color:#f3e9ff;padding:6px 14px;
+            text-align:center;font-weight:600;letter-spacing:.02em"></div>
+
 <div class="table">
   <div class="row top">
     <div class="hand-box" id="box-Bill"></div>
@@ -395,6 +399,53 @@ function renderPlayer(p) {
     box.appendChild(row);
   }
 
+  // Challenge-game pass/go-out buttons: visible for Rodney when it's
+  // his turn to vote and he hasn't committed to going out yet.
+  var challengeState = (window._lastState && window._lastState.challenge);
+  if (challengeState
+      && challengeState.current_player === p.name
+      && p.is_remote
+      && !(challengeState.per_player[p.name] || {}).went_out) {
+    var chRow = document.createElement('div');
+    chRow.id = 'challenge-vote-row';
+    var passBtn = document.createElement('button');
+    passBtn.id = 'challenge-pass-btn';
+    passBtn.textContent = 'Pass';
+    passBtn.onclick = function() {
+      fetch('/api/table/pass', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: '{}'
+      }).then(function(r){ return r.json(); }).then(function(d){
+        if (d && !d.ok && d.error) alert('Pass failed: ' + d.error);
+      });
+    };
+    var outBtn = document.createElement('button');
+    outBtn.id = 'challenge-out-btn';
+    var round = challengeState.round_index;  // 0 / 1 / 2
+    if (round === 2) {
+      outBtn.textContent = 'Go Out (all 7)';
+      outBtn.disabled = false;
+    } else {
+      var marked = (drawState.marked_slots || []).length;
+      var needed = challengeState.required_cards || 0;
+      outBtn.textContent = 'Go Out (' + marked + '/' + needed + ')';
+      outBtn.disabled = (marked !== needed);
+    }
+    outBtn.onclick = function() {
+      fetch('/api/table/go_out', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: '{}'
+      }).then(function(r){ return r.json(); }).then(function(d){
+        if (d && !d.ok && d.error) alert('Go Out failed: ' + d.error);
+      });
+    };
+    chRow.appendChild(passBtn);
+    chRow.appendChild(outBtn);
+    box.appendChild(chRow);
+  }
+
   // After layout settles, fan the cards: each card after the first
   // overlaps its neighbor so only ~22px of the underlying card's left
   // edge (the rank+suit indicator) remains visible. Re-apply on every
@@ -427,6 +478,24 @@ function render(state) {
     tot ? (cur + ' of ' + tot) : (cur ? String(cur) : '—');
   var wilds = state.game.wild_ranks || [];
   document.getElementById('wilds-info').textContent = wilds.length ? wilds.join(', ') : '—';
+
+  // Challenge pot banner
+  var chBanner = document.getElementById('challenge-banner');
+  var ch = state.challenge;
+  if (ch) {
+    var dollars = Math.floor((ch.pot_cents || 0) / 100);
+    var cents = (ch.pot_cents || 0) % 100;
+    var centsStr = (cents < 10 ? '0' : '') + cents;
+    var label = ch.round_label ? (ch.round_label + ' — ') : '';
+    var roundText = label + 'Round ' + ((ch.round_index || 0) + 1) + ' of 3';
+    var shuffleText = (ch.shuffle_count > 0)
+      ? (' (shuffle #' + ch.shuffle_count + ')') : '';
+    chBanner.textContent = 'Pot: $' + dollars + '.' + centsStr
+      + ' — ' + roundText + shuffleText;
+    chBanner.style.display = 'block';
+  } else {
+    chBanner.style.display = 'none';
+  }
 
   var gd = state.guided_deal;
   var banner = document.getElementById('guided-banner');
