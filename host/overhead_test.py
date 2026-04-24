@@ -2738,11 +2738,12 @@ def _schedule_voice_status_speech(delay_s: float = 0.8) -> None:
 
 
 def _speak_voice_status() -> None:
-    """Full readback once the dealer pauses: walk every active zone in
-    deal order, speak each player's card (or "waiting"), then either
-    "All cards in" or "Waiting on X, Y, Z." The point is to let the
-    dealer verify by ear what voice recognition captured without
-    having to glance at the console.
+    """Delta-only readback. Each card is announced at most once per
+    round: Brio's own recognition speech covers zones it scans,
+    voice-driven corrections get announced here when the debounce
+    fires, and corrections that change a card's value re-announce the
+    new value. When every active zone is filled, announce 'All cards
+    in' once so the dealer knows to say Confirmed.
 
     Runs on the debounce Timer thread — the global _state may have
     moved on between the voice calls and the timer firing, so always
@@ -2758,8 +2759,8 @@ def _speak_voice_status() -> None:
         scan_names, _stand = impl.zones_to_scan(s)
     else:
         scan_names = list(s.console_active_players)
-    # Walk in deal order (clockwise from dealer's left) so the
-    # readback matches how the cards were called.
+    # Walk in deal order (clockwise from dealer's left) so multiple
+    # deltas (rare but possible) play back in a natural sequence.
     ge = s.game_engine
     dealer_idx = ge.dealer_index
     deal_order = [
@@ -2768,28 +2769,40 @@ def _speak_voice_status() -> None:
     ]
     ordered = [n for n in deal_order if n in scan_names]
 
-    # Parse "Rank of Suit" → spoken words so "Ace of Spades" sounds
-    # natural whether it came from voice or Brio.
+    # Reset the per-round announce-tracker when the round advances.
+    current_round = s.console_up_round + 1
+    if getattr(s, "_voice_announced_round", -1) != current_round:
+        s._voice_announced_cards = {}
+        s._voice_announced_all_in = False
+        s._voice_announced_round = current_round
+
     waiting = []
     for name in ordered:
         card = s.monitor.last_card.get(name, "")
+        zstate = s.monitor.zone_state.get(name, "")
         if not card or card == "No card":
             waiting.append(name)
             continue
-        speech.say(f"{name}, {card}")
-        log.log(f"[VOICE] Readback: {name}, {card}")
-    if not waiting:
+        # Brio's recognition path already called speech.say on its
+        # own; just track that the card was announced so a later
+        # voice-correction of the same zone can detect the delta.
+        if zstate == "recognized":
+            s._voice_announced_cards[name] = card
+            continue
+        # zone_state = "corrected" — voice call or manual console
+        # correction. Speak only if the value differs from what we
+        # already announced this round.
+        if s._voice_announced_cards.get(name) != card:
+            speech.say(f"{name}, {card}")
+            log.log(f"[VOICE] Announce: {name}, {card}")
+            s._voice_announced_cards[name] = card
+
+    # "All cards in" fires once per round, the first time every
+    # active zone has a card.
+    if not waiting and not s._voice_announced_all_in:
         speech.say("All cards in")
-        log.log("[VOICE] Readback: all cards in")
-        return
-    if len(waiting) == 1:
-        phrase = f"Waiting on {waiting[0]}"
-    elif len(waiting) == 2:
-        phrase = f"Waiting on {waiting[0]} and {waiting[1]}"
-    else:
-        phrase = f"Waiting on {', '.join(waiting[:-1])}, and {waiting[-1]}"
-    speech.say(phrase)
-    log.log(f"[VOICE] Readback: {phrase}")
+        log.log("[VOICE] All cards in")
+        s._voice_announced_all_in = True
 
 
 def _process_voice_command(cmd):
