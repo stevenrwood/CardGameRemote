@@ -2423,16 +2423,30 @@ def _resolve_challenge_round(s):
 def _start_next_challenge_round(s):
     """Auto-ante + deal the next round's cards. Assumes challenge_round_index
     is already set to the round we're entering (1 or 2 — round 0 is handled
-    by new-hand init)."""
-    n_players = len(s.console_active_players)
+    by new-hand init).
+
+    Only non-out players ante (outs have settled and dropped out of the
+    hand). If Rodney is already out, skip his scanner-driven deal and
+    enter the vote directly — the dealer still deals physical cards to
+    the remaining non-out players at the table."""
     per_player_cents = 50
-    ante_cents = per_player_cents * n_players
+    non_out = [nm for nm in s.console_active_players
+               if not s.challenge_per_player.get(nm, {}).get("went_out")]
+    n = len(non_out)
+    ante_cents = per_player_cents * n
     s.pot_cents += ante_cents
     _log_and_speak(s,
         f"Round {s.challenge_round_index + 1} ante: "
-        f"{_fmt_money(per_player_cents)} each. "
+        f"{_fmt_money(per_player_cents)} each from {n} player"
+        f"{'s' if n != 1 else ''}. "
         f"Pot is now {_fmt_money(s.pot_cents)}.")
     _reset_round_passes(s)
+    rodney_out = s.challenge_per_player.get("Rodney", {}).get("went_out", False)
+    if rodney_out:
+        # No scanner deal for Rodney — dealer handles other players'
+        # physical cards. Go straight to the vote.
+        _begin_challenge_vote(s)
+        return
     if s.challenge_round_index == 1:
         _start_guided_deal_range(s, [4, 5])
     elif s.challenge_round_index == 2:
@@ -2459,7 +2473,13 @@ def _start_next_challenge_round(s):
 
 
 def _handle_challenge_winner(s, winner_name: str) -> bool:
-    """Dealer-announced winner for a 2+ compare. Returns True on success."""
+    """Dealer-announced winner for a 2+ compare. The losers pay the
+    winner the current pot amount (pot itself stays on the table);
+    then the hand continues into the next round with the remaining
+    non-out players. If round 3 produced the compare, the hand ends
+    since there are no more rounds.
+
+    Returns True on success."""
     if s.console_state != "challenge_resolve":
         return False
     outs = [nm for nm, st in s.challenge_per_player.items() if st["went_out"]]
@@ -2471,8 +2491,16 @@ def _handle_challenge_winner(s, winner_name: str) -> bool:
     _log_and_speak(s,
         f"{winner_name} wins challenge vs {', '.join(losers)}. "
         f"Each owes {winner_name} {_fmt_money(per_loser)}.")
-    s.console_state = "hand_over"
-    _bump_table_version(s)
+    # Round 3 compare is the final event of the hand — no more rounds
+    # to advance into, so pot stays for the next hand.
+    next_idx = (s.challenge_round_index or 0) + 1
+    if next_idx >= 3:
+        s.console_state = "hand_over"
+        _bump_table_version(s)
+        return True
+    # Advance into the next round for the remaining non-out players.
+    s.challenge_round_index = next_idx
+    _start_next_challenge_round(s)
     return True
 
 
