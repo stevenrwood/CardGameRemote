@@ -913,8 +913,9 @@ class AppState:
         # 0/1/2 for rounds 1/2/3. Resets to 0 on reshuffle.
         self.challenge_round_index = None
         self.challenge_shuffle_count = 0
-        # Per-player vote state: {name: {"went_out": bool, "passed": bool,
-        #   "out_round": int|None, "out_slots": list[int]}}.
+        # Per-player vote state: {name: {"went_out": bool,
+        #   "passes": int (0-2), "out_round": int|None,
+        #   "out_slots": list[int]}}.
         # Dealer clicks Pass or Out buttons on the console to set the
         # per-player state, or Rodney uses his /table buttons. End
         # Round button resolves the round based on how many are out.
@@ -1176,7 +1177,7 @@ def _build_table_state(s):
             "per_player": {
                 nm: {
                     "went_out": st["went_out"],
-                    "passed": st.get("passed", False),
+                    "passes": int(st.get("passes", 0)),
                     "out_round": st["out_round"],
                     "out_slots": list(st["out_slots"]),
                 } for nm, st in s.challenge_per_player.items()
@@ -2305,19 +2306,26 @@ def _bump_table_version(s):
         s.table_state_version += 1
 
 
+MAX_PASSES_PER_ROUND = 2
+
+
 def _reset_round_passes(s):
-    """Start-of-round reset: clear the per-player 'passed' flag.
+    """Start-of-round reset: reset the per-player pass counter to 0.
     went_out is hand-wide — once set, stays set for the whole hand.
     In a 0-out-advance-to-next-round scenario, went_out is already
     False for everyone, so nothing to undo."""
     for st in s.challenge_per_player.values():
-        st["passed"] = False
+        st["passes"] = 0
 
 
 def _set_challenge_vote(s, name: str, vote: str) -> tuple:
     """Manual per-player vote setter — called by dealer buttons on the
-    console, by Rodney's /table buttons, and by any remaining voice
-    hooks. vote ∈ {"pass", "out", "clear"}.
+    console and by Rodney's /table buttons. vote ∈ {"pass", "out",
+    "clear"}.
+
+    Pass semantics: each Pass click increments the counter up to 2.
+    Once a player hits 2 passes they're locked for the round — no
+    further passes or outs. Clear resets the counter to 0.
 
     For Rodney + "out", validates his card selection (rounds 1-2 need
     exact match of _challenge_required_cards; round 3 takes all 7)
@@ -2332,17 +2340,25 @@ def _set_challenge_vote(s, name: str, vote: str) -> tuple:
         return False, f"unknown player {name}"
     if st.get("went_out") and vote != "clear":
         return False, f"{name} already out for this hand"
+    passes = int(st.get("passes", 0))
+    locked = (passes >= MAX_PASSES_PER_ROUND)
+    if locked and vote != "clear":
+        return False, (
+            f"{name} already passed {MAX_PASSES_PER_ROUND} times this round "
+            f"— locked until next round"
+        )
     if vote == "clear":
-        st["passed"] = False
-        _log_and_speak(s, f"{name} vote cleared")
+        st["passes"] = 0
+        _log_and_speak(s, f"{name} pass counter cleared")
         _bump_table_version(s)
         return True, ""
     if vote == "pass":
-        st["passed"] = True
+        st["passes"] = passes + 1
         if name == "Rodney":
             with s.table_lock:
                 s.rodney_marked_slots = set()
-        _log_and_speak(s, f"{name} passes")
+        _log_and_speak(s,
+            f"{name} passes ({st['passes']} of {MAX_PASSES_PER_ROUND})")
         _bump_table_version(s)
         return True, ""
     if vote == "out":
@@ -2371,7 +2387,6 @@ def _set_challenge_vote(s, name: str, vote: str) -> tuple:
                 with s.table_lock:
                     s.rodney_marked_slots = set()
         st["went_out"] = True
-        st["passed"] = False
         st["out_round"] = round_idx
         _log_and_speak(s, f"{name} is out")
         _bump_table_version(s)

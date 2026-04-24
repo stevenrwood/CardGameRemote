@@ -230,14 +230,22 @@ class UnrecognizedCommand:
 # ---------------------------------------------------------------------------
 
 def _fuzzy_match_game(text):
-    text_lower = text.lower().strip()
+    # Normalize: lowercase, collapse hyphens / commas / slashes to
+    # spaces (Whisper often produces "High-Low-High Challenge" or
+    # "High, Low, High"), then collapse whitespace. Otherwise the
+    # alias substring match misses because "high low high" != "high-
+    # low-high".
+    text_lower = re.sub(r"[-,/_]+", " ", text.lower()).strip()
+    text_lower = re.sub(r"\s+", " ", text_lower)
     for alias, canonical in GAME_ALIASES.items():
         if alias in text_lower:
             return canonical, 1.0
     best_score = 0.0
     best_name = None
     for name in GAME_NAMES:
-        score = SequenceMatcher(None, text_lower, name.lower()).ratio()
+        name_norm = re.sub(r"[-,/_]+", " ", name.lower())
+        name_norm = re.sub(r"\s+", " ", name_norm).strip()
+        score = SequenceMatcher(None, text_lower, name_norm).ratio()
         if score > best_score:
             best_score = score
             best_name = name
@@ -413,9 +421,23 @@ def parse_speech(text):
         if p is not None:
             return [GoOutCommand(player=p, raw_text=text)]
 
-    # "{player} wins" / "{player} takes it" / "{player} wins challenge"
+    # Winner-announce patterns. Accepted:
+    #   "{name} wins"
+    #   "{name} wins challenge"
+    #   "{name} takes it"
+    #   "{name} is the winner"
+    #   "{name} is winner"
+    #   "{name}, the winner"
+    #   "{name} won"
+    #   "{name} won the pot"
     winner_match = re.match(
-        r"^([a-z]+)[\s,]+(wins(\s+challenge)?|takes\s+it)\b[.!]?",
+        r"^([a-z]+)[\s,]+("
+        r"wins(\s+(challenge|the\s+pot|it))?"
+        r"|takes\s+it"
+        r"|is\s+(the\s+)?winner"
+        r"|the\s+winner"
+        r"|won(\s+the\s+pot)?"
+        r")\b[.!]?",
         text_lower,
     )
     if winner_match:

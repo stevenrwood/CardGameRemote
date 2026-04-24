@@ -284,6 +284,9 @@ function render(){
       return;
     }
     var pp=(ch.per_player||{})[n]||{};
+    var maxPasses=ch.max_passes||2;
+    var passes=pp.passes||0;
+    var locked=(passes>=maxPasses);
     chCell.innerHTML='';
     chCell.style.display='inline-flex';
     chCell.style.gap='4px';
@@ -300,20 +303,23 @@ function render(){
       return;
     }
     var passBtn=document.createElement('button');
-    passBtn.textContent=pp.passed?'Passed ✓':'Pass';
+    passBtn.textContent='Pass '+passes+'/'+maxPasses;
     passBtn.className='sml-btn';
-    if(pp.passed) passBtn.style.background='#2e7d32';
-    passBtn.onclick=(function(nm,currentlyPassed){return function(ev){
+    if(passes>0) passBtn.style.background='#2e7d32';
+    passBtn.disabled=locked;
+    passBtn.onclick=(function(nm){return function(ev){
       ev.stopPropagation();
-      api('/api/console/challenge_vote',
-          {player:nm, vote: currentlyPassed ? 'clear' : 'pass'})
-        .then(refresh);
-    };})(n, !!pp.passed);
+      api('/api/console/challenge_vote',{player:nm, vote:'pass'})
+        .then(function(d){
+          if(d && !d.ok && d.error) alert(d.error);
+          refresh();
+        });
+    };})(n);
     var outBtn=document.createElement('button');
     outBtn.textContent='Out';
     outBtn.className='sml-btn';
     outBtn.style.background='#b71c1c';
-    if(n==='Rodney') outBtn.disabled=true;
+    if(n==='Rodney' || locked) outBtn.disabled=true;
     outBtn.onclick=(function(nm){return function(ev){
       ev.stopPropagation();
       api('/api/console/challenge_vote',{player:nm, vote:'out'})
@@ -324,6 +330,13 @@ function render(){
     };})(n);
     chCell.appendChild(passBtn);
     chCell.appendChild(outBtn);
+    if(locked){
+      var lockTxt=document.createElement('span');
+      lockTxt.textContent='🔒';
+      lockTxt.style.marginLeft='4px';
+      lockTxt.style.fontSize='.8em';
+      chCell.appendChild(lockTxt);
+    }
   });
 }
 

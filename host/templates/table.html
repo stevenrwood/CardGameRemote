@@ -410,12 +410,15 @@ function renderPlayer(p) {
   if (challengeState
       && p.is_remote
       && !rodneyState.went_out) {
+    var maxPasses = challengeState.max_passes || 2;
+    var passes = rodneyState.passes || 0;
+    var locked = (passes >= maxPasses);
     var chRow = document.createElement('div');
     chRow.id = 'challenge-vote-row';
     var passBtn = document.createElement('button');
     passBtn.id = 'challenge-pass-btn';
-    passBtn.textContent = rodneyState.passed ? 'Passed ✓' : 'Pass';
-    passBtn.disabled = !!rodneyState.passed;
+    passBtn.textContent = 'Pass ' + passes + '/' + maxPasses;
+    passBtn.disabled = locked;
     passBtn.onclick = function() {
       fetch('/api/table/pass', {
         method: 'POST',
@@ -432,10 +435,10 @@ function renderPlayer(p) {
     var needed = challengeState.required_cards || 0;
     if (round === 2) {
       outBtn.textContent = 'Go Out (all 7)';
-      outBtn.disabled = false;
+      outBtn.disabled = locked;
     } else {
       outBtn.textContent = 'Go Out (' + marked + '/' + needed + ')';
-      outBtn.disabled = (marked !== needed);
+      outBtn.disabled = locked || (marked !== needed);
     }
     outBtn.onclick = function() {
       fetch('/api/table/go_out', {
@@ -448,6 +451,13 @@ function renderPlayer(p) {
     };
     chRow.appendChild(passBtn);
     chRow.appendChild(outBtn);
+    if (locked) {
+      var lockTxt = document.createElement('span');
+      lockTxt.textContent = ' 🔒 locked for round';
+      lockTxt.style.marginLeft = '6px';
+      lockTxt.style.fontSize = '.85em';
+      chRow.appendChild(lockTxt);
+    }
     box.appendChild(chRow);
   }
 

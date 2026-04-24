@@ -77,6 +77,7 @@ from overhead_test import (
     _handle_challenge_winner,
     _begin_challenge_vote,
     _challenge_required_cards,
+    MAX_PASSES_PER_ROUND,
     _stats_bump,
     _stop_collect_mode,
     _stop_deal_mode,
@@ -629,11 +630,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._r(400, "application/json",
                         '{"ok":false,"error":"not in challenge vote"}')
             else:
-                # Ensure every non-out player has at least an
-                # implicit-pass stamp for log clarity.
+                # Per-player pass counts already reflect what was
+                # clicked. _resolve_challenge_round only looks at
+                # went_out, so pass counts don't affect resolve math —
+                # but we log any incomplete ones so it's clear they
+                # didn't hit the 2-pass max before End Round fired.
                 for nm, st in s.challenge_per_player.items():
-                    if not st.get("went_out") and not st.get("passed"):
-                        st["passed"] = True
+                    if not st.get("went_out"):
+                        passes = int(st.get("passes", 0))
+                        if passes < MAX_PASSES_PER_ROUND:
+                            log.log(
+                                f"[CHALLENGE] End Round with {nm} at "
+                                f"{passes}/{MAX_PASSES_PER_ROUND} passes — "
+                                f"counted as pass"
+                            )
                 _resolve_challenge_round(s)
                 self._r(200, "application/json", '{"ok":true}')
 
@@ -655,7 +665,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.challenge_round_index = 0
                     s.challenge_shuffle_count += 1
                     for st in s.challenge_per_player.values():
-                        st["passed"] = False
+                        st["passes"] = 0
                     s.table_state_version += 1
                 per_player_cents = 50
                 n_players = len(s.console_active_players)
@@ -819,11 +829,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "per_player": {
                             nm: {
                                 "went_out": st["went_out"],
-                                "passed": st.get("passed", False),
+                                "passes": int(st.get("passes", 0)),
                                 "out_round": st["out_round"],
                                 "out_slots": list(st["out_slots"]),
                             } for nm, st in s.challenge_per_player.items()
                         },
+                        "max_passes": MAX_PASSES_PER_ROUND,
                     }
                     if (_game_is_challenge(ge)
                         and s.challenge_round_index is not None)
@@ -1025,7 +1036,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.challenge_round_index = 0
                     s.challenge_shuffle_count = 0
                     s.challenge_per_player = {
-                        nm: {"went_out": False, "passed": False,
+                        nm: {"went_out": False, "passes": 0,
                              "out_round": None, "out_slots": []}
                         for nm in s.console_active_players
                     }
