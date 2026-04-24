@@ -2817,8 +2817,9 @@ def _process_voice_command(cmd):
     if s is None:
         return
     from speech_recognition_module import (
-        GameCommand, RepeatGameCommand, CardCallCommand, CorrectionCommand,
-        ConfirmCommand, PotIsRightCommand, FoldCommand, UnrecognizedCommand,
+        GameCommand, RepeatGameCommand, CardCallCommand, InferredCardCommand,
+        CorrectionCommand, ConfirmCommand, PotIsRightCommand, FoldCommand,
+        UnrecognizedCommand,
     )
     phase = _derive_voice_phase(s)
 
@@ -2865,6 +2866,53 @@ def _process_voice_command(cmd):
         # back each player's current card so the dealer can verify
         # by ear without looking at the console. No per-card echo —
         # that was overlapping with their next utterance.
+        _schedule_voice_status_speech()
+        return
+
+    if isinstance(cmd, InferredCardCommand):
+        # Dealer spoke just rank+suit without a name. Resolve to the
+        # next unfilled zone in deal order (clockwise from dealer's
+        # left, dealer last). Skip players who've folded/busted or
+        # whose zone already has a card.
+        if phase not in ("up_round", "pre_confirm"):
+            log.log(
+                f"[VOICE] Ignoring orphan card '{cmd.rank}{cmd.suit[0]}' "
+                f"in phase {phase}"
+            )
+            return
+        ge = s.game_engine
+        dealer_idx = ge.dealer_index
+        deal_order = [
+            ge.players[(dealer_idx + i) % len(ge.players)].name
+            for i in range(1, len(ge.players) + 1)
+        ]
+        impl = getattr(s, "current_game_impl", None)
+        if impl is not None:
+            scan_names, _stand = impl.zones_to_scan(s)
+        else:
+            scan_names = list(s.console_active_players)
+        scan_set = set(scan_names)
+        target = None
+        for name in deal_order:
+            if name not in scan_set:
+                continue
+            existing = s.monitor.last_card.get(name, "")
+            if not existing or existing == "No card":
+                target = name
+                break
+        if target is None:
+            log.log(
+                f"[VOICE] Can't infer player for '{cmd.rank}{cmd.suit[0]}' — "
+                f"every active zone already has a card"
+            )
+            return
+        log.log(
+            f"[VOICE] Inferred {target} for '{cmd.rank}{cmd.suit[0]}' "
+            f"(next in deal order)"
+        )
+        _voice_post("/api/console/correct", {
+            "corrections": [{"player": target, "rank": cmd.rank, "suit": cmd.suit}],
+        })
         _schedule_voice_status_speech()
         return
 

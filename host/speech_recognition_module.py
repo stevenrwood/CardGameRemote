@@ -145,6 +145,19 @@ class CardCallCommand:
     confidence: float
 
 @dataclass
+class InferredCardCommand:
+    """'{card}' spoken without a player name — dealer called just the
+    rank+suit and expects the host to resolve which player the card
+    goes to (next unfilled zone in deal order). The parser emits this
+    whenever it sees a card-rank+suit with no player prefix; the
+    dispatcher in overhead_test does the deal-order resolution since
+    only it has access to the live console state."""
+    rank: str
+    suit: str
+    raw_text: str
+    confidence: float
+
+@dataclass
 class CorrectionCommand:
     """'Correction: {player}, {card}' — same semantic as CardCallCommand
     but valid post-scan / pre-confirm when the scanner got a zone wrong
@@ -344,10 +357,20 @@ def parse_speech(text):
     if cards:
         return cards
 
-    # Single card call
+    # Single card call with a player named
     card = _parse_card_call(text)
     if card:
         return [card]
+
+    # Single card call with NO player — dealer said just "4 of Clubs".
+    # Emit InferredCardCommand; the dispatcher resolves which player
+    # it goes to against live deal order + current zone state.
+    orphan = _extract_card_only(text)
+    if orphan is not None:
+        r, sv = orphan
+        return [InferredCardCommand(
+            rank=r, suit=sv, raw_text=text, confidence=0.8,
+        )]
 
     return [UnrecognizedCommand(raw_text=text)]
 
@@ -448,8 +471,22 @@ def _parse_multiple_card_calls(text):
     # Sort by position
     positions.sort()
 
-    # Split text at each player name and try to parse each segment
+    # If the utterance starts with a card-rank+suit BEFORE the first
+    # player name (Whisper drops the first name surprisingly often —
+    # "Jack of clubs. Joe, 6 of diamonds..."), prepend an
+    # InferredCardCommand. The dispatcher will resolve it against
+    # live deal order.
     cards = []
+    lead = text[:positions[0][0]].strip()
+    if lead:
+        rc = _extract_card_only(lead)
+        if rc is not None:
+            r, sv = rc
+            cards.append(InferredCardCommand(
+                rank=r, suit=sv, raw_text=text, confidence=0.8,
+            ))
+
+    # Split text at each player name and try to parse each segment
     for i, (pos, name) in enumerate(positions):
         if i + 1 < len(positions):
             segment = text[pos:positions[i+1][0]]
