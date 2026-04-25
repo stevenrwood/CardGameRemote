@@ -925,13 +925,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             Thread(target=_bye, daemon=True).start()
 
         elif p == "/api/console/rescan_all":
-            # Forget every zone's current up-card and rescan all zones
-            # the current game cares about — including ones the user
-            # had corrected. Useful when YOLO has hallucinated a few
-            # cards and the dealer wants to start the round's
-            # recognition from scratch. /api/console/force_scan skips
-            # corrected zones to preserve user input; this endpoint
-            # explicitly does NOT.
+            # Wipe the auto-recognized state for every active zone in
+            # the current round and rescan from the latest frame.
+            # User-corrected zones are preserved — once the dealer has
+            # typed a value into a zone, only an explicit re-correction
+            # changes it. (If you really want to clear a correction
+            # too, tap that zone and pick "—" or the right card.)
             frame = s.latest_frame
             if frame is None:
                 return self._r(503, "application/json",
@@ -942,25 +941,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 scan_names = list(s.console_active_players)
             watched = set(scan_names)
+            wiped = 0
+            preserved = 0
             zone_crops = {}
             for z in s.cal.zones:
                 name = z["name"]
                 if name not in watched:
                     continue
-                # Wipe state so /api/console/state stops showing the
-                # old card while the new scan is in flight.
+                if s.monitor.zone_state.get(name) == "corrected":
+                    preserved += 1
+                    continue
+                # Wipe so /api/console/state stops showing the old
+                # card while the new scan is in flight.
                 s.monitor.last_card[name] = ""
                 s.monitor.zone_state[name] = "empty"
                 s.monitor.recognition_details[name] = {}
                 s.monitor.recognition_crops[name] = None
+                wiped += 1
                 crop = s.monitor._crop(frame, z)
                 if crop is None or crop.size == 0:
                     continue
                 zone_crops[name] = crop.copy()
                 s.monitor.pending[name] = True
             log.log(
-                f"[CONSOLE] Rescan all — wiped {len(watched)} zones, "
-                f"scanning {len(zone_crops)}"
+                f"[CONSOLE] Rescan all — wiped {wiped} zone(s), "
+                f"scanning {len(zone_crops)}, preserved {preserved} "
+                f"corrected"
             )
             with s.table_lock:
                 s.table_state_version += 1

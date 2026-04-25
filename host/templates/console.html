@@ -538,7 +538,8 @@ function startGame(){
 
 function rescanAll(){
   if(!ST || !ST.game_in_progress) return;
-  if(!confirm("Wipe every zone's up card and rescan?")) return;
+  if(!confirm("Rescan all auto-recognized zones? "
+              + "Corrected zones are preserved.")) return;
   api('/api/console/rescan_all').then(refresh);
 }
 
