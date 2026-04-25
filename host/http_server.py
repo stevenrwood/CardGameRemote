@@ -1082,7 +1082,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.table_state_version += 1
                 # Challenge-game per-hand reset. pot_cents is NOT reset —
                 # it accumulates across hands until a 1-out-all-pass award.
-                if _game_is_challenge(ge):
+                challenge_hand = _game_is_challenge(ge)
+                if challenge_hand:
                     s.challenge_round_index = 0
                     s.challenge_shuffle_count = 0
                     s.challenge_per_player = {
@@ -1097,17 +1098,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.rodney_overflow = []
                     n_players = len(s.console_active_players)
                     s.pot_cents += s.ante_cents * n_players
-                    _log_and_speak(s,
-                        f"Round 1 ante: {_fmt_money(s.ante_cents)} each. "
-                        f"Pot is now {_fmt_money(s.pot_cents)}.")
                 else:
                     s.challenge_round_index = None
-                # Start-of-hand announcement (dealer + game + ante + limit).
+                # Single Start-Game announcement — dealer + game + ante
+                # + betting limit, plus the running pot for Challenge
+                # games (where the pot persists across hands). No
+                # separate "Round 1 ante" line; that info is already
+                # here.
                 dealer_name = ge.get_dealer().name
-                _log_and_speak(s,
+                msg = (
                     f"Dealer is {dealer_name}. Game is {game_name}. "
                     f"Ante {_fmt_money(s.ante_cents)}. "
-                    f"{_betting_limit_label(s.betting_limit)}.")
+                    f"{_betting_limit_label(s.betting_limit)}."
+                )
+                if challenge_hand:
+                    msg += f" Pot is now {_fmt_money(s.pot_cents)}."
+                _log_and_speak(s, msg)
                 # Let the per-game class wire up its own per-hand state
                 # (freeze counters, local flags) now that common state is
                 # reset and the engine knows the current game.
