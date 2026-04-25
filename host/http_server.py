@@ -954,6 +954,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Wipe so /api/console/state stops showing the old
                 # card while the new scan is in flight.
                 s.monitor.last_card[name] = ""
+                s.monitor.last_announced[name] = ""
                 s.monitor.zone_state[name] = "empty"
                 s.monitor.recognition_details[name] = {}
                 s.monitor.recognition_crops[name] = None
@@ -1247,6 +1248,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 zname = z["name"]
                 s.monitor.zone_state[zname] = "empty"
                 s.monitor.last_card[zname] = ""
+                s.monitor.last_announced[zname] = ""
                 s.monitor.recognition_details[zname] = {}
                 s.monitor.recognition_crops[zname] = None
             # If this was the last up-card round, go to idle. 0 means

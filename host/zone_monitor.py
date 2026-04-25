@@ -55,6 +55,14 @@ class ZoneMonitor:
         )
         self.baselines = {}
         self.last_card = {}
+        # Tracks the most recent value spoken for each zone, so a
+        # repeat force_scan over a still-recognized zone (e.g. when
+        # the dealer hits Confirm with the scan_phase reverted to
+        # "watching" and the JS auto-fires force_scan first) doesn't
+        # re-announce a card the table already heard. Cleared with
+        # last_card on round confirm and on rescan_all, so genuine
+        # new-round / explicit-rescan flows still announce.
+        self.last_announced = {}
         self.zone_state = {}
         self.pending = {}
         self.recognition_details = {}  # name -> {yolo, yolo_conf, claude, final}
@@ -96,8 +104,18 @@ class ZoneMonitor:
                 self.baselines[z["name"]] = crop.copy()
                 self.zone_state[z["name"]] = "empty"
                 self.last_card[z["name"]] = ""
+                self.last_announced[z["name"]] = ""
                 self.pending[z["name"]] = False
         log.log("Baselines captured")
+
+    def _announce_card(self, name, result):
+        """Speak the recognized card unless we already announced this
+        same value for this zone. Suppresses the duplicate burst when
+        force_scan re-runs over already-recognized zones."""
+        if self.last_announced.get(name) == result:
+            return
+        speech.say(self._speech_formatter(name, result))
+        self.last_announced[name] = result
 
     def check_zones(self, frame):
         """Check all zones. YOLO runs for each changed zone, then one batched
@@ -170,7 +188,7 @@ class ZoneMonitor:
                         self._stats_cb("yolo_right")
                         log.log(f"[{name}] RECOGNIZED: {result} (total {total_ms:.0f}ms)")
                         self._save(name, crop, result)
-                        speech.say(self._speech_formatter(name, result))
+                        self._announce_card(name, result)
                     else:
                         # Need Claude
                         need_claude[name] = (crop, details)
@@ -204,7 +222,7 @@ class ZoneMonitor:
                     self._stats_cb("yolo_right")
                     log.log(f"[{name}] RECOGNIZED (low conf, no Claude): {yolo_result}")
                     self._save(name, crop, yolo_result)
-                    speech.say(self._speech_formatter(name, yolo_result))
+                    self._announce_card(name, yolo_result)
                 else:
                     self.zone_state[name] = "empty"
                 self.recognition_details[name] = details
@@ -275,7 +293,7 @@ class ZoneMonitor:
                             self.zone_state[name] = "recognized"
                             log.log(f"[{name}] RECOGNIZED (Claude): {result}")
                             self._save(name, crop, result)
-                            speech.say(self._speech_formatter(name, result))
+                            self._announce_card(name, result)
                         else:
                             details["claude"] = "No card"
                             self.zone_state[name] = "empty"
@@ -299,7 +317,7 @@ class ZoneMonitor:
                         self.zone_state[name] = "recognized"
                         log.log(f"[{name}] RECOGNIZED (YOLO fallback): {yolo_result}")
                         self._save(name, crop, yolo_result)
-                        speech.say(self._speech_formatter(name, yolo_result))
+                        self._announce_card(name, yolo_result)
                     else:
                         self.zone_state[name] = "empty"
                     self.recognition_details[name] = details
@@ -322,7 +340,7 @@ class ZoneMonitor:
                     self.zone_state[name] = "recognized"
                     log.log(f"[{name}] RECOGNIZED (YOLO, Claude failed): {yolo_result}")
                     self._save(name, crop, yolo_result)
-                    speech.say(self._speech_formatter(name, yolo_result))
+                    self._announce_card(name, yolo_result)
                 else:
                     self.zone_state[name] = "empty"
                 self.recognition_details[name] = details
