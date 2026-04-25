@@ -77,6 +77,7 @@ from overhead_test import (
     _handle_challenge_winner,
     _begin_challenge_vote,
     _challenge_required_cards,
+    _clear_rodney_challenge_leds,
     _forced_betting_limit,
     _betting_limit_label,
     FORCED_POT_LIMIT_GAMES,
@@ -660,7 +661,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 with s.table_lock:
                     s.rodney_downs = {}
                     s.rodney_marked_slots = set()
-                    s.rodney_out_slots = []
+                    _clear_rodney_challenge_leds(s)
                     s.rodney_overflow = []
                     s.pi_prev_slots = {}
                     s.slot_pending = {}
@@ -670,6 +671,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.challenge_shuffle_count += 1
                     for st in s.challenge_per_player.values():
                         st["passes"] = 0
+                        st["went_out"] = False
+                        st["out_round"] = None
+                        st["out_slots"] = []
                     s.table_state_version += 1
                 n_players = len(s.console_active_players)
                 s.pot_cents += s.ante_cents * n_players
@@ -1078,7 +1082,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                              "out_round": None, "out_slots": []}
                         for nm in s.console_active_players
                     }
-                    s.rodney_out_slots = []
+                    # Turn off any leftover challenge LEDs from a
+                    # prior hand before the new guided deal lights
+                    # its own slots.
+                    _clear_rodney_challenge_leds(s)
                     s.rodney_overflow = []
                     n_players = len(s.console_active_players)
                     s.pot_cents += s.ante_cents * n_players
@@ -1420,11 +1427,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if not advance and s.challenge_round_index is not None:
                     # Rounds 0/1/2 mean we've added 1/2/3 antes.
                     antes_added = (s.challenge_round_index or 0) + 1
-                    rollback = 50 * len(s.console_active_players) * antes_added
+                    rollback = (
+                        s.ante_cents
+                        * len(s.console_active_players)
+                        * antes_added
+                    )
                     s.pot_cents = max(0, s.pot_cents - rollback)
                     s.challenge_round_index = None
                     s.challenge_per_player = {}
-                    s.rodney_out_slots = []
+                    _clear_rodney_challenge_leds(s)
                     s.rodney_overflow = []
                     s.rodney_marked_slots = set()
                     log.log(

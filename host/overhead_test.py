@@ -2426,19 +2426,24 @@ def _bump_table_version(s):
 MAX_PASSES_PER_ROUND = 2
 
 
-def _reset_round_passes(s):
-    """Start-of-round reset: every player starts each round fresh.
-    Pass counter → 0, went_out → False, committed out_slots cleared.
-    Rodney's committed-slot LEDs are turned off (he can pick a new
-    set of cards from his now-larger hand in the next round)."""
-    # Turn off any LEDs that were lit for Rodney's previous-round
-    # commitment before we clear the state.
+def _clear_rodney_challenge_leds(s):
+    """Turn off any green slot LEDs lit for Rodney's current-round
+    commit and clear rodney_out_slots. Safe to call from any
+    challenge-state transition — no-op when nothing's lit."""
     for slot in list(s.rodney_out_slots or []):
         try:
             _pi_slot_led(s, int(slot), "off")
         except Exception:
             pass
     s.rodney_out_slots = []
+
+
+def _reset_round_passes(s):
+    """Start-of-round reset: every player starts each round fresh.
+    Pass counter → 0, went_out → False, committed out_slots cleared.
+    Rodney's committed-slot LEDs are turned off (he can pick a new
+    set of cards from his now-larger hand in the next round)."""
+    _clear_rodney_challenge_leds(s)
     for st in s.challenge_per_player.values():
         st["passes"] = 0
         st["went_out"] = False
@@ -2534,6 +2539,8 @@ def _resolve_challenge_round(s):
     if len(outs) == 0:
         next_idx = (s.challenge_round_index or 0) + 1
         if next_idx >= 3:
+            # End of shuffle cycle with no outs — reshuffle and redeal.
+            _clear_rodney_challenge_leds(s)
             s.console_state = "reshuffle"
             _log_and_speak(s, "No one went out. Reshuffle and redeal.")
             _bump_table_version(s)
@@ -2542,13 +2549,19 @@ def _resolve_challenge_round(s):
         _start_next_challenge_round(s)
         return
     if len(outs) == 1:
+        # 1-out-all-pass wins the pot; hand ends.
         winner = outs[0]
         amount = s.pot_cents
+        _clear_rodney_challenge_leds(s)
         _log_and_speak(s, f"{winner} wins the pot: {_fmt_money(amount)}.")
         s.pot_cents = 0
         s.console_state = "hand_over"
         _bump_table_version(s)
         return
+    # 2+ out — dealer announces winner in challenge_resolve. Rodney's
+    # LEDs stay on through the compare so the dealer can see which
+    # cards he committed; they get cleared by _handle_challenge_winner
+    # when the compare settles.
     s.console_state = "challenge_resolve"
     _log_and_speak(s, f"Challenge between {', '.join(outs)}. Call the winner.")
     _bump_table_version(s)
@@ -2624,6 +2637,8 @@ def _handle_challenge_winner(s, winner_name: str) -> bool:
         f"{_format_name_list(losers)} {verb} {winner_name} "
         f"{_fmt_money(per_loser)}.")
     next_idx = (s.challenge_round_index or 0) + 1
+    # Rodney's commit LEDs are no longer meaningful after settle.
+    _clear_rodney_challenge_leds(s)
     if next_idx >= 3:
         # End of a shuffle cycle with the pot still unawarded —
         # same landing pad as a 0-out round 3.
