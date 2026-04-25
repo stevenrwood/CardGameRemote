@@ -373,11 +373,15 @@ function render(){
       chCell.appendChild(outTxt);
       return;
     }
+    // Rodney drives his own Pass / Go Out from the /table remote,
+    // so the console shows his row for status but doesn't let the
+    // dealer click either button.
+    var isRodney = (n === 'Rodney');
     var passBtn=document.createElement('button');
     passBtn.textContent='Pass '+passes+'/'+maxPasses;
     passBtn.className='sml-btn';
     if(passes>0) passBtn.style.background='#2e7d32';
-    passBtn.disabled=locked;
+    passBtn.disabled = locked || isRodney;
     passBtn.onclick=(function(nm){return function(ev){
       ev.stopPropagation();
       api('/api/console/challenge_vote',{player:nm, vote:'pass'})
@@ -390,7 +394,7 @@ function render(){
     outBtn.textContent='Out';
     outBtn.className='sml-btn';
     outBtn.style.background='#b71c1c';
-    if(n==='Rodney' || locked) outBtn.disabled=true;
+    outBtn.disabled = locked || isRodney;
     outBtn.onclick=(function(nm){return function(ev){
       ev.stopPropagation();
       api('/api/console/challenge_vote',{player:nm, vote:'out'})
