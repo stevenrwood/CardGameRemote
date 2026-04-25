@@ -172,6 +172,59 @@ class SevenTwentySevenGame(BaseGame):
                     f"{_speak_value(VISIBLE_MAX)} showing"
                 )
 
+    # --- per-card speech annotation ---
+
+    def annotate_card_speech(self, state, player_name, card_text,
+                             default_speech):
+        """Append a heads-up about the max safe down-card value
+        whenever the player's running visible total crosses 17.
+
+        The total is built from prior-round confirmed cards in
+        ``console_hand_cards`` plus the just-recognized card already
+        held in ``state.monitor.last_card[player_name]``. We check
+        the highest possible interpretation (ace-as-11 vs ace-as-1)
+        — if even the high interpretation is ≤ 17, no hint.
+
+        Format: "Bill, 6 of Hearts with 8 or less down below" when
+        Bill's visible total reaches 19 (27 - 19 = 8 max safe down).
+        """
+        try:
+            from games import parse_hand_card
+        except Exception:
+            return default_speech
+        # Visible cards = prior history for this player + the new card
+        # (already populated in monitor.last_card by the caller before
+        # speech.say fires — see zone_monitor._recognize_batch).
+        cards = []
+        for entry in state.console_hand_cards:
+            if entry.get("player") != player_name:
+                continue
+            parsed = parse_hand_card(entry.get("card", ""))
+            if parsed is not None:
+                cards.append(parsed)
+        # Skip duplicates: if the new card already accumulated into
+        # console_hand_cards (rare race) we don't want to double-count.
+        new_parsed = parse_hand_card(card_text)
+        already_in = (
+            new_parsed is not None
+            and any(c == new_parsed for c in cards)
+        )
+        if new_parsed is not None and not already_in:
+            cards.append(new_parsed)
+        if not cards:
+            return default_speech
+        values = compute_values(cards, max_total=VISIBLE_MAX)
+        if not values:
+            return default_speech
+        best = max(values)
+        if best <= 17:
+            return default_speech
+        max_down = 27 - best
+        return (
+            f"{default_speech} with {_speak_value(max_down)} "
+            f"or less down below"
+        )
+
     # --- scoring ---
 
     def score_hand(self, cards, wild_ranks):

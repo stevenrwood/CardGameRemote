@@ -153,6 +153,19 @@ class BaseGame:
         player with no visible cards, 7/27 bust, etc.). Default: None."""
         return None
 
+    def annotate_card_speech(self, state, player_name: str,
+                             card_text: str, default_speech: str) -> str:
+        """Return the string to speak when a new card is recognized
+        for ``player_name``. Default just returns ``default_speech``
+        (i.e. "{name}, {card}"). Subclasses can append game-specific
+        context — 7/27 adds the max-safe down-card hint as the
+        player's visible total climbs.
+
+        ``card_text`` is the recognized rank+suit ("Ace of Spades")
+        for the just-scanned card; ``state.monitor.last_card[name]``
+        already holds it by the time this fires."""
+        return default_speech
+
     def _player_visible_cards(self, state, player_name: str):
         """The (rank, suit) tuples used for scoring this player's
         hand. Default: every card in ``console_hand_cards`` belonging

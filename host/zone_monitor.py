@@ -39,11 +39,20 @@ CLAUDE_MODEL = "claude-sonnet-4-20250514"
 
 
 class ZoneMonitor:
-    def __init__(self, threshold, get_zones, stats_cb=None):
+    def __init__(self, threshold, get_zones, stats_cb=None,
+                 speech_formatter=None):
         self.threshold = threshold
         self.yolo_min_conf = 0.50  # below this, fall back to Claude API
         self._get_zones = get_zones
         self._stats_cb = stats_cb or (lambda key: None)
+        # Optional callback (name, card_text) -> speech string. Lets
+        # the active game class customize the per-card announcement —
+        # e.g. 7/27 appending "with N or less down below" when a
+        # player's visible total starts edging toward 27. Default
+        # just speaks "{name}, {card}" as before.
+        self._speech_formatter = (
+            speech_formatter or (lambda name, card: f"{name}, {card}")
+        )
         self.baselines = {}
         self.last_card = {}
         self.zone_state = {}
@@ -161,7 +170,7 @@ class ZoneMonitor:
                         self._stats_cb("yolo_right")
                         log.log(f"[{name}] RECOGNIZED: {result} (total {total_ms:.0f}ms)")
                         self._save(name, crop, result)
-                        speech.say(f"{name}, {result}")
+                        speech.say(self._speech_formatter(name, result))
                     else:
                         # Need Claude
                         need_claude[name] = (crop, details)
@@ -195,7 +204,7 @@ class ZoneMonitor:
                     self._stats_cb("yolo_right")
                     log.log(f"[{name}] RECOGNIZED (low conf, no Claude): {yolo_result}")
                     self._save(name, crop, yolo_result)
-                    speech.say(f"{name}, {yolo_result}")
+                    speech.say(self._speech_formatter(name, yolo_result))
                 else:
                     self.zone_state[name] = "empty"
                 self.recognition_details[name] = details
@@ -266,7 +275,7 @@ class ZoneMonitor:
                             self.zone_state[name] = "recognized"
                             log.log(f"[{name}] RECOGNIZED (Claude): {result}")
                             self._save(name, crop, result)
-                            speech.say(f"{name}, {result}")
+                            speech.say(self._speech_formatter(name, result))
                         else:
                             details["claude"] = "No card"
                             self.zone_state[name] = "empty"
@@ -290,7 +299,7 @@ class ZoneMonitor:
                         self.zone_state[name] = "recognized"
                         log.log(f"[{name}] RECOGNIZED (YOLO fallback): {yolo_result}")
                         self._save(name, crop, yolo_result)
-                        speech.say(f"{name}, {yolo_result}")
+                        speech.say(self._speech_formatter(name, yolo_result))
                     else:
                         self.zone_state[name] = "empty"
                     self.recognition_details[name] = details
@@ -313,7 +322,7 @@ class ZoneMonitor:
                     self.zone_state[name] = "recognized"
                     log.log(f"[{name}] RECOGNIZED (YOLO, Claude failed): {yolo_result}")
                     self._save(name, crop, yolo_result)
-                    speech.say(f"{name}, {yolo_result}")
+                    speech.say(self._speech_formatter(name, yolo_result))
                 else:
                     self.zone_state[name] = "empty"
                 self.recognition_details[name] = details

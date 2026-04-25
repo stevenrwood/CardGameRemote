@@ -3891,10 +3891,25 @@ def main():
     cal = Calibration()
     cal.load()
 
+    def _per_card_speech(name, card_text):
+        # Default: just "{name}, {card}". The active game class can
+        # extend this — 7/27 appends "with N or less down below"
+        # when the player's running up-card total nears 27.
+        default = f"{name}, {card_text}"
+        impl = getattr(_state, "current_game_impl", None) if _state else None
+        if impl is None:
+            return default
+        try:
+            return impl.annotate_card_speech(_state, name, card_text, default)
+        except Exception as e:
+            log.log(f"[SPEECH] annotate_card_speech failed: {e!r}")
+            return default
+
     monitor = ZoneMonitor(
         threshold=args.threshold,
         get_zones=lambda: cal.zones,
         stats_cb=lambda key: _stats_bump(_state, key),
+        speech_formatter=_per_card_speech,
     )
     _state = AppState(capture, cal, monitor)
     _state.latest_frame = frame
