@@ -659,10 +659,15 @@ def _announce_poker_hand_bet_first(s):
     )
     if all_results:
         best_player, best_result = all_results[0]
-        runner_up_result = all_results[1][1] if len(all_results) > 1 else None
+        if len(all_results) > 1:
+            runner_up_player, runner_up_result = all_results[1]
+        else:
+            runner_up_player = None
+            runner_up_result = None
     else:
         best_player = None
         best_result = None
+        runner_up_player = None
         runner_up_result = None
 
     if best_player is not None and best_result is not None:
@@ -674,50 +679,129 @@ def _announce_poker_hand_bet_first(s):
         tb = best_result.tiebreakers
         name_of = lambda v: RANK_NAME.get(VALUE_RANK.get(v, ""), "")
         plural_of = lambda v: RANK_PLURAL.get(VALUE_RANK.get(v, ""), name_of(v) + "s")
+        wild_set = set(wild_ranks)
+
+        # Per-category, how many of `tb`'s leading positions are
+        # "primary" (already part of the spoken phrase). Anything
+        # beyond is a kicker that only gets announced when the
+        # runner-up has the same primary and the kicker actually
+        # decides the hand. high_card has no fixed primary — every
+        # value is just a tiebreaker the dealer narrates one by one.
+        primary_count = {
+            "five_of_a_kind": 1,
+            "four_of_a_kind": 1,
+            "three_of_a_kind": 1,
+            "full_house": 2,
+            "flush": 1,
+            "two_pair": 2,
+            "pair": 1,
+            "straight_flush": 1,
+            "straight": 1,
+            "high_card": 0,
+        }.get(cat, 1)
+
+        def _extended_compare(result, cards):
+            """Return descending [primary..., kickers...]. For
+            categories whose tiebreakers don't carry kickers (pair,
+            two_pair, three / four of a kind), pull kickers from the
+            visible cards minus the cards used in the primary hand,
+            with wild cards counted as Ace=14."""
+            primary = list(result.tiebreakers)
+            kc = result.category
+            if kc in ("five_of_a_kind", "straight_flush", "straight",
+                      "full_house", "flush", "high_card"):
+                return primary
+            used_set = {(c.rank, c.suit.lower()) for c in result.cards}
+            kickers = []
+            for rank, suit in cards:
+                if (rank, suit.lower()) in used_set:
+                    continue
+                if rank in wild_set:
+                    kickers.append(14)
+                else:
+                    rv = RANK_VALUE.get(rank, 0)
+                    if rv:
+                        kickers.append(rv)
+            kickers.sort(reverse=True)
+            return primary + kickers
+
+        best_cards = per_player_cards.get(best_player, [])
+        best_compare = _extended_compare(best_result, best_cards)
+        if (runner_up_result is not None
+                and runner_up_result.category == cat):
+            ru_cards = per_player_cards.get(runner_up_player, [])
+            ru_compare = _extended_compare(runner_up_result, ru_cards)
+        else:
+            ru_compare = []
+
+        # How many positions of best_compare actually need to be
+        # spoken to differentiate from the runner-up. Always at least
+        # 1, and never less than the category's primary_count (since
+        # the spoken phrase already names that many).
+        needed = 1
+        for i, v in enumerate(best_compare):
+            needed = i + 1
+            if i >= len(ru_compare) or v > ru_compare[i]:
+                break
+        if needed < primary_count:
+            needed = primary_count
+        extra = max(0, needed - primary_count)
+
+        def _kicker_suffix(values):
+            names = [name_of(v) for v in values if v]
+            if not names:
+                return ""
+            joined = ", ".join(names)
+            return f"{joined} kicker" if len(names) == 1 else f"{joined} kickers"
+
+        def _maybe_append_kickers(base_phrase, kicker_start):
+            if extra <= 0:
+                return base_phrase
+            suffix = _kicker_suffix(best_compare[kicker_start:kicker_start + extra])
+            return f"{base_phrase}, {suffix}" if suffix else base_phrase
+
         if cat == "five_of_a_kind":
             hand_phrase = f"Five {plural_of(tb[0])}"
         elif cat == "four_of_a_kind":
-            hand_phrase = f"Four {plural_of(tb[0])}"
+            hand_phrase = _maybe_append_kickers(
+                f"Four {plural_of(tb[0])}", 1
+            )
         elif cat == "three_of_a_kind":
-            hand_phrase = f"Three {plural_of(tb[0])}"
+            hand_phrase = _maybe_append_kickers(
+                f"Three {plural_of(tb[0])}", 1
+            )
         elif cat == "full_house":
-            hand_phrase = f"Full house, {plural_of(tb[0])} over {plural_of(tb[1])}"
+            hand_phrase = (
+                f"Full house, {plural_of(tb[0])} over {plural_of(tb[1])}"
+            )
         elif cat == "two_pair":
-            hand_phrase = f"Two {plural_of(tb[0])} and two {plural_of(tb[1])}"
+            hand_phrase = _maybe_append_kickers(
+                f"Two {plural_of(tb[0])} and two {plural_of(tb[1])}", 2
+            )
         elif cat == "pair":
-            hand_phrase = f"Two {plural_of(tb[0])}"
+            hand_phrase = _maybe_append_kickers(
+                f"Two {plural_of(tb[0])}", 1
+            )
         elif cat == "straight_flush" and tb[0] == 14:
             hand_phrase = "Royal flush"
         elif cat == "straight_flush":
             hand_phrase = f"{name_of(tb[0])} high straight flush"
         elif cat == "flush":
-            hand_phrase = f"{name_of(tb[0])} high flush"
+            # Flush extends the "X high flush" phrase rather than
+            # using the "kicker" suffix — convention is "Ace, Jack
+            # high flush" when the second card breaks the tie.
+            ranks = [name_of(v) for v in best_compare[:needed] if v]
+            top_part = ", ".join(ranks) if ranks else name_of(tb[0])
+            hand_phrase = f"{top_part} high flush"
         elif cat == "straight":
             hand_phrase = f"{name_of(tb[0])} high straight"
         else:
-            # high card: announce only as many ranks as actually decide
-            # the hand against the runner-up. Tiebreakers are already
-            # ordered most-significant-first with wilds substituted as
-            # Ace=14, so walk position-by-position and stop on the
-            # first card that strictly beats the runner-up at the same
-            # position (or where the runner-up has no card to compare).
-            best_tb = list(best_result.tiebreakers)
-            ru_tb = (
-                list(runner_up_result.tiebreakers)
-                if runner_up_result is not None else []
-            )
-            if not best_tb:
+            # high_card: phrase IS the (truncated) tiebreaker list.
+            if not best_compare:
                 hand_phrase = "no card"
             else:
-                needed = 1
-                for i, v in enumerate(best_tb):
-                    needed = i + 1
-                    if i >= len(ru_tb) or v > ru_tb[i]:
-                        break
-                ranks_spoken = [name_of(v) for v in best_tb[:needed] if v]
-                hand_phrase = (
-                    ", ".join(ranks_spoken) if ranks_spoken else "no card"
-                )
+                ranks = [name_of(v) for v in best_compare[:needed] if v]
+                hand_phrase = ", ".join(ranks) if ranks else "no card"
         phrase = f"{best_player}, {hand_phrase} is high. Your bet."
         log.log(f"[POKER] Bet first: {phrase} ({best_result.label})")
         speech.say(phrase)
