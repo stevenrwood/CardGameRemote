@@ -844,6 +844,16 @@ class AppState:
         # Rodney's down cards come from the Pi scanner; other players only
         # expose a down-count + up-cards on the observer view.
         self.table_state_version = 0
+        # Last time a /table/state poll arrived bearing a Cloudflare
+        # tunnel header (cf-ray). When this is recent, /table requests
+        # without that header are assumed to be the local table monitor
+        # and Rodney's down cards get redacted in the response — the
+        # whole point of running scripts/start_rodney_tunnel.sh is that
+        # only Rodney sees his own hole cards. Stays at 0 until the
+        # first tunnel poll lands; expires (REMOTE_VIEWER_WINDOW_S
+        # seconds after the last tunnel poll) so closing the tunnel
+        # restores full visibility for in-person play.
+        self.rodney_tunnel_seen_at = 0.0
         # Rodney's down-card slots. Indexed by scanner slot number so a
         # fluctuating or re-scanned slot replaces its prior value instead of
         # appending a new entry. Each value is {rank, suit, confidence}.
@@ -1249,6 +1259,38 @@ def _build_table_state(s):
 def _table_state_bump(s):
     """Call when something observable changes so polling clients re-render."""
     s.table_state_version += 1
+
+
+# How long after Rodney's last tunnel poll the local view stays
+# redacted. The /table page polls /table/state every ~2 s, so this
+# only needs to bridge brief network blips; 30 s gives generous
+# headroom while keeping the post-disconnect "reveal" prompt enough
+# to be noticeable.
+REMOTE_VIEWER_WINDOW_S = 30.0
+
+
+def _redact_remote_downs(doc):
+    """Hide the remote player's hole cards in a /table/state document
+    so a viewer who isn't the remote player can't read his hand.
+
+    Mirrors what local players actually see at the table: down cards
+    show as face-down placeholders (preserving the count), and any
+    derived totals that incorporated those cards (poker best_hand,
+    7/27 values_7_27) are dropped.
+    """
+    for entry in doc.get("players", []) or []:
+        if not entry.get("is_remote"):
+            continue
+        new_hand = []
+        for card in entry.get("hand", []) or []:
+            if card.get("type") == "down":
+                new_hand.append({"type": "down", "hidden": True})
+            else:
+                new_hand.append(card)
+        if "hand" in entry:
+            entry["hand"] = new_hand
+        entry.pop("best_hand", None)
+        entry.pop("values_7_27", None)
 
 
 def _dealing_phase_types():

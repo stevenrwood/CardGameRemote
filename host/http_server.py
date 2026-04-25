@@ -43,6 +43,8 @@ from overhead_test import (
     PLAYER_NAMES,
     _announce_poker_hand_bet_first,
     _build_table_state,
+    _redact_remote_downs,
+    REMOTE_VIEWER_WINDOW_S,
     _check_follow_the_queen_round,
     _collect_mode_json,
     _collect_redo,
@@ -1716,12 +1718,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _table_state(self, s):
         try:
             doc = _build_table_state(s)
-            body = json.dumps(doc)
         except Exception as e:
             body = json.dumps({"error": str(e)})
             return self._r(500, "application/json", body)
-        # ETag short-circuit: if client already has this version, return 304.
-        etag = f'W/"v{doc.get("version", 0)}"'
+        # Cloudflare adds a cf-ray header to every proxied request, so
+        # its presence reliably distinguishes Rodney (remote, via the
+        # tunnel) from the dealer's local /table monitor. Tunnel polls
+        # bump the seen-at timestamp; non-tunnel polls within the
+        # window get a redacted view that hides Rodney's hole cards
+        # from anyone sitting at the table.
+        is_tunnel = bool(self.headers.get("cf-ray"))
+        if is_tunnel:
+            s.rodney_tunnel_seen_at = time.time()
+            variant = "r"
+        elif (time.time() - getattr(s, "rodney_tunnel_seen_at", 0.0)
+              < REMOTE_VIEWER_WINDOW_S):
+            _redact_remote_downs(doc)
+            variant = "l"
+        else:
+            variant = "f"
+        body = json.dumps(doc)
+        # ETag short-circuit: include the variant so a cached redacted
+        # body never gets served as the full doc (and vice versa).
+        etag = f'W/"v{doc.get("version", 0)}-{variant}"'
         inm = self.headers.get("If-None-Match")
         if inm == etag:
             self.send_response(304)
