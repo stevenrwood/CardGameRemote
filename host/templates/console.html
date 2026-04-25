@@ -602,6 +602,44 @@ function saveCorrection(){
 
 function closeModal(id){document.getElementById(id).style.display='none';}
 
+// Bluetooth camera shutter remote → trigger Scan.
+// These cheap remotes appear as a keyboard. Different models send
+// different keys depending on iOS/Android mode:
+//   - "AB Shutter 3" iOS mode: AudioVolumeUp (often intercepted by
+//     iOS/iPadOS at the OS level — won't reach JS).
+//   - Android mode (or with a setting toggle): Enter.
+//   - Some send Space, MediaPlayPause, or arbitrary keys.
+// Listener accepts the common ones. Unrecognized keys log to the
+// browser console so you can see what your remote actually sends.
+document.addEventListener('keydown', function(ev) {
+  if (!ST || !ST.game_in_progress) return;
+  // Don't intercept while typing in a form field.
+  var t = document.activeElement;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
+            || t.tagName === 'SELECT')) return;
+  // Don't intercept while a modal is open (correct-card / setup).
+  var anyModalOpen = false;
+  ['setup-modal','correct-modal'].forEach(function(id){
+    var m = document.getElementById(id);
+    if (m && m.style.display && m.style.display !== 'none') anyModalOpen = true;
+  });
+  if (anyModalOpen) return;
+  var k = ev.key;
+  if (k === 'AudioVolumeUp' || k === 'VolumeUp'
+      || k === 'Enter'
+      || k === ' ' || k === 'Space'
+      || k === 'MediaTrackNext'
+      || k === 'MediaPlayPause') {
+    ev.preventDefault();
+    console.log('[shutter] ' + k + ' → Scan');
+    scanNow();
+    return;
+  }
+  // Log unrecognized keys so we can extend the matcher.
+  console.log('[shutter?] key=' + ev.key + ' code=' + ev.code
+              + ' keyCode=' + ev.keyCode);
+});
+
 setInterval(refresh,2000);
 refresh();
 </script></body></html>
