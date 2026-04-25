@@ -507,62 +507,64 @@ _ALL_CARDS = [
 
 
 def _dedup_round_cards_against_seen(s, round_cards):
-    """If a recognized up card duplicates a card we've already seen in this
-    hand (prior up rounds, Rodney's scanned down cards, or another player's
-    card in the same round), swap it for a random card that isn't already
-    in play. Operates in place on round_cards.
+    """Detect duplicate cards at confirm time.
 
-    The scanner can't distinguish two identical-looking cards, and Claude
-    will sometimes echo back whatever it saw last. Rodney's down cards are
-    invisible to the overhead camera, so a duplicate against one of them
-    is a near-certain misread.
+    Two flavors of collision get treated differently:
+
+    1. SAME-SCAN duplicate — two zones in *this* Brio scan returned
+       the same card. Almost always a YOLO hallucination (the model
+       has a bias toward a handful of cards on ambiguous inputs;
+       Ace of Diamonds especially). The auto-recognized card gets
+       cleared so the dealer is forced to re-scan or hand-correct
+       that player. User-corrected zones are trusted.
+
+    2. CROSS-ROUND duplicate — this round's card matches one already
+       in console_hand_cards (a prior round) or Rodney's known
+       downs. We can't tell which side is wrong: maybe a previous
+       round had a hallucination and this round is right; maybe
+       this round is the hallucination. Log it and leave as-is so
+       the genuine card still shows in the player's hand. The
+       dealer can correct after the fact via the zone-tap modal if
+       needed.
+
+    Operates in place on round_cards.
     """
-    seen = set()
-    # Prior confirmed up cards
+    history_seen = set()
     for c in s.console_hand_cards:
-        seen.add(c["card"])
-    # Rodney's known down cards (verified + pending low-conf guesses).
-    # Skip his flipped slot — the flipped card IS this round's up card
-    # for Rodney, so including it in seen would flag his own scan as a
-    # self-collision and trigger a random substitution.
+        history_seen.add(c["card"])
     suit_full = {"c": "Clubs", "d": "Diamonds", "h": "Hearts", "s": "Spades"}
     rank_full = {"A": "Ace", "K": "King", "Q": "Queen", "J": "Jack"}
+
     def _canonical(rank, suit):
         return f"{rank_full.get(rank, rank)} of {suit.capitalize()}"
+
     flipped_slot = (s.rodney_flipped_up or {}).get("slot")
     for slot_num, d in s.rodney_downs.items():
         if slot_num == flipped_slot:
             continue
-        seen.add(_canonical(d["rank"], d["suit"]))
+        history_seen.add(_canonical(d["rank"], d["suit"]))
     for d in s.slot_pending.values():
-        seen.add(_canonical(d["rank"], d["suit"]))
+        history_seen.add(_canonical(d["rank"], d["suit"]))
 
-    # Iterate over a copy so we can mutate round_cards in place.
+    same_scan_seen = set()
     cleared = []
     for entry in list(round_cards):
         card = entry.get("card", "")
         player = entry.get("player", "")
-        if card in seen:
-            # User-corrected zones are trusted — collision is almost
-            # always a misrecognized prior card in `seen`, not the
-            # value the user just typed.
+        if not card:
+            continue
+        if card in same_scan_seen:
+            # Same-scan dup → almost certainly a hallucination.
             if s.monitor.zone_state.get(player) == "corrected":
                 log.log(
-                    f"[CONFIRM] {player}: {card} collides with seen card "
-                    f"but was user-corrected — keeping as-is"
+                    f"[CONFIRM] {player}: {card} duplicates same-scan "
+                    f"card but was user-corrected — keeping as-is"
                 )
-                seen.add(card)
                 continue
-            # Auto-recognition collision: YOLO is biased toward a few
-            # cards (Ace of Diamonds especially) when the input is
-            # ambiguous, and Claude sometimes echoes the prior zone's
-            # value back. Either way the card almost certainly isn't
-            # what's physically on the table — clear the zone so the
-            # round doesn't accumulate the bad value, and the dealer
-            # is forced to re-scan or hand-correct that player.
             log.log(
-                f"[CONFIRM] {player}: {card} duplicate of seen card — "
-                f"clearing recognition; dealer must re-scan or correct"
+                f"[CONFIRM] {player}: {card} duplicates same-scan "
+                f"card — clearing recognition; dealer must re-scan "
+                f"or correct"
             )
             s.monitor.last_card[player] = ""
             s.monitor.zone_state[player] = "empty"
@@ -571,13 +573,20 @@ def _dedup_round_cards_against_seen(s, round_cards):
             except ValueError:
                 pass
             cleared.append(player)
-            # Don't add the cleared card to `seen` — leaves the slot
-            # available for whatever the real card turns out to be.
             continue
-        seen.add(card)
+        if card in history_seen:
+            # Cross-round dup → log only, leave the genuine-looking
+            # card in place. The history entry could just as easily
+            # be the hallucination.
+            log.log(
+                f"[CONFIRM] {player}: {card} duplicates a prior round / "
+                f"Rodney down — keeping as-is (dealer can correct via "
+                f"zone tap if wrong)"
+            )
+        same_scan_seen.add(card)
     if cleared:
         log.log(
-            f"[CONFIRM] Cleared duplicate recognitions for: "
+            f"[CONFIRM] Cleared same-scan duplicates for: "
             f"{', '.join(cleared)}"
         )
 
