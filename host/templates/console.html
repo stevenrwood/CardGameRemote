@@ -96,8 +96,10 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
 
   <div class="players-row">
     <h2 id="players-heading">Up cards seen</h2>
+    <span id="last-key" style="margin-left:auto;font-size:.75em;
+          color:#888;font-family:monospace"></span>
     <button id="scan-btn" class="sml-btn" onclick="scanNow()" disabled
-            style="margin-left:auto">Scan</button>
+            style="margin-left:6px">Scan</button>
     <button id="rescan-btn" class="sml-btn" onclick="rescanAll()" disabled
             style="margin-left:6px">Rescan all</button>
   </div>
@@ -611,8 +613,19 @@ function closeModal(id){document.getElementById(id).style.display='none';}
 //   - Some send Space, MediaPlayPause, or arbitrary keys.
 // Listener accepts the common ones. Unrecognized keys log to the
 // browser console so you can see what your remote actually sends.
+function _showLastKey(label, fired) {
+  var el = document.getElementById('last-key');
+  if (!el) return;
+  el.textContent = (fired ? '✓ ' : '· ') + label;
+  el.style.color = fired ? '#4caf50' : '#888';
+  // Fade after 4s
+  if (_showLastKey._t) clearTimeout(_showLastKey._t);
+  _showLastKey._t = setTimeout(function(){
+    el.textContent = ''; el.style.color = '#888';
+  }, 4000);
+}
+
 document.addEventListener('keydown', function(ev) {
-  if (!ST || !ST.game_in_progress) return;
   // Don't intercept while typing in a form field.
   var t = document.activeElement;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
@@ -625,19 +638,25 @@ document.addEventListener('keydown', function(ev) {
   });
   if (anyModalOpen) return;
   var k = ev.key;
-  if (k === 'AudioVolumeUp' || k === 'VolumeUp'
-      || k === 'Enter'
-      || k === ' ' || k === 'Space'
-      || k === 'MediaTrackNext'
-      || k === 'MediaPlayPause') {
-    ev.preventDefault();
-    console.log('[shutter] ' + k + ' → Scan');
-    scanNow();
-    return;
-  }
-  // Log unrecognized keys so we can extend the matcher.
-  console.log('[shutter?] key=' + ev.key + ' code=' + ev.code
+  var matched = (
+    k === 'AudioVolumeUp' || k === 'VolumeUp'
+    || k === 'Enter'
+    || k === ' ' || k === 'Space'
+    || k === 'MediaTrackNext'
+    || k === 'MediaPlayPause'
+  );
+  // Always update the on-screen indicator so the user can see
+  // what their remote is sending even on iPhone Safari without
+  // a dev console. Format: "key code keyCode".
+  var label = (k || '?') + ' ' + (ev.code || '') + ' #' + ev.keyCode;
+  _showLastKey(label, matched);
+  console.log('[shutter' + (matched ? '' : '?') + '] '
+              + 'key=' + ev.key + ' code=' + ev.code
               + ' keyCode=' + ev.keyCode);
+  if (!matched) return;
+  if (!ST || !ST.game_in_progress) return;
+  ev.preventDefault();
+  scanNow();
 });
 
 setInterval(refresh,2000);
