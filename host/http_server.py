@@ -81,6 +81,8 @@ from overhead_test import (
     _clear_rodney_challenge_leds,
     _forced_betting_limit,
     _betting_limit_label,
+    _betting_limit_spoken,
+    _speak_ante,
     FORCED_POT_LIMIT_GAMES,
     BETTING_LIMIT_LABELS,
     CHALLENGE_SUBSEQUENT_ANTE_CENTS,
@@ -1102,15 +1104,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.challenge_round_index = None
                 # Single Start-Game announcement — dealer + game + ante
                 # + betting limit + current pot. The pot line runs for
-                # every game (not just Challenge) so the dealer can
-                # cross-check the physical chip stack against what
-                # we've tracked before the deal starts.
+                # every game so the dealer can cross-check the physical
+                # chip stack against what we've tracked before the deal
+                # starts. "No pot carryover" means this should always
+                # read $0.00 at a fresh hand start; non-zero pot means
+                # the previous hand didn't resolve cleanly.
                 dealer_name = ge.get_dealer().name
                 _log_and_speak(s,
                     f"Dealer is {dealer_name}. Game is {game_name}. "
-                    f"Ante {_fmt_money(s.ante_cents)}. "
-                    f"{_betting_limit_label(s.betting_limit)}. "
-                    f"Pot is now {_fmt_money(s.pot_cents)}.")
+                    f"{_speak_ante(s.ante_cents)} ante. "
+                    f"{_betting_limit_spoken(s.betting_limit)}. "
+                    f"Pot is {_fmt_money(s.pot_cents)}.")
                 # Let the per-game class wire up its own per-hand state
                 # (freeze counters, local flags) now that common state is
                 # reset and the engine knows the current game.

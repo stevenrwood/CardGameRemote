@@ -2297,6 +2297,14 @@ BETTING_LIMIT_LABELS = {
     "pot": "Pot limit",
 }
 
+# Spoken phrasing for TTS — "$1 / $2" doesn't read well, so use
+# word form for the Start-Game announcement.
+BETTING_LIMIT_SPOKEN = {
+    "1_2": "Betting is one and two",
+    "1_all_way": "Betting is one all the way",
+    "pot": "Betting is pot limit",
+}
+
 # After the first round of a Challenge hand, every subsequent
 # round's ante (rounds 2, 3, and any post-reshuffle rounds) is a
 # flat 50c per player regardless of what the dealer picked on the
@@ -2323,6 +2331,21 @@ def _challenge_ante_cents_for(s, shuffle_count: int, round_index: int) -> int:
 
 def _betting_limit_label(code: str) -> str:
     return BETTING_LIMIT_LABELS.get(code, code)
+
+
+def _betting_limit_spoken(code: str) -> str:
+    return BETTING_LIMIT_SPOKEN.get(code, _betting_limit_label(code))
+
+
+def _speak_ante(cents: int) -> str:
+    """TTS-friendly ante phrasing — '50 cent', '75 cent', '1 dollar',
+    '2 dollar'. Whole dollars take the singular 'dollar'; sub-dollar
+    amounts use the integer + 'cent'."""
+    if cents == 0:
+        return "no ante"
+    if cents % 100 == 0:
+        return f"{cents // 100} dollar"
+    return f"{cents} cent"
 
 
 def _game_is_challenge(ge) -> bool:
@@ -2672,15 +2695,10 @@ def _start_next_challenge_round(s):
 
 
 def _handle_challenge_winner(s, winner_name: str) -> bool:
-    """Dealer-announced winner for a 2+ compare. The losers pay the
-    winner the current pot amount (pot itself stays on the table).
-
-    The hand only ends when the pot is awarded (1-out-all-pass path);
-    after a 2+ compare the pot is untouched and the hand continues.
-    In rounds 1-2 that means advancing into the next round; in round
-    3 (last round of the shuffle cycle) the deck is exhausted, so we
-    transition to 'reshuffle' to collect + re-deal from round 1 with
-    the pot carried over.
+    """Dealer-announced winner for a 2+ compare. The winner takes the
+    pot; each loser also pays the winner the pot amount. Hand ends —
+    no pot carryover between hands, and every hand must produce a
+    winner.
 
     Returns True on success."""
     if s.console_state != "challenge_resolve":
@@ -2696,21 +2714,11 @@ def _handle_challenge_winner(s, winner_name: str) -> bool:
         f"{winner_name} wins. "
         f"{_format_name_list(losers)} {verb} {winner_name} "
         f"{_fmt_money(per_loser)}.")
-    next_idx = (s.challenge_round_index or 0) + 1
-    # Rodney's commit LEDs are no longer meaningful after settle.
+    # Winner takes the pot on top of the side payments; hand ends.
     _clear_rodney_challenge_leds(s)
-    if next_idx >= 3:
-        # End of a shuffle cycle with the pot still unawarded —
-        # same landing pad as a 0-out round 3.
-        s.console_state = "reshuffle"
-        _log_and_speak(s, "Deck exhausted. Reshuffle and redeal.")
-        _bump_table_version(s)
-        return True
-    # Advance into the next round — everyone's passes/out reset
-    # inside _start_next_challenge_round so previously-committed
-    # players rejoin the vote with the new cards added to their hand.
-    s.challenge_round_index = next_idx
-    _start_next_challenge_round(s)
+    s.pot_cents = 0
+    s.console_state = "hand_over"
+    _bump_table_version(s)
     return True
 
 
