@@ -11,6 +11,8 @@ button{font-family:inherit;font-weight:600;border:none;border-radius:8px;cursor:
   -webkit-tap-highlight-color:transparent}
 .sml-btn{padding:6px 10px;font-size:.85em;background:#2a3258;color:#e0e0e0}
 .sml-btn:disabled{opacity:.4;cursor:not-allowed}
+.players-row{display:flex;align-items:center;gap:8px;margin:8px 0 4px}
+.players-row h2{margin:0;flex:0 0 auto}
 select{padding:10px;border-radius:8px;border:1px solid #444;background:#16213e;color:#e0e0e0;
   font-size:1em;width:100%;-webkit-appearance:none;appearance:none}
 select:disabled{opacity:.55}
@@ -92,7 +94,11 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
        color:#f3e9ff;padding:8px 12px;border-radius:8px;text-align:center;
        font-weight:600;font-size:1.05em;margin:8px 0"></div>
 
-  <h2 id="players-heading">Up cards seen</h2>
+  <div class="players-row">
+    <h2 id="players-heading">Up cards seen</h2>
+    <button id="rescan-btn" class="sml-btn" onclick="rescanAll()" disabled
+            style="margin-left:auto">Rescan all</button>
+  </div>
   <div id="zone-cards"></div>
 </div>
 
@@ -318,6 +324,10 @@ function render(){
   } else {
     abtn.style.visibility='hidden';
   }
+  // Rescan-all is only useful while a hand has up cards being
+  // recognized — disable when no game's in progress.
+  var rbtn=document.getElementById('rescan-btn');
+  if(rbtn) rbtn.disabled=!ST.game_in_progress;
 
   (ST.active_players||[]).forEach(function(n){
     var zi=(ST.zone_cards||{})[n]||{};
@@ -524,6 +534,12 @@ function startGame(){
     return;
   }
   api('/api/console/deal',body).then(refresh);
+}
+
+function rescanAll(){
+  if(!ST || !ST.game_in_progress) return;
+  if(!confirm("Wipe every zone's up card and rescan?")) return;
+  api('/api/console/rescan_all').then(refresh);
 }
 
 function onAction(){

@@ -924,6 +924,55 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 os._exit(0)
             Thread(target=_bye, daemon=True).start()
 
+        elif p == "/api/console/rescan_all":
+            # Forget every zone's current up-card and rescan all zones
+            # the current game cares about — including ones the user
+            # had corrected. Useful when YOLO has hallucinated a few
+            # cards and the dealer wants to start the round's
+            # recognition from scratch. /api/console/force_scan skips
+            # corrected zones to preserve user input; this endpoint
+            # explicitly does NOT.
+            frame = s.latest_frame
+            if frame is None:
+                return self._r(503, "application/json",
+                               '{"ok":false,"error":"no frame yet"}')
+            impl = s.current_game_impl
+            if impl is not None:
+                scan_names, _ = impl.zones_to_scan(s)
+            else:
+                scan_names = list(s.console_active_players)
+            watched = set(scan_names)
+            zone_crops = {}
+            for z in s.cal.zones:
+                name = z["name"]
+                if name not in watched:
+                    continue
+                # Wipe state so /api/console/state stops showing the
+                # old card while the new scan is in flight.
+                s.monitor.last_card[name] = ""
+                s.monitor.zone_state[name] = "empty"
+                s.monitor.recognition_details[name] = {}
+                s.monitor.recognition_crops[name] = None
+                crop = s.monitor._crop(frame, z)
+                if crop is None or crop.size == 0:
+                    continue
+                zone_crops[name] = crop.copy()
+                s.monitor.pending[name] = True
+            log.log(
+                f"[CONSOLE] Rescan all — wiped {len(watched)} zones, "
+                f"scanning {len(zone_crops)}"
+            )
+            with s.table_lock:
+                s.table_state_version += 1
+            if not zone_crops:
+                return self._r(200, "application/json",
+                               '{"ok":true,"scanned":0}')
+            s.console_scan_phase = "scanned"
+            Thread(target=s.monitor._recognize_batch,
+                   args=(zone_crops,), daemon=True).start()
+            self._r(200, "application/json",
+                    json.dumps({"ok": True, "scanned": len(zone_crops)}))
+
         elif p == "/api/console/force_scan":
             # Dealer clicked "Waiting for cards..." — skip motion detection
             # and scan every zone the game says is in play right now.

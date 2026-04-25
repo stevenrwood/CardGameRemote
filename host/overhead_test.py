@@ -537,27 +537,49 @@ def _dedup_round_cards_against_seen(s, round_cards):
     for d in s.slot_pending.values():
         seen.add(_canonical(d["rank"], d["suit"]))
 
-    for entry in round_cards:
+    # Iterate over a copy so we can mutate round_cards in place.
+    cleared = []
+    for entry in list(round_cards):
         card = entry.get("card", "")
         player = entry.get("player", "")
         if card in seen:
-            # If the user has explicitly corrected this zone, trust the
-            # correction and keep the card as-is — the collision is
-            # almost always a misrecognized down card in seen, not the
-            # users value. Otherwise log the collision but still keep
-            # the scan; randomly substituting a card corrupts wild
-            # tracking (fake Queens) and hand evaluation.
+            # User-corrected zones are trusted — collision is almost
+            # always a misrecognized prior card in `seen`, not the
+            # value the user just typed.
             if s.monitor.zone_state.get(player) == "corrected":
                 log.log(
                     f"[CONFIRM] {player}: {card} collides with seen card "
                     f"but was user-corrected — keeping as-is"
                 )
-            else:
-                log.log(
-                    f"[CONFIRM] {player}: {card} collides with seen card "
-                    f"— leaving as-is (dealer can correct if wrong)"
-                )
+                seen.add(card)
+                continue
+            # Auto-recognition collision: YOLO is biased toward a few
+            # cards (Ace of Diamonds especially) when the input is
+            # ambiguous, and Claude sometimes echoes the prior zone's
+            # value back. Either way the card almost certainly isn't
+            # what's physically on the table — clear the zone so the
+            # round doesn't accumulate the bad value, and the dealer
+            # is forced to re-scan or hand-correct that player.
+            log.log(
+                f"[CONFIRM] {player}: {card} duplicate of seen card — "
+                f"clearing recognition; dealer must re-scan or correct"
+            )
+            s.monitor.last_card[player] = ""
+            s.monitor.zone_state[player] = "empty"
+            try:
+                round_cards.remove(entry)
+            except ValueError:
+                pass
+            cleared.append(player)
+            # Don't add the cleared card to `seen` — leaves the slot
+            # available for whatever the real card turns out to be.
+            continue
         seen.add(card)
+    if cleared:
+        log.log(
+            f"[CONFIRM] Cleared duplicate recognitions for: "
+            f"{', '.join(cleared)}"
+        )
 
 
 def _announce_poker_hand_bet_first(s):
