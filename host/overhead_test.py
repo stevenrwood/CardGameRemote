@@ -2695,10 +2695,14 @@ def _start_next_challenge_round(s):
 
 
 def _handle_challenge_winner(s, winner_name: str) -> bool:
-    """Dealer-announced winner for a 2+ compare. The winner takes the
-    pot; each loser also pays the winner the pot amount. Hand ends —
-    no pot carryover between hands, and every hand must produce a
-    winner.
+    """Dealer-announced winner for a 2+ compare. Each loser pays the
+    winner the current pot amount as a side payment; the pot itself
+    stays on the table and the hand continues — only a 1-out-all-
+    pass actually awards (and zeros) the pot.
+
+    In rounds 1-2 that means advancing into the next round. Round 3
+    always ends the shuffle cycle: 2+ compare there triggers a
+    reshuffle so the hand keeps going toward a single winner.
 
     Returns True on success."""
     if s.console_state != "challenge_resolve":
@@ -2714,11 +2718,20 @@ def _handle_challenge_winner(s, winner_name: str) -> bool:
         f"{winner_name} wins. "
         f"{_format_name_list(losers)} {verb} {winner_name} "
         f"{_fmt_money(per_loser)}.")
-    # Winner takes the pot on top of the side payments; hand ends.
     _clear_rodney_challenge_leds(s)
-    s.pot_cents = 0
-    s.console_state = "hand_over"
-    _bump_table_version(s)
+    next_idx = (s.challenge_round_index or 0) + 1
+    if next_idx >= 3:
+        # End of the shuffle cycle with the pot still unawarded —
+        # reshuffle and redeal.
+        s.console_state = "reshuffle"
+        _log_and_speak(s, "Deck exhausted. Reshuffle and redeal.")
+        _bump_table_version(s)
+        return True
+    # Advance into the next round — everyone's passes/out reset inside
+    # _start_next_challenge_round so previously-committed players
+    # rejoin the vote with the new cards added to their hand.
+    s.challenge_round_index = next_idx
+    _start_next_challenge_round(s)
     return True
 
 
