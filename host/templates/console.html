@@ -171,6 +171,14 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
 var ST=null;
 var correctPlayer=null;
 var gameOptionsBuilt=false;
+// Track whether we've populated the form from server state this
+// session. After the first populate, render() leaves the three
+// dropdowns alone — otherwise the 2s poll clobbers whatever the
+// dealer just picked.
+var formInitialized=false;
+// Server's current_game the last time we saw it. Used to re-sync
+// the game dropdown when a hand actually starts (or ends).
+var lastServerGame='';
 
 function api(path,data){
   return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
@@ -245,20 +253,36 @@ function render(){
   buildZoneRows();
 
   var gs=document.getElementById('game-select');
-  // Game dropdown defaults to the last-played game when no hand is
-  // active; during a hand it shows the current game. Stays enabled
-  // mid-hand so the dealer can correct a mis-heard game.
-  gs.value=ST.current_game||ST.last_game_name||'';
-  gs.disabled=!ST.night_active;
-
-  // Ante + limit dropdowns mirror server state. Ante is always
-  // enabled during a night. Limit is forced to "pot" + disabled for
-  // games that require it.
   var anteSel=document.getElementById('ante-select');
-  if(ST.ante_cents != null) anteSel.value=String(ST.ante_cents);
-  anteSel.disabled=!ST.night_active;
   var limitSel=document.getElementById('limit-select');
-  if(ST.betting_limit) limitSel.value=ST.betting_limit;
+  gs.disabled=!ST.night_active;
+  anteSel.disabled=!ST.night_active;
+
+  // Initial population of the form — once per page load, once the
+  // ante_options list has been built into the dropdown. After this
+  // fires the poll loop stops overwriting the dealer's selection.
+  if(!formInitialized && gameOptionsBuilt){
+    gs.value=ST.current_game||ST.last_game_name||'';
+    if(ST.ante_cents != null) anteSel.value=String(ST.ante_cents);
+    if(ST.betting_limit) limitSel.value=ST.betting_limit;
+    formInitialized=true;
+    lastServerGame=ST.current_game||'';
+  }
+
+  // When the server's current_game changes (hand started, hand
+  // ended, or a mid-hand cancel+restart), re-sync the dropdown so
+  // it reflects the live state. Leaves it alone while the dealer
+  // is staging a new game but hasn't pressed Start Game yet.
+  var serverGame=ST.current_game||'';
+  if(serverGame !== lastServerGame){
+    gs.value=serverGame || ST.last_game_name || '';
+    if(ST.ante_cents != null) anteSel.value=String(ST.ante_cents);
+    if(ST.betting_limit) limitSel.value=ST.betting_limit;
+    lastServerGame=serverGame;
+  }
+
+  // Limit dropdown is locked to Pot for forced games regardless of
+  // init state — dealer can't override the rule.
   var currGame=gs.value;
   var forced=(ST.forced_pot_limit_games||[]).indexOf(currGame)!==-1;
   if(forced){
