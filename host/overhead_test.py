@@ -3375,8 +3375,14 @@ def _derive_voice_phase(s):
       'up_round'     — cards being scanned; accepts "{player}, {card}"
       'pre_confirm'  — every watched zone has a card; accepts Correction / Confirmed
       'pre_pot'      — betting round in progress; accepts Pot Is Right + Fold
-      'other'        — anything else (draw / replacing / hand_over / idle mid-setup)
+      'other'        — anything else (draw / replacing / hand_over / idle mid-setup,
+                       OR poker night not yet started — Whisper is already
+                       transcribing in --listen mode and a stray hallucination
+                       would otherwise auto-deal a hand before the dealer hits
+                       Start)
     """
+    if not getattr(s, "night_active", False):
+        return "other"
     ge = s.game_engine
     if ge is None or ge.current_game is None:
         return "pre_game"
