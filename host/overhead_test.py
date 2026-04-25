@@ -1070,8 +1070,11 @@ def _build_table_state(s):
             # off-scanner). Render them too so /table shows all 7.
             # No slot field on overflow entries — they aren't
             # markable and shouldn't collide with scanner slots.
-            for entry in (s.rodney_overflow or []):
-                card = entry.get("card") or {}
+            # NOTE: use a distinct loop variable; reusing `entry`
+            # would clobber the outer player-dict reference (the
+            # one we still write hand/best_hand into below).
+            for ov_entry in (s.rodney_overflow or []):
+                card = ov_entry.get("card") or {}
                 if card.get("rank") and card.get("suit"):
                     hand.append({
                         "type": "down",
