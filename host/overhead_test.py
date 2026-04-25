@@ -2359,22 +2359,33 @@ def _challenge_phase_label(s) -> str:
 
 
 def _challenge_first_voter(s) -> str:
-    """Name of the player to the dealer's left — first vote this round."""
+    """Name of the player who votes first this round. Rotates through
+    the active players in dealer-left order: dealer's left kicks off
+    round 1, the next seat starts round 2, etc. Position is computed
+    from total rounds played this hand (including reshuffle loops):
+    shuffle_count * 3 + challenge_round_index, modulo the active-
+    player count."""
     try:
         ge = s.game_engine
         dealer = ge.get_dealer().name
         active = list(s.console_active_players)
-        if dealer in active:
-            i = active.index(dealer)
-            # Player to dealer's left = next in PLAYER_NAMES order
-            # starting after the dealer. Walk PLAYER_NAMES since the
-            # physical seating order is fixed there.
-            d_idx = PLAYER_NAMES.index(dealer) if dealer in PLAYER_NAMES else 0
-            for offset in range(1, len(PLAYER_NAMES) + 1):
-                cand = PLAYER_NAMES[(d_idx + offset) % len(PLAYER_NAMES)]
-                if cand in active:
-                    return cand
-        return active[0] if active else ""
+        if not active:
+            return ""
+        # Build deal-order list: dealer's left first, dealer last,
+        # filtered to active players.
+        d_idx = PLAYER_NAMES.index(dealer) if dealer in PLAYER_NAMES else 0
+        rotated = []
+        for offset in range(1, len(PLAYER_NAMES) + 1):
+            cand = PLAYER_NAMES[(d_idx + offset) % len(PLAYER_NAMES)]
+            if cand in active:
+                rotated.append(cand)
+        if not rotated:
+            return active[0]
+        total_rounds = (
+            (s.challenge_shuffle_count or 0) * 3
+            + (s.challenge_round_index or 0)
+        )
+        return rotated[total_rounds % len(rotated)]
     except Exception:
         return ""
 
