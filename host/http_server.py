@@ -844,6 +844,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     {"value": 50, "label": "$0.50"},
                     {"value": 75, "label": "$0.75"},
                     {"value": 100, "label": "$1.00"},
+                    {"value": 200, "label": "$2.00"},
                 ],
                 "limit_options": [
                     {"value": k, "label": v}
