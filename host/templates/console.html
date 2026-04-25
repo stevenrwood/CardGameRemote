@@ -96,8 +96,10 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
 
   <div class="players-row">
     <h2 id="players-heading">Up cards seen</h2>
+    <button id="scan-btn" class="sml-btn" onclick="scanNow()" disabled
+            style="margin-left:auto">Scan</button>
     <button id="rescan-btn" class="sml-btn" onclick="rescanAll()" disabled
-            style="margin-left:auto">Rescan all</button>
+            style="margin-left:6px">Rescan all</button>
   </div>
   <div id="zone-cards"></div>
 </div>
@@ -324,8 +326,9 @@ function render(){
   } else {
     abtn.style.visibility='hidden';
   }
-  // Rescan-all is only useful while a hand has up cards being
-  // recognized — disable when no game's in progress.
+  // Scan / Rescan are only useful during a live hand.
+  var sbtn=document.getElementById('scan-btn');
+  if(sbtn) sbtn.disabled=!ST.game_in_progress;
   var rbtn=document.getElementById('rescan-btn');
   if(rbtn) rbtn.disabled=!ST.game_in_progress;
 
@@ -534,6 +537,15 @@ function startGame(){
     return;
   }
   api('/api/console/deal',body).then(refresh);
+}
+
+function scanNow(){
+  // Scan all zones the current game cares about right now. No
+  // confirmation — this is the primary trigger when the dealer is
+  // ready (replaces the auto-motion-triggered scan in 7/27 hit
+  // rounds where leaning over the table was firing false scans).
+  if(!ST || !ST.game_in_progress) return;
+  api('/api/console/force_scan').then(refresh);
 }
 
 function rescanAll(){

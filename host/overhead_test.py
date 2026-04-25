@@ -358,17 +358,14 @@ def _console_watch_dealer(s, frame):
             scan_names, stand_allowed = list(brio_names), False
         watched = set(scan_names) & set(brio_names)
         if stand_allowed:
-            trigger_zone = None
-            for z in s.cal.zones:
-                if z["name"] not in watched:
-                    continue
-                if s.monitor.check_single(frame, z) is not None:
-                    trigger_zone = z
-                    break
-            if trigger_zone is not None:
-                log.log(f"[CONSOLE] Hit-round card detected in {trigger_zone['name']}'s zone — {s.brio_settle_s:.1f}s settle")
-                s.console_scan_phase = "settling"
-                s.console_settle_time = time.time()
+            # Hit-round (7/27) auto-trigger is DISABLED by design: the
+            # dealer is reaching across the table to deal one player at
+            # a time, and arm/back motion above zones reliably trips
+            # YOLO into hallucinating cards. The dealer fires scans
+            # manually via the console "Scan" button now. Auto-trigger
+            # for the multi-zone deal flow below is still on (its
+            # gate already requires every zone to show motion at the
+            # same instant, which an arm sweep can't do).
             return
         # "Wait for all zones" gate: hold off on settling until every
         # watched zone currently shows motion above its baseline
