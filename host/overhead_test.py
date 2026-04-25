@@ -1065,6 +1065,21 @@ def _build_table_state(s):
                 hand.append({"type": "down", "rank": d["rank"],
                              "suit": d["suit"], "slot": slot_num,
                              "confidence": d.get("confidence")})
+            # Challenge round 3 displaces the round-2 cards from
+            # slots 4 and 5 (they sit face-down in front of Rodney
+            # off-scanner). Render them too so /table shows all 7.
+            # No slot field on overflow entries — they aren't
+            # markable and shouldn't collide with scanner slots.
+            for entry in (s.rodney_overflow or []):
+                card = entry.get("card") or {}
+                if card.get("rank") and card.get("suit"):
+                    hand.append({
+                        "type": "down",
+                        "rank": card["rank"],
+                        "suit": card["suit"],
+                        "confidence": card.get("confidence"),
+                        "off_scanner": True,
+                    })
             if s.rodney_flipped_up:
                 fu = s.rodney_flipped_up
                 # Don't duplicate once Brio picks it up via a zone scan.
