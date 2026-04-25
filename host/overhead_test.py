@@ -2397,6 +2397,18 @@ def _fmt_money(cents: int) -> str:
     return f"${dollars}.{rem:02d}"
 
 
+def _format_name_list(names) -> str:
+    """'Joe' / 'Bill and David' / 'Bill, David and Joe' for readback."""
+    names = list(names)
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 def _log_and_speak(s, msg: str):
     """Log a [CHALLENGE] line and say the same string."""
     log.log(f"[CHALLENGE] {msg}")
@@ -2606,9 +2618,11 @@ def _handle_challenge_winner(s, winner_name: str) -> bool:
         return False
     losers = [nm for nm in outs if nm != winner_name]
     per_loser = s.pot_cents
+    verb = "pays" if len(losers) == 1 else "pay"
     _log_and_speak(s,
-        f"{winner_name} wins challenge vs {', '.join(losers)}. "
-        f"Each owes {winner_name} {_fmt_money(per_loser)}.")
+        f"{winner_name} wins. "
+        f"{_format_name_list(losers)} {verb} {winner_name} "
+        f"{_fmt_money(per_loser)}.")
     next_idx = (s.challenge_round_index or 0) + 1
     if next_idx >= 3:
         # End of a shuffle cycle with the pot still unawarded —
