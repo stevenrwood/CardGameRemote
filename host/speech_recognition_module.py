@@ -392,6 +392,28 @@ def _parse_card_call(text):
     )
 
 
+def _has_game_command(commands):
+    """True if any command in the list is a GameCommand. Used by the
+    listener's prefix-stitch logic."""
+    return any(isinstance(c, GameCommand) for c in commands)
+
+
+# Regex for "The game is …" with nothing after — e.g. "The game is.",
+# "the game is...", "Game is". Used to detect the case where Whisper
+# cut the phrase right after "is" and the dealer's actual game name
+# is in the next chunk.
+_BARE_GAME_PREFIX_RE = re.compile(
+    r"^(?:the\s+)?game\s+is\b[\s.…,!?]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_bare_game_prefix(text):
+    """True if `text` is essentially '(the) game is' with no name
+    after — Whisper's mid-phrase cut signature."""
+    return bool(_BARE_GAME_PREFIX_RE.match(text.strip()))
+
+
 def parse_speech(text):
     """Parse speech text. Returns a list of commands (may find multiple card calls in one chunk)."""
     results = []
@@ -665,12 +687,26 @@ class SpeechListener:
     Listens in short chunks, transcribes each, and parses for commands.
     """
 
-    def __init__(self, callback=None, locale="en-US"):
+    def __init__(self, callback=None, locale="en-US", game_names=None):
         self._callback = callback or self._default_callback
         self._running = False
         self._thread = None
         self._pending_player = None   # player name heard without a card
         self._pending_time = 0
+        # Whisper bias prompt extension. If callers pass the live
+        # GameTemplate name list, each "The game is X." gets appended
+        # to the prompt at model-warmup time so Whisper has actually
+        # heard of "High Chicago", "7/27", "Texas Hold'em", etc. and
+        # stops inventing words like "Hodgecargo".
+        self._game_names = list(game_names or [])
+        # Stitching state for "The game is …" → next-chunk continuation.
+        # Whisper's VAD often cuts the phrase right after "is" when the
+        # dealer pauses to think; without a buffer the next chunk is
+        # the bare game name with no prefix and falls below the 0.75
+        # fuzzy-match threshold. When set, the next transcript gets
+        # "the game is " prepended before parse_speech.
+        self._pending_game_prefix = False
+        self._pending_game_prefix_time = 0.0
 
     @staticmethod
     def _default_callback(command):
@@ -728,7 +764,20 @@ class SpeechListener:
 
         # Load whisper model
         model_name = "mlx-community/whisper-small.en-mlx"
-        # Prompt biases Whisper toward our vocabulary
+        # Prompt biases Whisper toward our vocabulary. If the host
+        # supplied a live game catalog, splice every name in as
+        # "The game is X." so Whisper hears the exact phrase the
+        # dealer will say — keeps it from inventing tokens for
+        # less-common names ("Hodgecargo" for "High Chicago").
+        if self._game_names:
+            game_lines = " ".join(
+                f"The game is {name}." for name in self._game_names
+            )
+        else:
+            game_lines = (
+                "The game is Follow the Queen. The game is 5 Card Draw. "
+                "The game is 7 Card Stud. The game is 3 Toed Pete."
+            )
         whisper_prompt = (
             "Steve, Bill, David, Joe, Rodney. "
             "Ace of spades. King of hearts. Queen of diamonds. Jack of clubs. "
@@ -737,8 +786,7 @@ class SpeechListener:
             "Ranks are Ace, King, Queen, Jack, Ten, Nine, Eight, Seven, Six, "
             "Five, Four, Three, Two — never Fix, Sticks, Mine, Line, Sent, or "
             "Words in place of a rank. "
-            "The game is Follow the Queen. The game is 5 Card Draw. "
-            "The game is 7 Card Stud. The game is 3 Toed Pete. "
+            f"{game_lines} "
             "Same game again. Let's run that back. "
             "Correction: David, 4 of clubs. "
             "Confirmed. Pot is right. "
@@ -812,6 +860,35 @@ class SpeechListener:
                     if text:
                         _log(f"Heard ({elapsed:.1f}s): \"{text}\"")
                         commands = parse_speech(text)
+                        # Stitch with a pending "the game is …" prefix
+                        # from the previous chunk if the dealer paused
+                        # mid-phrase. If the augmented text now parses
+                        # as a GameCommand, swap it in and clear the
+                        # pending flag.
+                        prefix_age = time.time() - self._pending_game_prefix_time
+                        if (self._pending_game_prefix and prefix_age < 5.0
+                                and not _has_game_command(commands)):
+                            augmented = f"the game is {text}"
+                            aug_cmds = parse_speech(augmented)
+                            if _has_game_command(aug_cmds):
+                                _log(
+                                    f"Stitched pending 'the game is' + "
+                                    f"'{text}'"
+                                )
+                                commands = aug_cmds
+                                self._pending_game_prefix = False
+                        # If THIS chunk was the prefix-only case
+                        # ("The game is" with nothing parseable after),
+                        # remember it for next chunk and skip dispatch.
+                        if (_is_bare_game_prefix(text)
+                                and not _has_game_command(commands)):
+                            self._pending_game_prefix = True
+                            self._pending_game_prefix_time = time.time()
+                            _log(
+                                "Heard 'the game is …' with no game name; "
+                                "holding for next chunk"
+                            )
+                            continue
                         for command in commands:
                             if isinstance(command, UnrecognizedCommand):
                                 card_only = _extract_card_only(command.raw_text)

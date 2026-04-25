@@ -3989,7 +3989,15 @@ def main():
                 SpeechListener, set_log_function,
             )
             set_log_function(log.log)
-            listener = SpeechListener(callback=_process_voice_command)
+            # Pull the live game catalog so Whisper's bias prompt
+            # covers every game name the dealer might say (including
+            # ones Whisper would otherwise hallucinate, like
+            # "Hodgecargo" for "High Chicago").
+            game_names = list(_state.game_engine.templates.keys())
+            listener = SpeechListener(
+                callback=_process_voice_command,
+                game_names=game_names,
+            )
             listener.start()
             log.log("[VOICE] speech-input listener started (--listen)")
         except Exception as e:
