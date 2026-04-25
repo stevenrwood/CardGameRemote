@@ -44,7 +44,6 @@ from overhead_test import (
     _announce_poker_hand_bet_first,
     _build_table_state,
     _redact_remote_downs,
-    REMOTE_VIEWER_WINDOW_S,
     _check_follow_the_queen_round,
     _collect_mode_json,
     _collect_redo,
@@ -900,6 +899,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # time so the modal submits once.
             archive = log.start_night()
             s.night_active = True
+            # Fresh night → forget any tunnel-seen flag from a prior
+            # session so the local view starts unredacted until Rodney
+            # actually connects this night.
+            s.rodney_tunnel_seen = False
             s.console_state = "idle"
             self._apply_settings(s, data)
             log.log("[CONSOLE] Poker night started")
@@ -1723,16 +1726,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._r(500, "application/json", body)
         # Cloudflare adds a cf-ray header to every proxied request, so
         # its presence reliably distinguishes Rodney (remote, via the
-        # tunnel) from the dealer's local /table monitor. Tunnel polls
-        # bump the seen-at timestamp; non-tunnel polls within the
-        # window get a redacted view that hides Rodney's hole cards
-        # from anyone sitting at the table.
+        # tunnel) from the dealer's local /table monitor. Once a tunnel
+        # poll has been seen this night, every non-tunnel poll gets a
+        # redacted view that hides Rodney's hole cards from anyone
+        # sitting at the table. The flag is cleared at start_night.
         is_tunnel = bool(self.headers.get("cf-ray"))
         if is_tunnel:
-            s.rodney_tunnel_seen_at = time.time()
+            s.rodney_tunnel_seen = True
             variant = "r"
-        elif (time.time() - getattr(s, "rodney_tunnel_seen_at", 0.0)
-              < REMOTE_VIEWER_WINDOW_S):
+        elif getattr(s, "rodney_tunnel_seen", False):
             _redact_remote_downs(doc)
             variant = "l"
         else:

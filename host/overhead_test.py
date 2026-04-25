@@ -844,16 +844,14 @@ class AppState:
         # Rodney's down cards come from the Pi scanner; other players only
         # expose a down-count + up-cards on the observer view.
         self.table_state_version = 0
-        # Last time a /table/state poll arrived bearing a Cloudflare
-        # tunnel header (cf-ray). When this is recent, /table requests
-        # without that header are assumed to be the local table monitor
-        # and Rodney's down cards get redacted in the response — the
-        # whole point of running scripts/start_rodney_tunnel.sh is that
-        # only Rodney sees his own hole cards. Stays at 0 until the
-        # first tunnel poll lands; expires (REMOTE_VIEWER_WINDOW_S
-        # seconds after the last tunnel poll) so closing the tunnel
-        # restores full visibility for in-person play.
-        self.rodney_tunnel_seen_at = 0.0
+        # Set the first time a /table/state poll arrives bearing a
+        # Cloudflare tunnel header (cf-ray). Once true, every
+        # non-tunnel /table/state response is redacted to hide
+        # Rodney's hole cards — the whole point of running
+        # scripts/start_rodney_tunnel.sh is that only Rodney sees his
+        # own down cards. Cleared at start_night so a tunnel from a
+        # prior session doesn't carry over.
+        self.rodney_tunnel_seen = False
         # Rodney's down-card slots. Indexed by scanner slot number so a
         # fluctuating or re-scanned slot replaces its prior value instead of
         # appending a new entry. Each value is {rank, suit, confidence}.
@@ -1259,14 +1257,6 @@ def _build_table_state(s):
 def _table_state_bump(s):
     """Call when something observable changes so polling clients re-render."""
     s.table_state_version += 1
-
-
-# How long after Rodney's last tunnel poll the local view stays
-# redacted. The /table page polls /table/state every ~2 s, so this
-# only needs to bridge brief network blips; 30 s gives generous
-# headroom while keeping the post-disconnect "reveal" prompt enough
-# to be noticeable.
-REMOTE_VIEWER_WINDOW_S = 30.0
 
 
 def _redact_remote_downs(doc):
