@@ -181,12 +181,15 @@ class SevenTwentySevenGame(BaseGame):
 
         The total is built from prior-round confirmed cards in
         ``console_hand_cards`` plus the just-recognized card already
-        held in ``state.monitor.last_card[player_name]``. We check
-        the highest possible interpretation (ace-as-11 vs ace-as-1)
-        — if even the high interpretation is ≤ 17, no hint.
+        held in ``state.monitor.last_card[player_name]``. We use the
+        LOWEST possible ace interpretation: with one or more aces, the
+        player can read their hand low, so the hint should reflect
+        their best-case position. If even the low interpretation is
+        ≤ 17, no hint fires.
 
         Format: "Bill, 6 of Hearts with 8 or less down below" when
-        Bill's visible total reaches 19 (27 - 19 = 8 max safe down).
+        Bill's lowest visible total reaches 19 (27 - 19 = 8 max safe
+        down).
         """
         try:
             from games import parse_hand_card
@@ -216,10 +219,10 @@ class SevenTwentySevenGame(BaseGame):
         values = compute_values(cards, max_total=VISIBLE_MAX)
         if not values:
             return default_speech
-        best = max(values)
-        if best <= 17:
+        lowest = min(values)
+        if lowest <= 17:
             return default_speech
-        max_down = 27 - best
+        max_down = 27 - lowest
         return (
             f"{default_speech} with {_speak_value(max_down)} "
             f"or less down below"
