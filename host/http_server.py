@@ -1101,19 +1101,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 else:
                     s.challenge_round_index = None
                 # Single Start-Game announcement — dealer + game + ante
-                # + betting limit, plus the running pot for Challenge
-                # games (where the pot persists across hands). No
-                # separate "Round 1 ante" line; that info is already
-                # here.
+                # + betting limit + current pot. The pot line runs for
+                # every game (not just Challenge) so the dealer can
+                # cross-check the physical chip stack against what
+                # we've tracked before the deal starts.
                 dealer_name = ge.get_dealer().name
-                msg = (
+                _log_and_speak(s,
                     f"Dealer is {dealer_name}. Game is {game_name}. "
                     f"Ante {_fmt_money(s.ante_cents)}. "
-                    f"{_betting_limit_label(s.betting_limit)}."
-                )
-                if challenge_hand:
-                    msg += f" Pot is now {_fmt_money(s.pot_cents)}."
-                _log_and_speak(s, msg)
+                    f"{_betting_limit_label(s.betting_limit)}. "
+                    f"Pot is now {_fmt_money(s.pot_cents)}.")
                 # Let the per-game class wire up its own per-hand state
                 # (freeze counters, local flags) now that common state is
                 # reset and the engine knows the current game.
