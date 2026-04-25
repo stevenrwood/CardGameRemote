@@ -77,11 +77,13 @@ from overhead_test import (
     _handle_challenge_winner,
     _begin_challenge_vote,
     _challenge_required_cards,
+    _challenge_ante_cents_for,
     _clear_rodney_challenge_leds,
     _forced_betting_limit,
     _betting_limit_label,
     FORCED_POT_LIMIT_GAMES,
     BETTING_LIMIT_LABELS,
+    CHALLENGE_SUBSEQUENT_ANTE_CENTS,
     MAX_PASSES_PER_ROUND,
     _stats_bump,
     _stop_collect_mode,
@@ -676,10 +678,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         st["out_slots"] = []
                     s.table_state_version += 1
                 n_players = len(s.console_active_players)
-                s.pot_cents += s.ante_cents * n_players
+                # Reshuffle rounds use the flat subsequent-round ante,
+                # not the first-round dropdown value.
+                per_player = _challenge_ante_cents_for(
+                    s, s.challenge_shuffle_count, 0,
+                )
+                s.pot_cents += per_player * n_players
                 _log_and_speak(s,
                     f"Reshuffle #{s.challenge_shuffle_count}. "
-                    f"Round 1 ante: {_fmt_money(s.ante_cents)} each. "
+                    f"Round 1 ante: {_fmt_money(per_player)} each. "
                     f"Pot is now {_fmt_money(s.pot_cents)}.")
                 s.console_state = "dealing"
                 _start_guided_deal(s, 3)
@@ -1425,13 +1432,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # (resolution path) leaves pot_cents alone — resolve
                 # logic handles that.
                 if not advance and s.challenge_round_index is not None:
-                    # Rounds 0/1/2 mean we've added 1/2/3 antes.
-                    antes_added = (s.challenge_round_index or 0) + 1
-                    rollback = (
-                        s.ante_cents
-                        * len(s.console_active_players)
-                        * antes_added
-                    )
+                    # Total per-player rollback sums every ante added
+                    # so far across this hand (including reshuffles).
+                    # Round 1 of shuffle 0 is s.ante_cents; every
+                    # other round is CHALLENGE_SUBSEQUENT_ANTE_CENTS.
+                    per_player_total = 0
+                    shuffles = s.challenge_shuffle_count or 0
+                    current_round = s.challenge_round_index or 0
+                    for sh in range(shuffles + 1):
+                        max_r = 2 if sh < shuffles else current_round
+                        for r in range(max_r + 1):
+                            per_player_total += _challenge_ante_cents_for(
+                                s, sh, r,
+                            )
+                    rollback = per_player_total * len(s.console_active_players)
                     s.pot_cents = max(0, s.pot_cents - rollback)
                     s.challenge_round_index = None
                     s.challenge_per_player = {}

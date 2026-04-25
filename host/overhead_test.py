@@ -2288,10 +2288,28 @@ BETTING_LIMIT_LABELS = {
     "pot": "Pot limit",
 }
 
+# After the first round of a Challenge hand, every subsequent
+# round's ante (rounds 2, 3, and any post-reshuffle rounds) is a
+# flat 50c per player regardless of what the dealer picked on the
+# Start Game form. Only the very first round honours the dropdown
+# value — that's the "buy in" ante; the rest are "keep playing"
+# antes that feed the pot at a fixed rate.
+CHALLENGE_SUBSEQUENT_ANTE_CENTS = 50
+
 
 def _forced_betting_limit(game_name: str):
     """Return 'pot' if the given game forces Pot limit, None otherwise."""
     return "pot" if game_name in FORCED_POT_LIMIT_GAMES else None
+
+
+def _challenge_ante_cents_for(s, shuffle_count: int, round_index: int) -> int:
+    """How much each player antes for a given Challenge round. The
+    very first round of the hand (no reshuffles yet, round 0) uses
+    the dealer-selected ante from Start Game; everything after is a
+    flat CHALLENGE_SUBSEQUENT_ANTE_CENTS."""
+    if shuffle_count == 0 and round_index == 0:
+        return s.ante_cents
+    return CHALLENGE_SUBSEQUENT_ANTE_CENTS
 
 
 def _betting_limit_label(code: str) -> str:
@@ -2591,8 +2609,14 @@ def _start_next_challenge_round(s):
     someone and that isn't part of this game). The per-player
     pass/out state reset happens inside _reset_round_passes — players
     who committed in the previous round get to re-vote this round
-    with the new cards added to their hand."""
-    per_player_cents = s.ante_cents
+    with the new cards added to their hand.
+
+    Only the very first round of the hand honours the dealer-selected
+    ante; every subsequent round (rounds 2+, reshuffled rounds) uses
+    the flat CHALLENGE_SUBSEQUENT_ANTE_CENTS."""
+    per_player_cents = _challenge_ante_cents_for(
+        s, s.challenge_shuffle_count or 0, s.challenge_round_index or 0,
+    )
     n = len(s.console_active_players)
     ante_cents = per_player_cents * n
     s.pot_cents += ante_cents
