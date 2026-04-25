@@ -622,6 +622,7 @@ def _announce_poker_hand_bet_first(s):
         per_player_cards.setdefault(entry["player"], []).append((rank, suit_full))
 
     wild_ranks = list(getattr(ge, "wild_ranks", []) or [])
+    wild_set = set(wild_ranks)
     all_results = []  # list of (name, HandResult), pre-sort
     for name in s.console_active_players:
         if name in s.folded_players:
@@ -631,12 +632,19 @@ def _announce_poker_hand_bet_first(s):
             continue
         try:
             if len(cards) == 1:
-                # Single up card — treat as high-card only.
+                # Single up card — treat as high-card only. A wild
+                # card here serves as an Ace, otherwise the natural
+                # rank value applies.
                 rank, suit = cards[0]
-                v = RANK_VALUE.get(rank, 0)
+                if rank in wild_set:
+                    v = 14
+                    rank_name = "Ace"
+                else:
+                    v = RANK_VALUE.get(rank, 0)
+                    rank_name = RANK_NAME.get(rank, rank)
                 result = HandResult(
                     "high_card",
-                    f"{RANK_NAME.get(rank, rank)} high",
+                    f"{rank_name} high",
                     [v],
                     [],
                 )
@@ -648,11 +656,19 @@ def _announce_poker_hand_bet_first(s):
         log.log(f"[POKER] {name}: {result.label}")
         all_results.append((name, result))
 
-    # Sort by (category rank, tiebreakers) descending so [0] is the
-    # best hand and [1] (if present) is the runner-up. The runner-up
-    # is needed below to decide how many kicker cards actually have
-    # to be announced — saying "Ace, Jack, Eight is high" when the
-    # next hand is just "King high" is more than the dealer needs.
+    # Stable two-pass sort: first by deal order ascending so a tie on
+    # hand strength resolves to the player dealt first ("first Ace
+    # bets" convention), then by (category rank, tiebreakers)
+    # descending so [0] is the best hand and [1] (if present) is the
+    # runner-up. The runner-up is needed below to decide how many
+    # kicker cards actually have to be announced — saying "Ace, Jack,
+    # Eight is high" when the next hand is just "King high" is more
+    # than the dealer needs.
+    dealer_name = ge.get_dealer().name if ge.players else ""
+    deal_order_index = {
+        nm: i for i, nm in enumerate(_get_deal_order(dealer_name))
+    }
+    all_results.sort(key=lambda nr: deal_order_index.get(nr[0], 999))
     all_results.sort(
         key=lambda nr: (nr[1].rank, nr[1].tiebreakers),
         reverse=True,
@@ -679,7 +695,6 @@ def _announce_poker_hand_bet_first(s):
         tb = best_result.tiebreakers
         name_of = lambda v: RANK_NAME.get(VALUE_RANK.get(v, ""), "")
         plural_of = lambda v: RANK_PLURAL.get(VALUE_RANK.get(v, ""), name_of(v) + "s")
-        wild_set = set(wild_ranks)
 
         # Per-category, how many of `tb`'s leading positions are
         # "primary" (already part of the spoken phrase). Anything
@@ -746,6 +761,15 @@ def _announce_poker_hand_bet_first(s):
         if needed < primary_count:
             needed = primary_count
         extra = max(0, needed - primary_count)
+        # True high-card tie with the runner-up (e.g. round 1 of stud
+        # where Joe shows a wild 2 and Rodney shows a real Ace —
+        # both score Ace high). Bet goes to the player dealt first;
+        # the dealer announces it as "first <Rank> is high".
+        is_high_card_tie = (
+            cat == "high_card"
+            and ru_compare
+            and best_compare == list(ru_compare)
+        )
 
         def _kicker_suffix(values):
             names = [name_of(v) for v in values if v]
@@ -802,6 +826,11 @@ def _announce_poker_hand_bet_first(s):
             else:
                 ranks = [name_of(v) for v in best_compare[:needed] if v]
                 hand_phrase = ", ".join(ranks) if ranks else "no card"
+        if is_high_card_tie and hand_phrase != "no card":
+            # "Ace" → "first Ace", "Ace, Jack" → "first Ace, Jack" —
+            # the wild-card-equals-real-card tie idiom carries through
+            # any kicker positions that also tied.
+            hand_phrase = f"first {hand_phrase[0].lower()}{hand_phrase[1:]}"
         phrase = f"{best_player}, {hand_phrase} is high. Your bet."
         log.log(f"[POKER] Bet first: {phrase} ({best_result.label})")
         speech.say(phrase)
