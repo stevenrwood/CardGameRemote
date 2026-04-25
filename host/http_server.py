@@ -1434,6 +1434,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.pi_prev_slots = {}
                 s.folded_players = set()
                 s.freezes = {}
+                # Clear any round-3 Challenge overflow so /table doesn't
+                # leave the 2 displaced R2 cards visible after hand end.
+                s.rodney_overflow = []
                 # On cancel (advance=False) we also reset Challenge
                 # state + roll back any antes added for this aborted
                 # hand, so the dealer can redeal cleanly. Normal end

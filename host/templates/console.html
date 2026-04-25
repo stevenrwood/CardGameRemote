@@ -469,7 +469,16 @@ function saveSetup(){
 function onExit(){
   if(!ST) return;
   if(ST.game_in_progress){
-    if(!confirm('End current hand?')) return;
+    var msg = 'End current hand?';
+    var ch = ST.challenge;
+    if(ch && (ch.pot_cents||0) > 0){
+      var dollars = Math.floor(ch.pot_cents/100);
+      var cents = ch.pot_cents % 100;
+      var potTxt = '$' + dollars + '.' + (cents<10?'0':'') + cents;
+      msg = 'End current Challenge hand WITHOUT awarding the '
+        + potTxt + ' pot? It will reset to $0.00.';
+    }
+    if(!confirm(msg)) return;
     api('/api/console/end').then(refresh);
   } else {
     if(!confirm('Exit poker night?')) return;
