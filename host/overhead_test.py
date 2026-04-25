@@ -622,8 +622,7 @@ def _announce_poker_hand_bet_first(s):
         per_player_cards.setdefault(entry["player"], []).append((rank, suit_full))
 
     wild_ranks = list(getattr(ge, "wild_ranks", []) or [])
-    best_player = None
-    best_result = None
+    all_results = []  # list of (name, HandResult), pre-sort
     for name in s.console_active_players:
         if name in s.folded_players:
             continue
@@ -647,10 +646,24 @@ def _announce_poker_hand_bet_first(s):
             log.log(f"[POKER] eval {name} failed: {e}")
             continue
         log.log(f"[POKER] {name}: {result.label}")
-        key = (result.rank, result.tiebreakers)
-        if best_result is None or key > (best_result.rank, best_result.tiebreakers):
-            best_result = result
-            best_player = name
+        all_results.append((name, result))
+
+    # Sort by (category rank, tiebreakers) descending so [0] is the
+    # best hand and [1] (if present) is the runner-up. The runner-up
+    # is needed below to decide how many kicker cards actually have
+    # to be announced — saying "Ace, Jack, Eight is high" when the
+    # next hand is just "King high" is more than the dealer needs.
+    all_results.sort(
+        key=lambda nr: (nr[1].rank, nr[1].tiebreakers),
+        reverse=True,
+    )
+    if all_results:
+        best_player, best_result = all_results[0]
+        runner_up_result = all_results[1][1] if len(all_results) > 1 else None
+    else:
+        best_player = None
+        best_result = None
+        runner_up_result = None
 
     if best_player is not None and best_result is not None:
         try:
@@ -682,20 +695,29 @@ def _announce_poker_hand_bet_first(s):
         elif cat == "straight":
             hand_phrase = f"{name_of(tb[0])} high straight"
         else:
-            # high card: list every card the player actually shows, in
-            # descending effective rank (wilds speak as Ace).
-            wild_set = set(wild_ranks)
-            values = []
-            for rank, _suit in per_player_cards.get(best_player, []):
-                if rank in wild_set:
-                    values.append(14)
-                else:
-                    v = RANK_VALUE.get(rank)
-                    if v:
-                        values.append(v)
-            values.sort(reverse=True)
-            ranks_spoken = [name_of(v) for v in values if v]
-            hand_phrase = ", ".join(ranks_spoken) if ranks_spoken else "no card"
+            # high card: announce only as many ranks as actually decide
+            # the hand against the runner-up. Tiebreakers are already
+            # ordered most-significant-first with wilds substituted as
+            # Ace=14, so walk position-by-position and stop on the
+            # first card that strictly beats the runner-up at the same
+            # position (or where the runner-up has no card to compare).
+            best_tb = list(best_result.tiebreakers)
+            ru_tb = (
+                list(runner_up_result.tiebreakers)
+                if runner_up_result is not None else []
+            )
+            if not best_tb:
+                hand_phrase = "no card"
+            else:
+                needed = 1
+                for i, v in enumerate(best_tb):
+                    needed = i + 1
+                    if i >= len(ru_tb) or v > ru_tb[i]:
+                        break
+                ranks_spoken = [name_of(v) for v in best_tb[:needed] if v]
+                hand_phrase = (
+                    ", ".join(ranks_spoken) if ranks_spoken else "no card"
+                )
         phrase = f"{best_player}, {hand_phrase} is high. Your bet."
         log.log(f"[POKER] Bet first: {phrase} ({best_result.label})")
         speech.say(phrase)
