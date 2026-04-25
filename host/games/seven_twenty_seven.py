@@ -120,6 +120,8 @@ class SevenTwentySevenGame(BaseGame):
             took = {c["player"] for c in round_cards}
             newly_frozen = []
             for name in state.console_active_players:
+                if name in state.folded_players:
+                    continue  # busted/folded — frozen status is moot
                 if self.freezes.get(name, 0) >= 3:
                     continue  # already frozen
                 if name in took:
