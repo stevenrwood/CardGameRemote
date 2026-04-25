@@ -70,9 +70,17 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
 
 <div id="main" class="dim">
   <div class="field">
-    <select id="game-select" onchange="onPickGame()" disabled>
+    <select id="game-select" onchange="onGameStaged()" disabled>
       <option value="">-- choose game --</option>
     </select>
+  </div>
+  <div class="field" style="display:flex;gap:8px">
+    <select id="ante-select" style="flex:1" disabled></select>
+    <select id="limit-select" style="flex:1" disabled></select>
+  </div>
+  <div class="field">
+    <button id="start-game-btn" class="btn-start" style="width:100%;padding:12px"
+            onclick="startGame()" disabled>Start Game</button>
   </div>
 
   <div class="status-row">
@@ -188,6 +196,19 @@ function buildGameOptions(){
       var o=document.createElement('option');o.value=g.name;o.textContent=g.name;gs.appendChild(o);
     }
   });
+  // Ante + limit dropdowns — populated once from the state JSON.
+  var anteSel=document.getElementById('ante-select');
+  (ST.ante_options||[]).forEach(function(o){
+    var opt=document.createElement('option');
+    opt.value=o.value; opt.textContent=o.label;
+    anteSel.appendChild(opt);
+  });
+  var limitSel=document.getElementById('limit-select');
+  (ST.limit_options||[]).forEach(function(o){
+    var opt=document.createElement('option');
+    opt.value=o.value; opt.textContent=o.label;
+    limitSel.appendChild(opt);
+  });
   gameOptionsBuilt=true;
 }
 
@@ -224,12 +245,34 @@ function render(){
   buildZoneRows();
 
   var gs=document.getElementById('game-select');
-  gs.value=ST.current_game||'';
-  // Dropdown stays enabled mid-hand so the dealer can correct a
-  // mis-heard game (Whisper sometimes transcribes "High, Low, High
-  // Challenge" as "7 Card Stud" etc). Picking a new value confirms
-  // first — see onPickGame.
+  // Game dropdown defaults to the last-played game when no hand is
+  // active; during a hand it shows the current game. Stays enabled
+  // mid-hand so the dealer can correct a mis-heard game.
+  gs.value=ST.current_game||ST.last_game_name||'';
   gs.disabled=!ST.night_active;
+
+  // Ante + limit dropdowns mirror server state. Ante is always
+  // enabled during a night. Limit is forced to "pot" + disabled for
+  // games that require it.
+  var anteSel=document.getElementById('ante-select');
+  if(ST.ante_cents != null) anteSel.value=String(ST.ante_cents);
+  anteSel.disabled=!ST.night_active;
+  var limitSel=document.getElementById('limit-select');
+  if(ST.betting_limit) limitSel.value=ST.betting_limit;
+  var currGame=gs.value;
+  var forced=(ST.forced_pot_limit_games||[]).indexOf(currGame)!==-1;
+  if(forced){
+    limitSel.value='pot';
+    limitSel.disabled=true;
+  } else {
+    limitSel.disabled=!ST.night_active;
+  }
+
+  var startBtn=document.getElementById('start-game-btn');
+  startBtn.disabled=!ST.night_active || !currGame;
+  startBtn.textContent=ST.game_in_progress
+    ? 'Restart Game'
+    : 'Start Game';
 
   var sbtn=document.getElementById('start-btn');
   sbtn.textContent=ST.night_active?'Setup':'Start';
@@ -408,26 +451,42 @@ function onExit(){
   }
 }
 
-function onPickGame(){
+function onGameStaged(){
+  // Called when the game dropdown changes. Updates the limit
+  // dropdown — games like Texas Hold'em / 3 Toed Pete / the
+  // Challenge variants force Pot limit and can't be overridden.
+  // Does NOT start a hand; the dealer has to click Start Game.
   var g=document.getElementById('game-select').value;
-  if(!g) return;
+  var limitSel=document.getElementById('limit-select');
+  var forced=(ST && ST.forced_pot_limit_games || []).indexOf(g) !== -1;
+  if(forced){
+    limitSel.value='pot';
+    limitSel.disabled=true;
+  } else {
+    limitSel.disabled=false;
+    if(ST && ST.betting_limit){
+      limitSel.value=ST.betting_limit;
+    }
+  }
+}
+
+function startGame(){
+  var g=document.getElementById('game-select').value;
+  if(!g){alert('Pick a game first'); return;}
+  var ante=parseInt(document.getElementById('ante-select').value, 10) || 50;
+  var limit=document.getElementById('limit-select').value || '1_2';
+  var body={game:g, ante_cents:ante, betting_limit:limit};
   // If a hand is already in progress, confirm before cancelling it.
   if(ST && ST.game_in_progress){
     var curr=ST.current_game||'current hand';
-    if(!confirm('Cancel '+curr+' and start '+g+'?')){
-      // Revert dropdown so it doesn't linger on the rejected choice.
-      document.getElementById('game-select').value=ST.current_game||'';
-      return;
-    }
-    // End the current hand without rotating the dealer — the deal
-    // stays with whoever was about to deal the mis-selected game —
-    // then start the new one.
+    if(!confirm('Cancel '+curr+' and start '+g+'?')) return;
+    // End the current hand without rotating the dealer, then deal.
     api('/api/console/end',{advance_dealer:false}).then(function(){
-      api('/api/console/deal',{game:g}).then(refresh);
+      api('/api/console/deal',body).then(refresh);
     });
     return;
   }
-  api('/api/console/deal',{game:g}).then(refresh);
+  api('/api/console/deal',body).then(refresh);
 }
 
 function onAction(){

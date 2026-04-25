@@ -909,6 +909,11 @@ class AppState:
         # ---- Challenge-game state (High, Low, High etc.) ----
         # Persists across hands; only resets on the 1-out-all-pass award.
         self.pot_cents: int = 0
+        # Hand config set via the console Start Game button. Persists
+        # across hands — the next Start Game pre-fills with these so
+        # the dealer only has to change what's actually different.
+        self.ante_cents: int = 50          # $0.50 default
+        self.betting_limit: str = "1_2"    # "1_2" | "1_all_way" | "pot"
         # None when the current hand isn't a Challenge variant. Otherwise
         # 0/1/2 for rounds 1/2/3. Resets to 0 on reshuffle.
         self.challenge_round_index = None
@@ -2251,6 +2256,33 @@ def _max_draw_for_game(ge, draws_done: int = 0) -> int:
     return 0
 
 
+# Games whose betting limit is always Pot limit (dealer can't pick
+# anything else). Everything else defaults to $1/$2 but the dealer
+# can override from the console dropdown.
+FORCED_POT_LIMIT_GAMES = {
+    "3 Toed Pete",
+    "High, Low, High",
+    "Low, High, Low",
+    "Low, Low, High",
+    "Texas Hold'em",
+}
+
+BETTING_LIMIT_LABELS = {
+    "1_2": "$1 / $2",
+    "1_all_way": "$1 all the way",
+    "pot": "Pot limit",
+}
+
+
+def _forced_betting_limit(game_name: str):
+    """Return 'pot' if the given game forces Pot limit, None otherwise."""
+    return "pot" if game_name in FORCED_POT_LIMIT_GAMES else None
+
+
+def _betting_limit_label(code: str) -> str:
+    return BETTING_LIMIT_LABELS.get(code, code)
+
+
 def _game_is_challenge(ge) -> bool:
     """True if the current game has at least one CHALLENGE phase."""
     try:
@@ -2509,7 +2541,7 @@ def _start_next_challenge_round(s):
     pass/out state reset happens inside _reset_round_passes — players
     who committed in the previous round get to re-vote this round
     with the new cards added to their hand."""
-    per_player_cents = 50
+    per_player_cents = s.ante_cents
     n = len(s.console_active_players)
     ante_cents = per_player_cents * n
     s.pot_cents += ante_cents

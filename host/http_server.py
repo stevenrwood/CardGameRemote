@@ -77,6 +77,10 @@ from overhead_test import (
     _handle_challenge_winner,
     _begin_challenge_vote,
     _challenge_required_cards,
+    _forced_betting_limit,
+    _betting_limit_label,
+    FORCED_POT_LIMIT_GAMES,
+    BETTING_LIMIT_LABELS,
     MAX_PASSES_PER_ROUND,
     _stats_bump,
     _stop_collect_mode,
@@ -667,12 +671,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     for st in s.challenge_per_player.values():
                         st["passes"] = 0
                     s.table_state_version += 1
-                per_player_cents = 50
                 n_players = len(s.console_active_players)
-                s.pot_cents += per_player_cents * n_players
+                s.pot_cents += s.ante_cents * n_players
                 _log_and_speak(s,
                     f"Reshuffle #{s.challenge_shuffle_count}. "
-                    f"Round 1 ante: {_fmt_money(per_player_cents)} each. "
+                    f"Round 1 ante: {_fmt_money(s.ante_cents)} each. "
                     f"Pot is now {_fmt_money(s.pot_cents)}.")
                 s.console_state = "dealing"
                 _start_guided_deal(s, 3)
@@ -820,6 +823,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "action_endpoint": action_endpoint,
                 "action_enabled": action_enabled,
                 "current_game": ge.current_game.name if ge.current_game else "",
+                "last_game_name": s.last_game_name,
+                "ante_cents": s.ante_cents,
+                "betting_limit": s.betting_limit,
+                "betting_limit_label": _betting_limit_label(s.betting_limit),
+                "forced_pot_limit_games": sorted(FORCED_POT_LIMIT_GAMES),
+                "ante_options": [
+                    {"value": 25, "label": "$0.25"},
+                    {"value": 50, "label": "$0.50"},
+                    {"value": 100, "label": "$1.00"},
+                ],
+                "limit_options": [
+                    {"value": k, "label": v}
+                    for k, v in BETTING_LIMIT_LABELS.items()
+                ],
                 "challenge": (
                     {
                         "round_index": s.challenge_round_index,
@@ -933,6 +950,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if game_name not in ge.templates:
                 self._r(400, "application/json", json.dumps({"error": f"Unknown game: {game_name}"}))
             else:
+                # Accept optional ante + betting-limit from the Start
+                # Game form. Omitting them (e.g. voice "Same game
+                # again") keeps the previous hand's values.
+                raw_ante = data.get("ante_cents")
+                if raw_ante is not None:
+                    try:
+                        new_ante = int(raw_ante)
+                        if new_ante > 0:
+                            s.ante_cents = new_ante
+                    except (TypeError, ValueError):
+                        pass
+                raw_limit = data.get("betting_limit")
+                if raw_limit is not None:
+                    limit = str(raw_limit).strip()
+                    if limit in BETTING_LIMIT_LABELS:
+                        s.betting_limit = limit
+                # Force pot limit for games that require it.
+                forced = _forced_betting_limit(game_name)
+                if forced:
+                    s.betting_limit = forced
                 result = ge.new_hand(game_name)
                 s.last_game_name = game_name
                 # Stand up the per-game class instance. Empty class_name
@@ -1042,14 +1079,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     }
                     s.rodney_out_slots = []
                     s.rodney_overflow = []
-                    per_player_cents = 50
                     n_players = len(s.console_active_players)
-                    s.pot_cents += per_player_cents * n_players
+                    s.pot_cents += s.ante_cents * n_players
                     _log_and_speak(s,
-                        f"Round 1 ante: {_fmt_money(per_player_cents)} each. "
+                        f"Round 1 ante: {_fmt_money(s.ante_cents)} each. "
                         f"Pot is now {_fmt_money(s.pot_cents)}.")
                 else:
                     s.challenge_round_index = None
+                # Start-of-hand announcement (dealer + game + ante + limit).
+                dealer_name = ge.get_dealer().name
+                _log_and_speak(s,
+                    f"Dealer is {dealer_name}. Game is {game_name}. "
+                    f"Ante {_fmt_money(s.ante_cents)}. "
+                    f"{_betting_limit_label(s.betting_limit)}.")
                 # Let the per-game class wire up its own per-hand state
                 # (freeze counters, local flags) now that common state is
                 # reset and the engine knows the current game.
