@@ -2588,10 +2588,14 @@ def _start_next_challenge_round(s):
 
 def _handle_challenge_winner(s, winner_name: str) -> bool:
     """Dealer-announced winner for a 2+ compare. The losers pay the
-    winner the current pot amount (pot itself stays on the table);
-    then the hand continues into the next round with the remaining
-    non-out players. If round 3 produced the compare, the hand ends
-    since there are no more rounds.
+    winner the current pot amount (pot itself stays on the table).
+
+    The hand only ends when the pot is awarded (1-out-all-pass path);
+    after a 2+ compare the pot is untouched and the hand continues.
+    In rounds 1-2 that means advancing into the next round; in round
+    3 (last round of the shuffle cycle) the deck is exhausted, so we
+    transition to 'reshuffle' to collect + re-deal from round 1 with
+    the pot carried over.
 
     Returns True on success."""
     if s.console_state != "challenge_resolve":
@@ -2605,14 +2609,17 @@ def _handle_challenge_winner(s, winner_name: str) -> bool:
     _log_and_speak(s,
         f"{winner_name} wins challenge vs {', '.join(losers)}. "
         f"Each owes {winner_name} {_fmt_money(per_loser)}.")
-    # Round 3 compare is the final event of the hand — no more rounds
-    # to advance into, so pot stays for the next hand.
     next_idx = (s.challenge_round_index or 0) + 1
     if next_idx >= 3:
-        s.console_state = "hand_over"
+        # End of a shuffle cycle with the pot still unawarded —
+        # same landing pad as a 0-out round 3.
+        s.console_state = "reshuffle"
+        _log_and_speak(s, "Deck exhausted. Reshuffle and redeal.")
         _bump_table_version(s)
         return True
-    # Advance into the next round for the remaining non-out players.
+    # Advance into the next round — everyone's passes/out reset
+    # inside _start_next_challenge_round so previously-committed
+    # players rejoin the vote with the new cards added to their hand.
     s.challenge_round_index = next_idx
     _start_next_challenge_round(s)
     return True
