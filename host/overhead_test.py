@@ -1478,6 +1478,15 @@ def _pi_poll_loop(s):
         # Only scan slots the current game actually uses (FTQ=3, Hold'em=2).
         max_slot = _total_downs_in_pattern(s.game_engine)
         with s.table_lock:
+            # Re-check guided ownership under the lock. The top-of-loop
+            # check is outside the lock, so a guided session that started
+            # during our HTTP fetch would otherwise see this (stale)
+            # scan overwrite rodney_downs — that's the round-3 Challenge
+            # bug where slots 4/5 got instantly "already filled" with the
+            # old cards right after _start_next_challenge_round popped
+            # them.
+            if s.guided_deal is not None:
+                continue
             changed = False
             for entry in doc.get("slots", []):
                 slot_num = entry.get("slot")
@@ -2629,25 +2638,37 @@ def _start_next_challenge_round(s):
         _start_guided_deal_range(s, [4, 5])
     elif s.challenge_round_index == 2:
         # Round 3: slots 4 and 5 get physically replaced. Save the old
-        # cards as rodney_overflow (for the resolve UI), then pop them
-        # from rodney_downs + pi_prev_slots so the guided-replace loop
-        # doesn't short-circuit with "already filled" on the scan.
+        # cards as rodney_overflow (for the resolve UI), pop them from
+        # rodney_downs + pi_prev_slots, and set s.guided_deal all in
+        # ONE lock window so the Pi poll loop can't re-populate slots
+        # 4/5 with stale scan data between the pop and the replace
+        # loop taking ownership.
         prev = {}
         overflow = []
-        with s.table_lock:
-            for slot in (4, 5):
-                code = s.pi_prev_slots.get(slot, "")
-                if code:
-                    prev[slot] = code
-                card = s.rodney_downs.get(slot)
-                if card:
-                    overflow.append({"slot": slot, "card": dict(card)})
-                s.rodney_downs.pop(slot, None)
-                s.pi_prev_slots.pop(slot, None)
-                s.slot_pending.pop(slot, None)
-            s.rodney_overflow = overflow
-            s.table_state_version += 1
-        _start_guided_replace(s, [4, 5], prev)
+        ordered = [4, 5]
+        if s.guided_deal is None:
+            with s.table_lock:
+                for slot in ordered:
+                    code = s.pi_prev_slots.get(slot, "")
+                    if code:
+                        prev[slot] = code
+                    card = s.rodney_downs.get(slot)
+                    if card:
+                        overflow.append({"slot": slot, "card": dict(card)})
+                    s.rodney_downs.pop(slot, None)
+                    s.pi_prev_slots.pop(slot, None)
+                    s.slot_pending.pop(slot, None)
+                s.rodney_overflow = overflow
+                s.guided_deal = {
+                    "slots": list(ordered), "index": 0, "mode": "replace",
+                    "previous_cards": dict(prev),
+                }
+                s.console_state = "replacing"
+                s.table_state_version += 1
+            _pi_flash(s, True)
+            t = Thread(target=_guided_replace_loop, args=(s,), daemon=True)
+            s.guided_deal_thread = t
+            t.start()
 
 
 def _handle_challenge_winner(s, winner_name: str) -> bool:
