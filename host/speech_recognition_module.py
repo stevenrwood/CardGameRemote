@@ -310,33 +310,36 @@ _WHISPER_FIXES = [
 
 
 def _is_hallucinated_loop(text: str) -> bool:
-    """Detect Whisper's 'stuck phrase' failure mode — e.g.
-        'Henry folds. Henry folds. Henry folds. Henry folds. Henry folds.'
-        'Ring Ring Ring Ring Ring Ring Ring Ring Ring Ring ...'
+    """Detect Whisper's 'stuck phrase' failure mode — transcripts
+    dominated by a short phrase repeating itself. Patterns we've
+    seen in the wild:
 
-    These virtually never correspond to real speech at a poker table;
-    they fire when the mic is picking up sustained low-level noise.
-    We drop the whole transcript as if it were silence.
+        'Ring Ring Ring Ring Ring Ring ...'  (1-gram, no punct)
+        'Henry folds. Henry folds. Henry folds. ...'  (period-delim)
+        'We got it, man. We got it, man. We got it, man.'  (3 reps)
+        '...standing in the bay, standing in the bay, ...'  (4-gram, comma-delim)
+
+    Real card calls and game IDs never loop, so any short n-gram
+    (1-5 tokens) repeating 3+ times AND covering 60%+ of the
+    transcript by token count is treated as a loop and dropped.
     """
     text = text.strip()
     if not text:
         return False
+    tokens = [t.lower().strip(",.!?;:\"'") for t in text.split()]
+    tokens = [t for t in tokens if t]
+    n = len(tokens)
+    if n < 5:
+        return False
     from collections import Counter
-    # Sentence-delimited form ("X. X. X. X. X.") — Whisper tends to
-    # punctuate each repetition.
-    chunks = [c.strip() for c in re.split(r"[.!?]+", text) if c.strip()]
-    if len(chunks) >= 5:
-        top_phrase, top_count = Counter(chunks).most_common(1)[0]
-        if top_count >= 5 and top_count >= len(chunks) / 2:
-            return True
-    # Whitespace-only form ("Ring Ring Ring ...") — one giant
-    # punctuation-free chunk where the filter above sees a single
-    # entry. Detect by token-frequency: 10+ identical tokens making
-    # up at least 80% of the transcript.
-    tokens = [t.lower().strip(",.!?") for t in text.split() if t.strip()]
-    if len(tokens) >= 10:
-        top_token, top_count = Counter(tokens).most_common(1)[0]
-        if top_count >= 10 and top_count >= len(tokens) * 0.8:
+    for k in range(1, min(6, n)):
+        ngrams = [tuple(tokens[i:i + k]) for i in range(n - k + 1)]
+        if not ngrams:
+            continue
+        _top, count = Counter(ngrams).most_common(1)[0]
+        if count < 3:
+            continue
+        if count * k / n >= 0.6:
             return True
     return False
 
