@@ -526,16 +526,18 @@ function onGameStaged(){
   // Night not yet started — let the dealer pick a game during
   // setup without firing a deal.
   if(!ST || !ST.night_active) return;
-  // Three flavors of the change-game prompt:
-  //   - same game already in play → "play same game again, same
-  //     dealer" (a misdeal restart triggered from the dropdown)
-  //   - different game with a hand running → next hand, rotate
-  //     the dealer
-  //   - no hand running → just start the picked game
+  // The dropdown always advances the dealer — it's the dealer's
+  // "next hand" control. Three flavors of prompt:
+  //   - same game already in play → "play same game again with the
+  //     next dealer?" (run it back with the rotation)
+  //   - different game with a hand running → "end X and start Y?"
+  //   - no hand running → "start <game>?"
+  // Misdeal recovery (same game, SAME dealer) goes through the
+  // Restart Game button instead.
   var sameGame = ST.game_in_progress && ST.current_game === g;
   var msg;
   if(sameGame){
-    msg = 'Play ' + g + ' again with the same dealer?';
+    msg = 'Play ' + g + ' again with the next dealer?';
   } else if(ST.game_in_progress){
     msg = 'End ' + (ST.current_game||'current hand') + ' and start ' + g + '?';
   } else {
@@ -551,9 +553,7 @@ function onGameStaged(){
   var limit=document.getElementById('limit-select').value || '1_2';
   var body={game:g, ante_cents:ante, betting_limit:limit};
   if(ST.game_in_progress){
-    // Same game = misdeal-style restart (keep dealer); different
-    // game = next hand (rotate to the next dealer).
-    api('/api/console/end',{advance_dealer:!sameGame}).then(function(){
+    api('/api/console/end',{advance_dealer:true}).then(function(){
       api('/api/console/deal',body).then(refresh);
     });
   } else {
