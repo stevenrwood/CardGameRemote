@@ -1017,6 +1017,11 @@ class AppState:
         self.whisper_min_energy_threshold = float(
             cfg.get("whisper_min_energy_threshold", 0.0)
         )
+        # Set in main() after SpeechListener is constructed (when
+        # --listen). Lets /api/console/state expose the recognizer's
+        # live energy_threshold so the dealer can see what it
+        # actually settled on tonight.
+        self.whisper_listener = None
         self.pi_polling = False
         self.pi_poll_thread = None
         self.pi_prev_slots = {}        # slot_num -> last-seen card code (e.g. "Ac")
@@ -4218,6 +4223,7 @@ def main():
                 ),
             )
             listener.start()
+            _state.whisper_listener = listener
             log.log("[VOICE] speech-input listener started (--listen)")
         except Exception as e:
             import traceback

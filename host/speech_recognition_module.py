@@ -706,6 +706,11 @@ class SpeechListener:
         self._thread = None
         self._pending_player = None   # player name heard without a card
         self._pending_time = 0
+        # Reference to the active sr.Recognizer once the listen loop
+        # has started — exposed via current_energy_threshold so the
+        # host UI can surface the live value (which dynamic-energy
+        # adjustment keeps drifting during the night).
+        self._recognizer = None
         # Optional zero-arg callable returning the floor for
         # recognizer.energy_threshold. With dynamic_energy_threshold=True
         # the library drifts the threshold down to ~8 in a quiet room,
@@ -728,6 +733,18 @@ class SpeechListener:
         # "the game is " prepended before parse_speech.
         self._pending_game_prefix = False
         self._pending_game_prefix_time = 0.0
+
+    @property
+    def current_energy_threshold(self):
+        """The recognizer's live energy_threshold (drifts during
+        operation due to dynamic_energy_threshold=True). None until
+        the listen loop has finished initial setup."""
+        if self._recognizer is None:
+            return None
+        try:
+            return float(self._recognizer.energy_threshold)
+        except Exception:
+            return None
 
     @staticmethod
     def _default_callback(command):
@@ -769,6 +786,7 @@ class SpeechListener:
         recognizer.pause_threshold = 1.2  # keep name + card together
         recognizer.phrase_threshold = 0.3
         recognizer.non_speaking_duration = 0.8
+        self._recognizer = recognizer
 
         try:
             mic = sr.Microphone()

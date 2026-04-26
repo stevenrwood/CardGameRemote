@@ -96,7 +96,9 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
 
   <div class="players-row">
     <h2 id="players-heading">Up cards seen</h2>
-    <span id="last-key" style="margin-left:auto;font-size:.75em;
+    <span id="whisper-status" style="margin-left:auto;font-size:.75em;
+          color:#888;font-family:monospace"></span>
+    <span id="last-key" style="margin-left:8px;font-size:.75em;
           color:#888;font-family:monospace"></span>
     <button id="scan-btn" class="sml-btn" onclick="scanNow()" disabled
             style="margin-left:6px">Scan</button>
@@ -138,6 +140,7 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
       <label>Whisper min energy threshold</label>
       <input id="setup-whisper-min" type="number" min="0" max="4000" step="1" value="0">
       <div class="hint">Floor for the speech-detection threshold (0 = auto-only). Bump to ~25-40 in a quiet room to suppress Whisper hallucinations on near-silence.</div>
+      <div class="hint" id="whisper-current-hint" style="font-style:italic"></div>
     </div>
     <div class="modal-btns">
       <button class="modal-save" onclick="saveSetup()">Save</button>
@@ -324,6 +327,16 @@ function render(){
   if(ST.night_active) mc.classList.remove('dim'); else mc.classList.add('dim');
 
   document.getElementById('state-text').textContent=ST.phase_label||'—';
+
+  var ws=document.getElementById('whisper-status');
+  if(ST.whisper_current_threshold!=null){
+    var floor=ST.whisper_min_energy_threshold||0;
+    var label='Whisper: '+Math.round(ST.whisper_current_threshold);
+    if(floor>0) label+=' (floor '+Math.round(floor)+')';
+    ws.textContent=label;
+  } else {
+    ws.textContent='';
+  }
   var abtn=document.getElementById('action-btn');
   if(ST.action_label){
     abtn.style.visibility='visible';
@@ -465,6 +478,14 @@ function populateSetupModal(){
   if(ST.whisper_min_energy_threshold!=null){
     document.getElementById('setup-whisper-min').value=
       Math.round(ST.whisper_min_energy_threshold);
+  }
+  var hint=document.getElementById('whisper-current-hint');
+  if(ST.whisper_current_threshold!=null){
+    hint.textContent='Currently auto-calibrated to '
+      +Math.round(ST.whisper_current_threshold)
+      +'. Set the floor at or above this if you still hear hallucinations.';
+  } else {
+    hint.textContent='';
   }
 }
 
