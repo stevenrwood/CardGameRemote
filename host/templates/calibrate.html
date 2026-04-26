@@ -16,6 +16,7 @@ button{padding:8px 16px;background:#e94560;color:#fff;border:none;border-radius:
   <button onclick="reloadImage()" style="padding:4px 10px">Refresh Image</button>
 </div>
 <canvas id="canvas"></canvas>
+<button onclick="undo()">Undo (⌘Z / Ctrl-Z)</button>
 <button onclick="location.href='/'">Back</button>
 <script>
 var c=document.getElementById('canvas'),ctx=c.getContext('2d');
@@ -190,4 +191,37 @@ c.onmouseleave=function(){
   // Cancel an in-progress drag if the mouse leaves the canvas.
   if(dragPos){dragPos=null;draw();}
 };
+
+// Step-aware undo. Walks the wizard backward one step, dropping
+// whatever data that step captured so the dealer can re-do it
+// without restarting the whole flow.
+function undo(){
+  if(step<=0){
+    document.getElementById('status').textContent=
+      'Nothing to undo — already at the first step.';
+    return;
+  }
+  if(step>steps.length) step=steps.length;  // clamp from a saved state
+  step--;
+  var st=steps[step];
+  if(st.t==='cc') cc=null;
+  else if(st.t==='ce') cr=null;
+  else if(st.t==='sc1') scaleP1=null;
+  else if(st.t==='sc2') zoneR=null;
+  else if(st.t==='zone') zones.pop();
+  dragPos=null;
+  document.getElementById('status').textContent=st.p;
+  draw();
+}
+document.addEventListener('keydown',function(e){
+  // ⌘Z on macOS, Ctrl-Z elsewhere. Ignore form fields if any get
+  // added later (none today, but defensive).
+  if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey
+     &&(e.key==='z'||e.key==='Z')){
+    var t=document.activeElement;
+    if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA')) return;
+    e.preventDefault();
+    undo();
+  }
+});
 </script></body></html>
