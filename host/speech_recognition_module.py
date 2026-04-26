@@ -310,27 +310,35 @@ _WHISPER_FIXES = [
 
 
 def _is_hallucinated_loop(text: str) -> bool:
-    """Detect Whisper's 'stuck phrase' failure mode — e.g. transcripts
-    where a short phrase repeats 5+ times in a row like
-    'Henry folds. Henry folds. Henry folds. Henry folds. Henry folds.'
-    That pattern virtually never corresponds to real speech at a poker
-    table and fires when the mic is picking up low-level room noise.
-    We drop these entire transcripts as if they were silence.
+    """Detect Whisper's 'stuck phrase' failure mode — e.g.
+        'Henry folds. Henry folds. Henry folds. Henry folds. Henry folds.'
+        'Ring Ring Ring Ring Ring Ring Ring Ring Ring Ring ...'
 
-    Returns True if the whole text is dominated by a repeated short
-    phrase (2-4 words, repeated >=5 times)."""
-    # Split on sentence separators — Whisper loops tend to end each
-    # repetition with . or ! and sometimes leave spaces.
-    chunks = [c.strip() for c in re.split(r"[.!?]+", text) if c.strip()]
-    if len(chunks) < 5:
+    These virtually never correspond to real speech at a poker table;
+    they fire when the mic is picking up sustained low-level noise.
+    We drop the whole transcript as if it were silence.
+    """
+    text = text.strip()
+    if not text:
         return False
-    # Count repeats of any single chunk
     from collections import Counter
-    counts = Counter(chunks)
-    top_phrase, top_count = counts.most_common(1)[0]
-    # Hallucinated if the top phrase accounts for >=5 chunks and makes
-    # up at least half the total chunks.
-    return top_count >= 5 and top_count >= len(chunks) / 2
+    # Sentence-delimited form ("X. X. X. X. X.") — Whisper tends to
+    # punctuate each repetition.
+    chunks = [c.strip() for c in re.split(r"[.!?]+", text) if c.strip()]
+    if len(chunks) >= 5:
+        top_phrase, top_count = Counter(chunks).most_common(1)[0]
+        if top_count >= 5 and top_count >= len(chunks) / 2:
+            return True
+    # Whitespace-only form ("Ring Ring Ring ...") — one giant
+    # punctuation-free chunk where the filter above sees a single
+    # entry. Detect by token-frequency: 10+ identical tokens making
+    # up at least 80% of the transcript.
+    tokens = [t.lower().strip(",.!?") for t in text.split() if t.strip()]
+    if len(tokens) >= 10:
+        top_token, top_count = Counter(tokens).most_common(1)[0]
+        if top_count >= 10 and top_count >= len(tokens) * 0.8:
+            return True
+    return False
 
 
 def _apply_whisper_fixes(text_lower: str) -> str:
