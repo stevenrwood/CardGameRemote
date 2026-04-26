@@ -579,6 +579,20 @@ def _default_templates() -> list[GameTemplate]:
                 Phase(type=PhaseType.BETTING),
             ],
         ),
+        # Two draw rounds, 3 cards each. With 5 players the deck runs
+        # tight (5×5 + 5×3 + 5×3 = 55 > 52), so the host caps the
+        # second draw at 2 in that case — see _max_draw_for_game.
+        GameTemplate(
+            name="5 Card Double Draw",
+            phases=[
+                Phase(type=PhaseType.DEAL, pattern=["down"] * 5),
+                Phase(type=PhaseType.BETTING),
+                Phase(type=PhaseType.DRAW, max_draw=3),
+                Phase(type=PhaseType.BETTING),
+                Phase(type=PhaseType.DRAW, max_draw=3),
+                Phase(type=PhaseType.BETTING),
+            ],
+        ),
         GameTemplate(
             name="3 Toed Pete",
             phases=[

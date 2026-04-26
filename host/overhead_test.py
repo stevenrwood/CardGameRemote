@@ -1340,7 +1340,7 @@ def _build_table_state(s):
             "max_marks": (
                 _challenge_required_cards(s)
                 if _challenge_can_mark(s, ge)
-                else _max_draw_for_game(ge, s.rodney_draws_done)
+                else _max_draw_for_game(ge, s.rodney_draws_done, s)
             ),
             "marked_slots": sorted(s.rodney_marked_slots),
             "drew_this_hand": s.rodney_drew_this_hand,
@@ -2456,12 +2456,18 @@ def _total_draw_phases(ge) -> int:
         return 0
 
 
-def _max_draw_for_game(ge, draws_done: int = 0) -> int:
+def _max_draw_for_game(ge, draws_done: int = 0, s=None) -> int:
     """Max cards Rodney can replace in the draws_done-th DRAW phase.
 
     Multi-draw games (3 Toed Pete) shrink the allowance each round: 3, 2,
     then 1. draws_done is the number of draws already completed — 0 for
     the first draw, 1 for the second, etc. Returns 0 if no such phase.
+
+    ``s`` is an optional AppState used for runtime caps that depend on
+    active player count. 5 Card Double Draw at a 5-handed table can't
+    fit a second 3-card draw (5×5 + 5×3 + 5×3 = 55 > 52), so the
+    second-draw allowance is capped at 2 when five players are still
+    in. With 4 or fewer the full 3 is fine.
     """
     try:
         from game_engine import PhaseType
@@ -2471,7 +2477,13 @@ def _max_draw_for_game(ge, draws_done: int = 0) -> int:
         for ph in ge.current_game.phases:
             if ph.type == PhaseType.DRAW:
                 if seen == draws_done:
-                    return int(getattr(ph, "max_draw", 0) or 0)
+                    base = int(getattr(ph, "max_draw", 0) or 0)
+                    if (s is not None
+                            and ge.current_game.name == "5 Card Double Draw"
+                            and seen == 1
+                            and len(getattr(s, "console_active_players", [])) >= 5):
+                        return min(base, 2)
+                    return base
                 seen += 1
     except Exception:
         pass

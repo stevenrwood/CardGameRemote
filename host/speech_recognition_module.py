@@ -48,6 +48,7 @@ def _log(msg):
 
 GAME_NAMES = [
     "5 Card Draw",
+    "5 Card Double Draw",
     "3 Toed Pete",
     "7 Card Stud",
     "7 Stud Deuces Wild",
@@ -104,6 +105,9 @@ GAME_ALIASES = {
     "five card draw": "5 Card Draw",
     "5 card draw": "5 Card Draw",
     "five car draw": "5 Card Draw",
+    "five card double draw": "5 Card Double Draw",
+    "5 card double draw": "5 Card Double Draw",
+    "double draw": "5 Card Double Draw",
     "seven card stud": "7 Card Stud",
     "7 card stud": "7 Card Stud",
     "seven stud deuces wild": "7 Stud Deuces Wild",

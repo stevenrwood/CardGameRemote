@@ -528,7 +528,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if in_challenge_vote:
                     max_marks = _challenge_required_cards(s)
                 else:
-                    max_marks = _max_draw_for_game(ge, s.rodney_draws_done)
+                    max_marks = _max_draw_for_game(ge, s.rodney_draws_done, s)
                 with s.table_lock:
                     if marked:
                         if len(s.rodney_marked_slots) >= max_marks and \
