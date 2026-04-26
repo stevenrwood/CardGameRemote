@@ -532,8 +532,11 @@ function startGame(){
   if(ST && ST.game_in_progress){
     var curr=ST.current_game||'current hand';
     if(!confirm('Cancel '+curr+' and start '+g+'?')) return;
-    // End the current hand without rotating the dealer, then deal.
-    api('/api/console/end',{advance_dealer:false}).then(function(){
+    // End the current hand AND rotate the dealer — picking a new
+    // game from the dropdown is the dealer's normal "next hand"
+    // shortcut, not a misclick recovery, so the next person should
+    // take the deal automatically.
+    api('/api/console/end',{advance_dealer:true}).then(function(){
       api('/api/console/deal',body).then(refresh);
     });
     return;
