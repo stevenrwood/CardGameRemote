@@ -44,7 +44,11 @@ steps.push({p:"Click EDGE of felt circle (at Bill's position)",t:'ce'});
 steps.push({p:'Click FIRST mark of the 8-inch reference',t:'sc1'});
 steps.push({p:'Click SECOND mark of the 8-inch reference',t:'sc2'});
 players.forEach(function(n){
-  steps.push({p:'Press, drag, and release to drop '+n+"'s zone",t:'zone',n:n});
+  steps.push({
+    p:'Drag '+n+"'s zone around the felt edge — the marker snaps "
+      +'so its rectangle bottom corners stay on the felt circle.',
+    t:'zone',n:n,
+  });
 });
 
 var img=new Image();
@@ -100,16 +104,77 @@ function draw(){
   }
   zones.forEach(function(z){
     ctx.strokeStyle='#0f0';ctx.lineWidth=2;
-    ctx.beginPath();ctx.arc(z.cx*s,z.cy*s,z.r*s,0,Math.PI*2);ctx.stroke();
     ctx.fillStyle='#0f0';ctx.font='16px sans-serif';
-    ctx.fillText(z.name,z.cx*s-20,z.cy*s-z.r*s-8);
+    var g=zoneMarkerFromCenter(z.cx,z.cy);
+    if(g){
+      // Filled rectangle (8"×3.5") + circle, both anchored to felt edge.
+      ctx.beginPath();
+      ctx.moveTo(g.bl[0]*s,g.bl[1]*s);
+      ctx.lineTo(g.br[0]*s,g.br[1]*s);
+      ctx.lineTo(g.tr[0]*s,g.tr[1]*s);
+      ctx.lineTo(g.tl[0]*s,g.tl[1]*s);
+      ctx.closePath();ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(g.cx*s,g.cy*s,g.r*s,0,Math.PI*2);ctx.stroke();
+      ctx.fillText(z.name,g.cx*s-20,g.cy*s-g.r*s-8);
+    } else {
+      // Fallback for legacy zones with no felt context: just the circle.
+      ctx.beginPath();ctx.arc(z.cx*s,z.cy*s,z.r*s,0,Math.PI*2);ctx.stroke();
+      ctx.fillText(z.name,z.cx*s-20,z.cy*s-z.r*s-8);
+    }
   });
-  // Drag preview for the in-progress zone.
+  // Drag preview for the in-progress zone — snapped to the felt edge.
   if(dragPos&&zoneR){
-    ctx.strokeStyle='#ff0';ctx.lineWidth=2;ctx.setLineDash([5,5]);
-    ctx.beginPath();ctx.arc(dragPos[0]*s,dragPos[1]*s,zoneR*s,0,Math.PI*2);
-    ctx.stroke();ctx.setLineDash([]);
+    var g=zoneMarkerFromDrag(dragPos[0],dragPos[1]);
+    if(g){
+      ctx.strokeStyle='#ff0';ctx.lineWidth=2;ctx.setLineDash([5,5]);
+      ctx.beginPath();
+      ctx.moveTo(g.bl[0]*s,g.bl[1]*s);
+      ctx.lineTo(g.br[0]*s,g.br[1]*s);
+      ctx.lineTo(g.tr[0]*s,g.tr[1]*s);
+      ctx.lineTo(g.tl[0]*s,g.tl[1]*s);
+      ctx.closePath();ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(g.cx*s,g.cy*s,g.r*s,0,Math.PI*2);ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
+}
+
+// Compute the constrained marker geometry for a given angle around
+// the felt circle. Returns {bl, br, tl, tr, cx, cy, r} in image
+// pixels: rectangle bottom corners (on the felt circle), rectangle
+// top corners (3.5" inward), and the recognition circle (8" diameter,
+// centered 7.5" inward of the chord midpoint). Null if calibration
+// isn't ready or the chord won't fit on the felt circle.
+function zoneMarkerAt(theta){
+  if(!cc||!cr||!zoneR) return null;
+  var R=cr,halfChord=zoneR;  // zoneR is 4" radius in px, so chord = 2*zoneR = 8".
+  if(halfChord>=R) return null;
+  var alpha=Math.asin(halfChord/R);
+  var bl=[cc[0]+R*Math.cos(theta-alpha),cc[1]+R*Math.sin(theta-alpha)];
+  var br=[cc[0]+R*Math.cos(theta+alpha),cc[1]+R*Math.sin(theta+alpha)];
+  var midX=(bl[0]+br[0])/2,midY=(bl[1]+br[1])/2;
+  var dx=cc[0]-midX,dy=cc[1]-midY;
+  var d=Math.sqrt(dx*dx+dy*dy);
+  if(d<1e-3) return null;
+  var ux=dx/d,uy=dy/d;
+  // 1 inch in px = zoneR / 4 (since zoneR is the 4-inch radius).
+  var rectH=(zoneR/4.0)*3.5;
+  var tl=[bl[0]+ux*rectH,bl[1]+uy*rectH];
+  var tr=[br[0]+ux*rectH,br[1]+uy*rectH];
+  // Circle center: chord midpoint + inward (3.5" rectangle + 4" radius).
+  var cxZ=midX+ux*(rectH+zoneR);
+  var cyZ=midY+uy*(rectH+zoneR);
+  return {bl:bl,br:br,tl:tl,tr:tr,cx:cxZ,cy:cyZ,r:zoneR};
+}
+function zoneMarkerFromDrag(x,y){
+  if(!cc) return null;
+  return zoneMarkerAt(Math.atan2(y-cc[1],x-cc[0]));
+}
+function zoneMarkerFromCenter(cx_zone,cy_zone){
+  if(!cc) return null;
+  return zoneMarkerAt(Math.atan2(cy_zone-cc[1],cx_zone-cc[0]));
 }
 function xy(e){
   var r=c.getBoundingClientRect();
@@ -182,7 +247,19 @@ c.onmouseup=function(e){
   var st=steps[step];
   if(st.t!=='zone'||!zoneR||!dragPos) return;
   var p=xy(e);
-  zones.push({name:st.n,cx:p[0],cy:p[1],r:zoneR});
+  var g=zoneMarkerFromDrag(p[0],p[1]);
+  if(!g){
+    document.getElementById('status').textContent=
+      'Cannot place marker — felt geometry invalid. Re-run calibration.';
+    dragPos=null;
+    return;
+  }
+  zones.push({
+    name:st.n,
+    cx:Math.round(g.cx),
+    cy:Math.round(g.cy),
+    r:Math.round(g.r),
+  });
   dragPos=null;
   advance();
   draw();
