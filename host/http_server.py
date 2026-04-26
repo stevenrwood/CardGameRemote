@@ -161,6 +161,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cc = data.get("circle_center")
             s.cal.circle_center = tuple(cc) if cc else None
             s.cal.circle_radius = data.get("circle_radius")
+            zr = data.get("zone_radius_px")
+            if zr is not None:
+                try:
+                    s.cal.zone_radius_px = int(zr)
+                except (TypeError, ValueError):
+                    pass
             s.cal.zones = data.get("zones", [])
             s.cal.save()
             self._r(200,"application/json",'{"ok":true}')
