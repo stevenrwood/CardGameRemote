@@ -995,6 +995,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._r(200, "application/json",
                                '{"ok":true,"scanned":0}')
             s.console_scan_phase = "scanned"
+            # Manual rescan-all is an explicit dealer override —
+            # don't hold the announcements behind the dealer-zone
+            # speech gate.
+            s.monitor.open_speech_gate()
+            s._dealer_zone_done = True
             Thread(target=s.monitor._recognize_batch,
                    args=(zone_crops,), daemon=True).start()
             self._r(200, "application/json",
@@ -1029,6 +1034,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._r(200, "application/json",
                                '{"ok":true,"scanned":0}')
             s.console_scan_phase = "scanned"
+            # Manual scan is an explicit dealer override — open the
+            # speech gate so cards announce immediately.
+            s.monitor.open_speech_gate()
+            s._dealer_zone_done = True
             Thread(target=s.monitor._recognize_batch,
                    args=(zone_crops,), daemon=True).start()
             log.log(f"[CONSOLE] Force scan of {len(zone_crops)} zones")
@@ -1157,6 +1166,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s._zones_with_motion = set()
                     s._missing_speech_count = {}
                     s._empty_scan_count = {}
+                    s._dealer_zone_done = False
+                    s._zone_prev_pending = {}
                     s.table_state_version += 1
                 # Challenge-game per-hand reset. pot_cents is NOT reset —
                 # it accumulates across hands until a 1-out-all-pass award.
@@ -1294,10 +1305,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 s.console_scan_phase = "confirmed"
                 log.log(f"[CONSOLE] Cards confirmed for up round {round_num}")
-            # Reset the per-player adjust-prompt cap so the next round
-            # starts fresh (two prompts max per player per round).
+            # Reset the per-round per-zone flags so the next round
+            # starts with a closed speech gate, no missing-zone
+            # prompts spent yet, and no empty-scan tally carried over.
             s._missing_speech_count = {}
             s._empty_scan_count = {}
+            s._dealer_zone_done = False
+            s._zone_prev_pending = {}
             # Once the up-card round is confirmed, check Rodney's down slots
             # for anything below the auto-accept threshold. Those slots get
             # queued and (on LED-equipped hardware) will start blinking; the
@@ -1414,6 +1428,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.console_scan_phase = "idle" if beyond_last_up else "watching"
                 s._zones_with_motion = set()
                 s._empty_scan_count = {}
+                s._missing_speech_count = {}
+                s._dealer_zone_done = False
+                s._zone_prev_pending = {}
                 if beyond_last_up:
                     log.log("[CONSOLE] No more up rounds — idle until End Hand")
                     s.console_state = "hand_over"

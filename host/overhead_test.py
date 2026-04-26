@@ -174,13 +174,175 @@ def _brio_player_names(s):
     return set(s.console_active_players)
 
 
-def _console_watch_dealer(s, frame):
-    """Watch the dealer's zone. When a card appears there, wait for settle then
-    scan all active player zones in one batch. Dealer deals to themselves last,
-    so this guarantees all cards are placed before scanning.
+ZONE_STABLE_FRAMES = 3
+ZONE_MAX_EMPTY_SCANS = 3
 
-    After scan, if any active players have no recognized card, watch their zones
-    and rescan when they move their cards."""
+
+def _console_watch_dealer(s, frame):
+    """Per-zone streaming recognition.
+
+    Each watched Brio zone runs its own stability state machine:
+    when the crop has been non-empty (vs. baseline) AND unchanged
+    from the previous frame for ZONE_STABLE_FRAMES in a row, the
+    zone is queued for recognition. Recognitions complete async
+    and per-card speech is held in a gate until the dealer's zone
+    has been recognized (deal-required rounds) — at which point
+    held announcements drain and any still-empty zones get a
+    one-time "please adjust" prompt.
+
+    Stand-allowed rounds (e.g. 7/27 hit) and remote-dealer hands
+    skip the gate and announce per zone as recognitions complete.
+    """
+    phase = s.console_scan_phase
+    if phase in ("idle", "confirmed"):
+        return
+
+    ge = s.game_engine
+    dealer_name = ge.get_dealer().name
+    brio_names = _brio_player_names(s)
+    impl = s.current_game_impl
+    if impl is not None:
+        scan_names, stand_allowed = impl.zones_to_scan(s)
+    else:
+        scan_names, stand_allowed = list(brio_names), False
+    watched = set(scan_names) & set(brio_names)
+    if not watched:
+        return
+
+    monitor = s.monitor
+    threshold = monitor.threshold
+
+    # Per-zone stability check + queue.
+    pending_recognition = {}
+    for z in s.cal.zones:
+        name = z["name"]
+        if name not in watched:
+            continue
+        zstate = monitor.zone_state.get(name)
+        if zstate in ("recognized", "corrected"):
+            # Locked for this round — don't re-scan.
+            continue
+        if monitor.pending.get(name):
+            # Recognition already in flight for this zone.
+            continue
+        if s._empty_scan_count.get(name, 0) >= ZONE_MAX_EMPTY_SCANS:
+            # Capped after enough failed scans this round; dealer
+            # must adjust the card or use the Scan / Correct UI.
+            continue
+        baseline = monitor.baselines.get(name)
+        if baseline is None:
+            continue
+        crop = monitor._crop(frame, z)
+        if crop is None or crop.size == 0:
+            continue
+        if crop.shape != baseline.shape:
+            continue
+
+        diff_baseline = float(np.mean(cv2.absdiff(crop, baseline)))
+        if diff_baseline < threshold:
+            # Empty (matches baseline) — reset stability state.
+            monitor.stable_count[name] = 0
+            monitor.prev_crop[name] = None
+            continue
+
+        prev = monitor.prev_crop.get(name)
+        monitor.prev_crop[name] = crop.copy()
+        if prev is None or prev.shape != crop.shape:
+            monitor.stable_count[name] = 1
+            continue
+
+        diff_prev = float(np.mean(cv2.absdiff(crop, prev)))
+        if diff_prev > threshold:
+            # Crop changed — restart the stability count from this
+            # frame (we still saw content, just not the same content).
+            monitor.stable_count[name] = 1
+            continue
+
+        monitor.stable_count[name] = monitor.stable_count.get(name, 0) + 1
+        if monitor.stable_count[name] >= ZONE_STABLE_FRAMES:
+            pending_recognition[name] = crop.copy()
+            monitor.pending[name] = True
+            log.log(
+                f"[CONSOLE] {name}'s zone stable — queuing for recognition"
+            )
+
+    if pending_recognition:
+        # Zones that came back empty earlier this round can't trust
+        # YOLO for their next pass — Claude validates before commit.
+        force_claude = {
+            n for n in pending_recognition
+            if s._empty_scan_count.get(n, 0) > 0
+        }
+        s.console_scan_phase = "scanned"
+        Thread(
+            target=monitor._recognize_batch,
+            args=(pending_recognition, force_claude),
+            daemon=True,
+        ).start()
+
+    # Detect failed recognitions: a zone whose recognition just
+    # completed (pending flipped True → False) and committed nothing
+    # bumps the per-round empty counter so the cap kicks in.
+    if not hasattr(s, "_zone_prev_pending"):
+        s._zone_prev_pending = {}
+    for name in watched:
+        was = s._zone_prev_pending.get(name, False)
+        is_now = bool(monitor.pending.get(name))
+        s._zone_prev_pending[name] = is_now
+        if was and not is_now:
+            zstate = monitor.zone_state.get(name)
+            card = monitor.last_card.get(name, "")
+            if zstate not in ("recognized", "corrected") or not card:
+                s._empty_scan_count[name] = (
+                    s._empty_scan_count.get(name, 0) + 1
+                )
+                log.log(
+                    f"[CONSOLE] {name} scan returned empty "
+                    f"(count {s._empty_scan_count[name]})"
+                )
+
+    # Speech gate. Stand-allowed rounds and remote-dealer hands
+    # don't gate — announce per-zone immediately. Otherwise wait
+    # until the dealer's zone has been recognized.
+    needs_gate = (not stand_allowed) and (dealer_name in brio_names)
+    if not needs_gate:
+        if not monitor._speech_open:
+            monitor.open_speech_gate()
+            s._dealer_zone_done = True
+    elif not s._dealer_zone_done:
+        if monitor.zone_state.get(dealer_name) == "recognized":
+            s._dealer_zone_done = True
+            monitor.open_speech_gate()
+            log.log(
+                "[CONSOLE] Dealer zone recognized — "
+                "draining held announcements"
+            )
+            # Fire one-time "please adjust" for zones still empty
+            # at the moment the dealer's card lands.
+            missing = []
+            for nm in watched:
+                if monitor.zone_state.get(nm) in (
+                    "recognized", "corrected"
+                ):
+                    continue
+                if s._missing_speech_count.get(nm, 0) >= 1:
+                    continue
+                missing.append(nm)
+            if missing:
+                names = " and ".join(missing)
+                log.log(
+                    f"[CONSOLE] Missing cards: {names} — "
+                    f"prompting to adjust"
+                )
+                speech.say(f"{names}, please adjust your card")
+                for nm in missing:
+                    s._missing_speech_count[nm] = 1
+
+
+# Old phase-based watcher — replaced by the per-zone state machine
+# above. Kept here as a no-op stub so the references survive the
+# transition; deletable once nothing imports it.
+def _console_watch_dealer_legacy(s, frame):
     phase = s.console_scan_phase
 
     if phase in ("idle", "confirmed"):
@@ -969,8 +1131,14 @@ class AppState:
         self.console_hand_cards = []  # all confirmed up cards this hand: [{player, card, round}]
         self.console_up_round = 0     # current up-card round number
         self.console_total_up_rounds = 0  # total up-card rounds in this game
-        self.console_scan_phase = "idle"  # "idle" | "watching" | "settling" | "scanned" | "confirmed"
+        self.console_scan_phase = "idle"  # "idle" | "watching" | "scanned" | "confirmed"
         self.console_settle_time = 0.0
+        # Per-round flags driven by the per-zone streaming watcher.
+        # Reset on confirm / next-round so the gate closes again.
+        self._dealer_zone_done = False
+        self._missing_speech_count = {}
+        self._empty_scan_count = {}
+        self._zone_prev_pending = {}
         # Name of the most recently-dealt game this session. Used by the
         # "Same game again" / "Let's run that back" voice command to
         # repeat the previous hand without having to say its name again.
