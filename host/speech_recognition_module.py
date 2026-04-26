@@ -714,6 +714,10 @@ class SpeechListener:
         # host UI can surface the live value (which dynamic-energy
         # adjustment keeps drifting during the night).
         self._recognizer = None
+        # The post-calibration value, captured once at startup.
+        # Useful to display alongside the (drifting) live value so
+        # the dealer can tell what auto-calibration originally chose.
+        self._calibration_threshold = None
         # Optional zero-arg callable returning the floor for
         # recognizer.energy_threshold. With dynamic_energy_threshold=True
         # the library drifts the threshold down to ~8 in a quiet room,
@@ -748,6 +752,12 @@ class SpeechListener:
             return float(self._recognizer.energy_threshold)
         except Exception:
             return None
+
+    @property
+    def calibration_threshold(self):
+        """The energy_threshold immediately after the one-shot
+        adjust_for_ambient_noise at startup. Doesn't drift."""
+        return self._calibration_threshold
 
     @staticmethod
     def _default_callback(command):
@@ -819,6 +829,7 @@ class SpeechListener:
             _log("Calibrating for ambient noise (2 seconds)...")
             recognizer.adjust_for_ambient_noise(source, duration=2)
             calibrated = recognizer.energy_threshold
+            self._calibration_threshold = float(calibrated)
             _enforce_min_threshold()
             if recognizer.energy_threshold != calibrated:
                 _log(

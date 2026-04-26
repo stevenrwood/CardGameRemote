@@ -331,7 +331,11 @@ function render(){
   var ws=document.getElementById('whisper-status');
   if(ST.whisper_current_threshold!=null){
     var floor=ST.whisper_min_energy_threshold||0;
+    var cal=ST.whisper_calibration_threshold;
     var label='Whisper: '+Math.round(ST.whisper_current_threshold);
+    if(cal!=null && Math.round(cal)!==Math.round(ST.whisper_current_threshold)){
+      label+=' (cal '+Math.round(cal)+')';
+    }
     if(floor>0) label+=' (floor '+Math.round(floor)+')';
     ws.textContent=label;
   } else {
@@ -481,9 +485,15 @@ function populateSetupModal(){
   }
   var hint=document.getElementById('whisper-current-hint');
   if(ST.whisper_current_threshold!=null){
-    hint.textContent='Currently auto-calibrated to '
-      +Math.round(ST.whisper_current_threshold)
-      +'. Set the floor at or above this if you still hear hallucinations.';
+    var parts='Live threshold: '+Math.round(ST.whisper_current_threshold);
+    if(ST.whisper_calibration_threshold!=null){
+      parts+=' (calibrated to '
+        +Math.round(ST.whisper_calibration_threshold)+' at startup).';
+    } else {
+      parts+='.';
+    }
+    parts+=' Set the floor at or above the live value if you still hear hallucinations.';
+    hint.textContent=parts;
   } else {
     hint.textContent='';
   }

@@ -830,6 +830,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         and s.whisper_listener.current_energy_threshold is not None)
                     else None
                 ),
+                "whisper_calibration_threshold": (
+                    round(s.whisper_listener.calibration_threshold, 0)
+                    if (s.whisper_listener is not None
+                        and s.whisper_listener.calibration_threshold is not None)
+                    else None
+                ),
                 "dealer": ge.get_dealer().name,
                 "hand": ge.get_hand_state(),
                 "last_round_cards": s.console_last_round_cards,
