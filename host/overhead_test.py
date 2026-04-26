@@ -1666,8 +1666,13 @@ def _pi_poll_loop(s):
         # Only hit the Pi when we're actually expecting a down card to be
         # dealt. Gate on the deal pattern directly (not pi_flash_held) so a
         # failed /flash/hold call doesn't also stop the scan polling.
+        # Exception: keep polling while we're in the stuck-cards phase
+        # so card removal updates pi_prev_slots — otherwise the
+        # buzzer reminder has no way to know the dealer cleared the
+        # scanner.
         _update_flash_for_deal_state(s)
-        if _next_deal_position_type(s) != "down":
+        in_stuck_phase = _final_round_with_stuck_cards(s)
+        if _next_deal_position_type(s) != "down" and not in_stuck_phase:
             time.sleep(2.0)
             continue
         doc = _pi_fetch_slots(s)
