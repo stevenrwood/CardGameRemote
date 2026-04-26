@@ -81,8 +81,8 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
     <select id="limit-select" style="flex:1" disabled></select>
   </div>
   <div class="field">
-    <button id="start-game-btn" class="btn-start" style="width:100%;padding:12px"
-            onclick="startGame()" disabled>Start Game</button>
+    <button id="restart-game-btn" class="btn-start" style="width:100%;padding:12px"
+            onclick="restartGame()" disabled>Restart Game</button>
   </div>
 
   <div class="status-row">
@@ -302,11 +302,10 @@ function render(){
     limitSel.disabled=!ST.night_active;
   }
 
-  var startBtn=document.getElementById('start-game-btn');
-  startBtn.disabled=!ST.night_active || !currGame;
-  startBtn.textContent=ST.game_in_progress
-    ? 'Restart Game'
-    : 'Start Game';
+  // Restart Game is only meaningful while a hand is in progress —
+  // game start is now driven by the dropdown's confirm dialog.
+  var restartBtn=document.getElementById('restart-game-btn');
+  restartBtn.disabled=!ST.game_in_progress;
 
   var sbtn=document.getElementById('start-btn');
   sbtn.textContent=ST.night_active?'Setup':'Start';
@@ -504,42 +503,63 @@ function onExit(){
 }
 
 function onGameStaged(){
-  // Called when the game dropdown changes. Updates the limit
-  // dropdown — games like Texas Hold'em / 3 Toed Pete / the
-  // Challenge variants force Pot limit and can't be overridden.
-  // Does NOT start a hand; the dealer has to click Start Game.
-  var g=document.getElementById('game-select').value;
+  // Called when the game dropdown changes. Two jobs:
+  //   1. Re-lock the limit dropdown for forced-pot-limit games.
+  //   2. Treat the dropdown change itself as a Start Game intent —
+  //      the OK button on the confirm dialog IS the Start button,
+  //      so the dealer only interacts once.
+  var gs=document.getElementById('game-select');
+  var g=gs.value;
   var limitSel=document.getElementById('limit-select');
   var forced=(ST && ST.forced_pot_limit_games || []).indexOf(g) !== -1;
   if(forced){
     limitSel.value='pot';
     limitSel.disabled=true;
   } else {
-    limitSel.disabled=false;
+    limitSel.disabled=!ST || !ST.night_active;
     if(ST && ST.betting_limit){
       limitSel.value=ST.betting_limit;
     }
   }
-}
-
-function startGame(){
-  var g=document.getElementById('game-select').value;
-  if(!g){alert('Pick a game first'); return;}
+  // Empty placeholder — nothing to confirm.
+  if(!g) return;
+  // Re-picking the game that's already in play is a no-op; the
+  // explicit Restart Game button is how a misdeal redeal happens.
+  if(ST && ST.current_game === g) return;
+  // Night not yet started — let the dealer pick a game during
+  // setup without firing a deal.
+  if(!ST || !ST.night_active) return;
+  var msg = ST.game_in_progress
+    ? 'End ' + (ST.current_game||'current hand') + ' and start ' + g + '?'
+    : 'Start ' + g + '?';
+  if(!confirm(msg)){
+    // Revert the dropdown so it reflects the live state again.
+    gs.value = ST.current_game || ST.last_game_name || '';
+    return;
+  }
   var ante=parseInt(document.getElementById('ante-select').value, 10) || 50;
   var limit=document.getElementById('limit-select').value || '1_2';
   var body={game:g, ante_cents:ante, betting_limit:limit};
-  // If a hand is already in progress: same game in the dropdown
-  // means "Restart Game" — misdeal recovery, keep the same dealer.
-  // A different game means the dealer is starting the next hand —
-  // rotate to the next person.
-  if(ST && ST.game_in_progress){
-    var sameGame = (g === ST.current_game);
-    api('/api/console/end',{advance_dealer:!sameGame}).then(function(){
+  if(ST.game_in_progress){
+    // Picking a different game = next hand → rotate the dealer.
+    api('/api/console/end',{advance_dealer:true}).then(function(){
       api('/api/console/deal',body).then(refresh);
     });
-    return;
+  } else {
+    api('/api/console/deal',body).then(refresh);
   }
-  api('/api/console/deal',body).then(refresh);
+}
+
+function restartGame(){
+  // Misdeal recovery — reshuffle and redeal the SAME game with the
+  // SAME dealer. Only meaningful while a hand is in progress.
+  if(!ST || !ST.game_in_progress) return;
+  var ante=parseInt(document.getElementById('ante-select').value, 10) || 50;
+  var limit=document.getElementById('limit-select').value || '1_2';
+  var body={game:ST.current_game, ante_cents:ante, betting_limit:limit};
+  api('/api/console/end',{advance_dealer:false}).then(function(){
+    api('/api/console/deal',body).then(refresh);
+  });
 }
 
 function scanNow(){
