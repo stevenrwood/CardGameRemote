@@ -523,26 +523,37 @@ function onGameStaged(){
   }
   // Empty placeholder — nothing to confirm.
   if(!g) return;
-  // Re-picking the game that's already in play is a no-op; the
-  // explicit Restart Game button is how a misdeal redeal happens.
-  if(ST && ST.current_game === g) return;
   // Night not yet started — let the dealer pick a game during
   // setup without firing a deal.
   if(!ST || !ST.night_active) return;
-  var msg = ST.game_in_progress
-    ? 'End ' + (ST.current_game||'current hand') + ' and start ' + g + '?'
-    : 'Start ' + g + '?';
+  // Three flavors of the change-game prompt:
+  //   - same game already in play → "play same game again, same
+  //     dealer" (a misdeal restart triggered from the dropdown)
+  //   - different game with a hand running → next hand, rotate
+  //     the dealer
+  //   - no hand running → just start the picked game
+  var sameGame = ST.game_in_progress && ST.current_game === g;
+  var msg;
+  if(sameGame){
+    msg = 'Play ' + g + ' again with the same dealer?';
+  } else if(ST.game_in_progress){
+    msg = 'End ' + (ST.current_game||'current hand') + ' and start ' + g + '?';
+  } else {
+    msg = 'Start ' + g + '?';
+  }
   if(!confirm(msg)){
-    // Revert the dropdown so it reflects the live state again.
-    gs.value = ST.current_game || ST.last_game_name || '';
+    // Leave the dropdown alone on cancel so the dealer can pick
+    // the same game (or any other) afterward to retry — reverting
+    // would block re-firing the change event.
     return;
   }
   var ante=parseInt(document.getElementById('ante-select').value, 10) || 50;
   var limit=document.getElementById('limit-select').value || '1_2';
   var body={game:g, ante_cents:ante, betting_limit:limit};
   if(ST.game_in_progress){
-    // Picking a different game = next hand → rotate the dealer.
-    api('/api/console/end',{advance_dealer:true}).then(function(){
+    // Same game = misdeal-style restart (keep dealer); different
+    // game = next hand (rotate to the next dealer).
+    api('/api/console/end',{advance_dealer:!sameGame}).then(function(){
       api('/api/console/deal',body).then(refresh);
     });
   } else {
