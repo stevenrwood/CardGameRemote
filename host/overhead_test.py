@@ -300,6 +300,14 @@ def _console_watch_dealer(s, frame):
                     f"[CONSOLE] {name} scan returned empty "
                     f"(count {s._empty_scan_count[name]})"
                 )
+                # Reset the per-zone stability tracker so the next
+                # placement (or an adjustment by the dealer) starts
+                # a fresh 3-frame stability cycle. Stale prev_crop
+                # from before the scan would otherwise keep
+                # diff_prev high every frame and the count never
+                # gets back up to ZONE_STABLE_FRAMES.
+                monitor.stable_count[name] = 0
+                monitor.prev_crop[name] = None
 
     # Speech gate. Stand-allowed rounds and remote-dealer hands
     # don't gate — announce per-zone immediately. Otherwise wait
@@ -317,26 +325,32 @@ def _console_watch_dealer(s, frame):
                 "[CONSOLE] Dealer zone recognized — "
                 "draining held announcements"
             )
-            # Fire one-time "please adjust" for zones still empty
-            # at the moment the dealer's card lands.
-            missing = []
-            for nm in watched:
-                if monitor.zone_state.get(nm) in (
-                    "recognized", "corrected"
-                ):
-                    continue
-                if s._missing_speech_count.get(nm, 0) >= 1:
-                    continue
-                missing.append(nm)
-            if missing:
-                names = " and ".join(missing)
-                log.log(
-                    f"[CONSOLE] Missing cards: {names} — "
-                    f"prompting to adjust"
-                )
-                speech.say(f"{names}, please adjust your card")
-                for nm in missing:
-                    s._missing_speech_count[nm] = 1
+
+    # Missing-zone prompt fires once per round, AFTER:
+    #   - the speech gate is open (dealer done / stand-allowed), AND
+    #   - every queued recognition has resolved (no zone pending).
+    # Waiting on pending zones is what stops "Missing cards: Rodney"
+    # from speaking 400ms before Rodney's own recognition lands.
+    if (s._dealer_zone_done
+            and not s._missing_prompt_fired
+            and not any(monitor.pending.get(nm) for nm in watched)):
+        s._missing_prompt_fired = True
+        missing = []
+        for nm in watched:
+            if monitor.zone_state.get(nm) in ("recognized", "corrected"):
+                continue
+            if s._missing_speech_count.get(nm, 0) >= 1:
+                continue
+            missing.append(nm)
+        if missing:
+            names = " and ".join(missing)
+            log.log(
+                f"[CONSOLE] Missing cards: {names} — "
+                f"prompting to adjust"
+            )
+            speech.say(f"{names}, please adjust your card")
+            for nm in missing:
+                s._missing_speech_count[nm] = 1
 
 
 # Old phase-based watcher — replaced by the per-zone state machine
@@ -1136,6 +1150,7 @@ class AppState:
         # Per-round flags driven by the per-zone streaming watcher.
         # Reset on confirm / next-round so the gate closes again.
         self._dealer_zone_done = False
+        self._missing_prompt_fired = False
         self._missing_speech_count = {}
         self._empty_scan_count = {}
         self._zone_prev_pending = {}

@@ -1167,6 +1167,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s._missing_speech_count = {}
                     s._empty_scan_count = {}
                     s._dealer_zone_done = False
+                    s._missing_prompt_fired = False
                     s._zone_prev_pending = {}
                     s.table_state_version += 1
                 # Challenge-game per-hand reset. pot_cents is NOT reset —
@@ -1311,6 +1312,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s._missing_speech_count = {}
             s._empty_scan_count = {}
             s._dealer_zone_done = False
+            s._missing_prompt_fired = False
             s._zone_prev_pending = {}
             # Once the up-card round is confirmed, check Rodney's down slots
             # for anything below the auto-accept threshold. Those slots get
@@ -1430,6 +1432,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s._empty_scan_count = {}
                 s._missing_speech_count = {}
                 s._dealer_zone_done = False
+                s._missing_prompt_fired = False
                 s._zone_prev_pending = {}
                 if beyond_last_up:
                     log.log("[CONSOLE] No more up rounds — idle until End Hand")
