@@ -812,6 +812,23 @@ run();
 </body></html>"""
 
 
+@app.post("/buzz")
+def buzz():
+    """Beep the piezo buzzer. Body: {"n": 2, "on_time": 0.12,
+    "off_time": 0.12} — all optional. Used by the host to nag the
+    dealer when cards remain in the scanner after the final round."""
+    assert _state is not None
+    body = request.get_json(silent=True) or {}
+    try:
+        n = int(body.get("n", 3))
+        on = float(body.get("on_time", 0.12))
+        off = float(body.get("off_time", 0.12))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "bad params"}), 400
+    _state.buzzer.beep(n=n, on_time=on, off_time=off)
+    return jsonify({"ok": True, "n": n})
+
+
 @app.post("/slots/<int:slot_num>/led")
 def slot_led(slot_num: int):
     """Control the per-slot green LED. Body: {"state": "on"|"off"|"blink"}."""

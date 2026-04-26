@@ -110,6 +110,25 @@ def _pi_flash(s, hold):
         log.log(f"[PI] {path} error: {type(e).__name__}: {detail}")
 
 
+def _pi_buzz(s, n: int = 2, on_time: float = 0.12, off_time: float = 0.12):
+    """POST /buzz — beep the Pi's piezo n times. Used as a quiet nag
+    when cards are left in the scanner after a hand has ended."""
+    if s.pi_offline:
+        return
+    import urllib.request
+    url = f"{s.pi_base_url.rstrip('/')}/buzz"
+    body = json.dumps({"n": n, "on_time": on_time, "off_time": off_time}).encode()
+    try:
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=2).read()
+    except Exception as e:
+        log.log(f"[PI] buzz failed: {type(e).__name__}: {e}")
+
+
 def _pi_slot_led(s, slot_num: int, state: str):
     """POST /slots/<n>/led with state = on | off | blink."""
     if s.pi_offline:

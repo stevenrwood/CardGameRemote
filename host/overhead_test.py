@@ -53,6 +53,7 @@ from pi_scanner import (
     _pi_ping,
     _pi_fetch_slots,
     _pi_flash,
+    _pi_buzz,
     _pi_slot_led,
     _pi_slot_scan,
 )
@@ -1770,6 +1771,62 @@ def _pi_poll_start(s):
 def _pi_poll_stop(s):
     s.pi_polling = False
     # Don't join — daemon thread will exit on its own
+
+
+# ---------------------------------------------------------------------------
+# Stuck-cards reminder
+# ---------------------------------------------------------------------------
+#
+# After the final up-card round of a hand, the dealer is supposed to
+# collect the cards out of the scanner before the next hand starts.
+# When they forget, the host nags via the Pi's piezo: two beeps every
+# 30 s until the slots are clear (or until a new hand begins).
+STUCK_CARDS_BUZZ_INTERVAL_S = 30.0
+
+
+def _final_round_with_stuck_cards(s) -> bool:
+    """True when the host should nag about cards still in the scanner.
+
+    Triggered while:
+      - night is active, AND
+      - the Pi reports cards present in at least one slot
+        (s.pi_prev_slots non-empty), AND
+      - the hand is past its final up-card round (scan_phase=='idle')
+        OR the hand has resolved entirely (state=='hand_over').
+    """
+    if not getattr(s, "night_active", False):
+        return False
+    if not s.pi_prev_slots:
+        return False
+    return (s.console_scan_phase == "idle"
+            or s.console_state == "hand_over")
+
+
+def _stuck_cards_buzzer_loop(s):
+    """Daemon thread. Beeps the Pi piezo twice every 30 s while
+    _final_round_with_stuck_cards is true; otherwise silent. Lives
+    for the lifetime of the host process — it's cheap to spin since
+    most ticks are no-ops."""
+    while True:
+        time.sleep(STUCK_CARDS_BUZZ_INTERVAL_S)
+        try:
+            if _final_round_with_stuck_cards(s):
+                slots = sorted(s.pi_prev_slots.keys())
+                log.log(
+                    f"[CARDS-STUCK] Cards still in slots {slots} "
+                    f"after final round — buzzing"
+                )
+                _pi_buzz(s, n=2)
+        except Exception as e:
+            log.log(f"[CARDS-STUCK] reminder error: {type(e).__name__}: {e}")
+
+
+def _stuck_cards_buzzer_start(s):
+    if getattr(s, "_stuck_buzz_thread", None) is not None:
+        return
+    t = Thread(target=_stuck_cards_buzzer_loop, args=(s,), daemon=True)
+    s._stuck_buzz_thread = t
+    t.start()
 
 
 # ---------------------------------------------------------------------------
@@ -4118,6 +4175,7 @@ def main():
     # starting it here is safe even if the Pi is off.
     _pi_poll_start(_state)
     log.log(f"Pi poller started against {_state.pi_base_url}")
+    _stuck_cards_buzzer_start(_state)
     log.log("Server at http://localhost:8888")
 
     # Start background capture
