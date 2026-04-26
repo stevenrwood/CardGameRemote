@@ -116,7 +116,7 @@ class FrameCapture:
         return None
 
     def __init__(self, camera_index, resolution="auto", camera_name_hint=None,
-                 cv_index_override=None, focus=None):
+                 cv_index_override=None, focus=None, zoom=None):
         self.camera_index = camera_index
         self.camera_name_hint = camera_name_hint
         self.cv_index_override = cv_index_override
@@ -124,6 +124,11 @@ class FrameCapture:
         # manual focus value (Logitech Brio usable range is 0..255, lower
         # = farther). Settable at runtime via set_focus().
         self.focus = focus
+        # UVC zoom-absolute. Brio range is 100 (1×, full FOV) to 500 (5×,
+        # narrow FOV). On most Brio firmware, the diagonal field of view
+        # is a side effect of the zoom level — 1× corresponds to ~90°.
+        # None = leave whatever the camera was last set to.
+        self.zoom = zoom
         self._active_cap = None
         self._check_ffmpeg()  # only used by _find_best_resolution below
         self.resolution = self._find_best_resolution() if resolution == "auto" else resolution
@@ -203,6 +208,7 @@ class FrameCapture:
             self._initial_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             self._initial_cap.set(cv2.CAP_PROP_FPS, 30)
         self._apply_focus(self._initial_cap)
+        self._apply_zoom(self._initial_cap)
         self._stream_thread = Thread(target=self._read_stream, daemon=True)
         self._stream_thread.start()
 
@@ -262,6 +268,7 @@ class FrameCapture:
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
                 cap.set(cv2.CAP_PROP_FPS, 30)
                 self._apply_focus(cap)
+                self._apply_zoom(cap)
             self._active_cap = cap
             first_pass = False
             # Smallest internal buffer so read() returns the newest frame
@@ -343,6 +350,37 @@ class FrameCapture:
             log.log(f"[CAPTURE] Autofocus off, focus={self.focus}")
         except Exception as e:
             log.log(f"[CAPTURE] focus set failed: {e}")
+
+    def _apply_zoom(self, cap):
+        """Set UVC zoom on a freshly-opened VideoCapture. Brio's
+        100 (1×, full FOV) is the all-the-way-out value."""
+        if cap is None or self.zoom is None:
+            return
+        try:
+            ok = cap.set(cv2.CAP_PROP_ZOOM, float(self.zoom))
+            actual = cap.get(cv2.CAP_PROP_ZOOM)
+            log.log(
+                f"[CAPTURE] Zoom set request={self.zoom} "
+                f"applied={ok} now={actual}"
+            )
+        except Exception as e:
+            log.log(f"[CAPTURE] zoom set failed: {e}")
+
+    def set_zoom(self, value):
+        """Update zoom at runtime. None = leave it alone."""
+        self.zoom = value
+        cap = self._active_cap
+        if cap is None or value is None:
+            return
+        try:
+            ok = cap.set(cv2.CAP_PROP_ZOOM, float(value))
+            actual = cap.get(cv2.CAP_PROP_ZOOM)
+            log.log(
+                f"[CAPTURE] Zoom set runtime request={value} "
+                f"applied={ok} now={actual}"
+            )
+        except Exception as e:
+            log.log(f"[CAPTURE] set_zoom failed: {e}")
 
     def set_focus(self, value):
         """Update focus at runtime. None turns autofocus back on."""

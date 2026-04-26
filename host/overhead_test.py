@@ -4304,6 +4304,11 @@ def main():
     parser.add_argument("--brio-focus", type=int, default=None,
                         help="Manual focus value for the Brio (0..255, lower = "
                              "farther). Omitting the flag leaves autofocus on.")
+    parser.add_argument("--brio-zoom", type=int, default=None,
+                        help="UVC zoom-absolute for the Brio (100..500, "
+                             "100 = 1x / fully zoomed out / widest FOV). "
+                             "Omitting leaves whatever the camera was on; "
+                             "set 100 once to lock max field of view.")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--resolution", type=str, default=DEFAULT_RESOLUTION)
     parser.add_argument("--voice", type=str, default=None,
@@ -4356,10 +4361,20 @@ def main():
         brio_focus = _persisted_cfg["brio_focus"]
         log.log(f"[CAPTURE] Loaded brio_focus={brio_focus} from host config")
 
+    # Brio UVC zoom — 100 (1×, full FOV) is the widest setting.
+    brio_zoom = args.brio_zoom
+    if brio_zoom is not None:
+        _save_host_config({"brio_zoom": brio_zoom})
+        log.log(f"[CAPTURE] Saved brio_zoom={brio_zoom} to host config")
+    elif "brio_zoom" in _persisted_cfg:
+        brio_zoom = _persisted_cfg["brio_zoom"]
+        log.log(f"[CAPTURE] Loaded brio_zoom={brio_zoom} from host config")
+
     capture = FrameCapture(camera_index, args.resolution,
                            camera_name_hint=args.camera_name,
                            cv_index_override=cv_idx,
-                           focus=brio_focus)
+                           focus=brio_focus,
+                           zoom=brio_zoom)
     log.log(f"Camera {camera_index}, resolution {capture.resolution}")
 
     # Wait for the persistent ffmpeg stream to warm up enough to produce

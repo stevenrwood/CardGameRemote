@@ -189,6 +189,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._r(200, "application/json",
                     json.dumps({"ok": True, "focus": new_val}))
 
+        elif p == "/api/brio/zoom":
+            # Live UVC zoom. Body: {"value": N} where N is 100..500.
+            # 100 = 1× (fully zoomed out, widest FOV).
+            raw = data.get("value")
+            new_val = None
+            if isinstance(raw, (int, float)):
+                new_val = max(100, min(500, int(raw)))
+            elif isinstance(raw, str) and raw.strip().isdigit():
+                new_val = max(100, min(500, int(raw.strip())))
+            if new_val is not None:
+                s.capture.set_zoom(new_val)
+                _save_host_config({"brio_zoom": new_val})
+            self._r(200, "application/json",
+                    json.dumps({"ok": True, "zoom": new_val}))
+
         elif p == "/api/monitor/start":
             if s.cal.ok and s.latest_frame is not None:
                 s.monitor.capture_baselines(s.latest_frame)
