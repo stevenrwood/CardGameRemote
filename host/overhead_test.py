@@ -1670,9 +1670,15 @@ def _pi_poll_loop(s):
         # so card removal updates pi_prev_slots — otherwise the
         # buzzer reminder has no way to know the dealer cleared the
         # scanner.
-        _update_flash_for_deal_state(s)
         in_stuck_phase = _final_round_with_stuck_cards(s)
-        if _next_deal_position_type(s) != "down" and not in_stuck_phase:
+        expecting_down = _next_deal_position_type(s) == "down"
+        if expecting_down:
+            _update_flash_for_deal_state(s)
+        else:
+            # Make sure flash isn't held while we're not expecting a
+            # deal — the Pi spends less effort on capture cycles.
+            _pi_flash(s, False)
+        if not expecting_down and not in_stuck_phase:
             time.sleep(2.0)
             continue
         doc = _pi_fetch_slots(s)
@@ -1772,7 +1778,11 @@ def _pi_poll_loop(s):
                 changed = True
             if changed:
                 s.table_state_version += 1
-        time.sleep(1.0)
+        # Slow the cadence to 5 s when we're only watching for card
+        # removal after the final round — there's no time-critical
+        # work, and a quieter poll rate reduces Pi load (and avoids
+        # piling up timeouts if the Pi is having a bad moment).
+        time.sleep(5.0 if (in_stuck_phase and not expecting_down) else 1.0)
     log.log("[PI] poll loop stopped")
 
 
