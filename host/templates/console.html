@@ -528,12 +528,13 @@ function startGame(){
   var ante=parseInt(document.getElementById('ante-select').value, 10) || 50;
   var limit=document.getElementById('limit-select').value || '1_2';
   var body={game:g, ante_cents:ante, betting_limit:limit};
-  // If a hand is already in progress, end it and rotate the dealer
-  // before dealing the new game. Clicking Start Game is itself the
-  // confirmation — picking from the dropdown is harmless until the
-  // button is pressed.
+  // If a hand is already in progress: same game in the dropdown
+  // means "Restart Game" — misdeal recovery, keep the same dealer.
+  // A different game means the dealer is starting the next hand —
+  // rotate to the next person.
   if(ST && ST.game_in_progress){
-    api('/api/console/end',{advance_dealer:true}).then(function(){
+    var sameGame = (g === ST.current_game);
+    api('/api/console/end',{advance_dealer:!sameGame}).then(function(){
       api('/api/console/deal',body).then(refresh);
     });
     return;
