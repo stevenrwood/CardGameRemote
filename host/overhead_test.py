@@ -1666,11 +1666,10 @@ def _pi_poll_loop(s):
         # Only hit the Pi when we're actually expecting a down card to be
         # dealt. Gate on the deal pattern directly (not pi_flash_held) so a
         # failed /flash/hold call doesn't also stop the scan polling.
-        # Exception: keep polling while we're in the stuck-cards phase
-        # so card removal updates pi_prev_slots — otherwise the
-        # buzzer reminder has no way to know the dealer cleared the
-        # scanner.
-        in_stuck_phase = _final_round_with_stuck_cards(s)
+        # During the stuck-cards-after-final-round window the buzzer
+        # thread does its own once-per-30s /slots refresh — no need
+        # for this loop to keep capturing+inferring constantly, which
+        # was overloading a marginal Pi.
         expecting_down = _next_deal_position_type(s) == "down"
         if expecting_down:
             _update_flash_for_deal_state(s)
@@ -1678,7 +1677,6 @@ def _pi_poll_loop(s):
             # Make sure flash isn't held while we're not expecting a
             # deal — the Pi spends less effort on capture cycles.
             _pi_flash(s, False)
-        if not expecting_down and not in_stuck_phase:
             time.sleep(2.0)
             continue
         doc = _pi_fetch_slots(s)
@@ -1778,11 +1776,7 @@ def _pi_poll_loop(s):
                 changed = True
             if changed:
                 s.table_state_version += 1
-        # Slow the cadence to 5 s when we're only watching for card
-        # removal after the final round — there's no time-critical
-        # work, and a quieter poll rate reduces Pi load (and avoids
-        # piling up timeouts if the Pi is having a bad moment).
-        time.sleep(5.0 if (in_stuck_phase and not expecting_down) else 1.0)
+        time.sleep(1.0)
     log.log("[PI] poll loop stopped")
 
 
@@ -1830,6 +1824,30 @@ def _final_round_with_stuck_cards(s) -> bool:
             or s.console_state == "hand_over")
 
 
+def _refresh_pi_prev_slots_for_buzzer(s):
+    """Single /slots fetch to update pi_prev_slots while the host's
+    main poll loop is dormant (post-final-round). Replaces the old
+    "keep polling every 5s during stuck-cards" mode that was
+    overloading the Pi with continuous capture+YOLO. Called once per
+    30s buzzer tick — light enough not to crash a marginal Pi."""
+    if not getattr(s, "night_active", False):
+        return
+    if (s.console_scan_phase != "idle"
+            and s.console_state != "hand_over"):
+        return
+    doc = _pi_fetch_slots(s)
+    if doc is None:
+        return
+    fresh = {}
+    for entry in doc.get("slots", []):
+        slot_num = entry.get("slot")
+        if slot_num is None:
+            continue
+        if entry.get("recognized") and entry.get("rank") and entry.get("suit"):
+            fresh[slot_num] = f"{entry['rank']}{entry['suit'][0]}"
+    s.pi_prev_slots = fresh
+
+
 def _stuck_cards_buzzer_loop(s):
     """Daemon thread. Beeps the Pi piezo twice every 30 s while
     _final_round_with_stuck_cards is true; otherwise silent. Lives
@@ -1838,6 +1856,7 @@ def _stuck_cards_buzzer_loop(s):
     while True:
         time.sleep(STUCK_CARDS_BUZZ_INTERVAL_S)
         try:
+            _refresh_pi_prev_slots_for_buzzer(s)
             if _final_round_with_stuck_cards(s):
                 slots = sorted(s.pi_prev_slots.keys())
                 log.log(
