@@ -691,12 +691,21 @@ class SpeechListener:
     Listens in short chunks, transcribes each, and parses for commands.
     """
 
-    def __init__(self, callback=None, locale="en-US", game_names=None):
+    def __init__(self, callback=None, locale="en-US", game_names=None,
+                 min_energy_threshold_fn=None):
         self._callback = callback or self._default_callback
         self._running = False
         self._thread = None
         self._pending_player = None   # player name heard without a card
         self._pending_time = 0
+        # Optional zero-arg callable returning the floor for
+        # recognizer.energy_threshold. With dynamic_energy_threshold=True
+        # the library drifts the threshold down to ~8 in a quiet room,
+        # which makes Whisper trigger on near-silence and produce
+        # looped hallucinations. The host wires this to a host-config
+        # value that the dealer can tweak from the Setup modal.
+        # Returning None / 0 / falsy = no floor (legacy behavior).
+        self._min_energy_fn = min_energy_threshold_fn
         # Whisper bias prompt extension. If callers pass the live
         # GameTemplate name list, each "The game is X." gets appended
         # to the prompt at model-warmup time so Whisper has actually
@@ -761,10 +770,38 @@ class SpeechListener:
 
         _log("Microphone opened")
 
+        def _enforce_min_threshold():
+            if self._min_energy_fn is None:
+                return
+            try:
+                floor = self._min_energy_fn()
+            except Exception:
+                return
+            if not floor:
+                return
+            try:
+                f = float(floor)
+            except (TypeError, ValueError):
+                return
+            if recognizer.energy_threshold < f:
+                recognizer.energy_threshold = f
+
         with mic as source:
             _log("Calibrating for ambient noise (2 seconds)...")
             recognizer.adjust_for_ambient_noise(source, duration=2)
-            _log(f"Calibration done (threshold: {recognizer.energy_threshold:.0f})")
+            calibrated = recognizer.energy_threshold
+            _enforce_min_threshold()
+            if recognizer.energy_threshold != calibrated:
+                _log(
+                    f"Calibration done (auto: {calibrated:.0f}, "
+                    f"floored to user min: "
+                    f"{recognizer.energy_threshold:.0f})"
+                )
+            else:
+                _log(
+                    f"Calibration done (threshold: "
+                    f"{recognizer.energy_threshold:.0f})"
+                )
 
         # Load whisper model
         model_name = "mlx-community/whisper-small.en-mlx"
@@ -819,6 +856,11 @@ class SpeechListener:
 
         while self._running:
             try:
+                # dynamic_energy_threshold drifts the threshold down
+                # during quiet stretches; re-clamp to the user-set
+                # floor each iteration so a long silent stretch
+                # doesn't undo the calibration floor.
+                _enforce_min_threshold()
                 with mic as source:
                     # phrase_time_limit capped at 4s — Whisper hallucinations
                     # ("Henry folds. Henry folds. Henry folds..." repeated

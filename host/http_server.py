@@ -821,6 +821,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "game_groups": ge.get_game_groups(),
                 "brio_settle_s": round(s.brio_settle_s, 2),
                 "pi_presence_threshold": round(s.pi_presence_threshold, 1),
+                "whisper_min_energy_threshold": round(
+                    s.whisper_min_energy_threshold, 0
+                ),
                 "dealer": ge.get_dealer().name,
                 "hand": ge.get_hand_state(),
                 "last_round_cards": s.console_last_round_cards,
@@ -1820,11 +1823,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 log.log(f"[CONSOLE] Brio settle → {s.brio_settle_s:.2f}s")
             except (TypeError, ValueError):
                 pass
+        whisper_min = data.get("whisper_min_energy_threshold")
+        if whisper_min is not None:
+            try:
+                # 0..4000 covers Whisper's natural range; clamp anything
+                # absurd to keep "off" (= 0) reachable.
+                s.whisper_min_energy_threshold = max(
+                    0.0, min(4000.0, float(whisper_min))
+                )
+                log.log(
+                    f"[CONSOLE] Whisper min energy threshold → "
+                    f"{s.whisper_min_energy_threshold:.0f}"
+                )
+            except (TypeError, ValueError):
+                pass
         # Persist host-managed tunables so restarts keep the user's choices.
         _save_host_config({
             "brio_settle_s": s.brio_settle_s,
             "pi_presence_threshold": s.pi_presence_threshold,
             "yolo_min_conf": s.monitor.yolo_min_conf,
+            "whisper_min_energy_threshold": s.whisper_min_energy_threshold,
         })
 
     def _proxy_slot_image(self, s, slot_num: int):

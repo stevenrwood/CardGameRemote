@@ -1009,6 +1009,14 @@ class AppState:
         cfg = _load_host_config()
         self.brio_settle_s = float(cfg.get("brio_settle_s", DEFAULT_BRIO_SETTLE_S))
         self.pi_presence_threshold = float(cfg.get("pi_presence_threshold", 140.0))
+        # Floor for the SpeechListener's recognizer.energy_threshold.
+        # 0 = no floor (auto-calibrate to ambient noise as before).
+        # Dealers in quiet rooms see calibration land at 8-12 which
+        # makes Whisper trigger on near-silence and produce looped
+        # hallucinations; setting this to 25-40 dampens that.
+        self.whisper_min_energy_threshold = float(
+            cfg.get("whisper_min_energy_threshold", 0.0)
+        )
         self.pi_polling = False
         self.pi_poll_thread = None
         self.pi_prev_slots = {}        # slot_num -> last-seen card code (e.g. "Ac")
@@ -4202,6 +4210,12 @@ def main():
             listener = SpeechListener(
                 callback=_process_voice_command,
                 game_names=game_names,
+                # Re-read the live AppState value each iteration so
+                # the dealer can adjust the floor mid-night via the
+                # Setup modal without restarting the host.
+                min_energy_threshold_fn=(
+                    lambda: _state.whisper_min_energy_threshold
+                ),
             )
             listener.start()
             log.log("[VOICE] speech-input listener started (--listen)")

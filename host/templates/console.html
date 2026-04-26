@@ -134,6 +134,11 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
       <input id="setup-settle" type="number" min="0" max="10" step="0.1" value="0.7">
       <div class="hint">Delay after the dealer zone trips before the whole-table scan fires.</div>
     </div>
+    <div class="field">
+      <label>Whisper min energy threshold</label>
+      <input id="setup-whisper-min" type="number" min="0" max="4000" step="1" value="0">
+      <div class="hint">Floor for the speech-detection threshold (0 = auto-only). Bump to ~25-40 in a quiet room to suppress Whisper hallucinations on near-silence.</div>
+    </div>
     <div class="modal-btns">
       <button class="modal-save" onclick="saveSetup()">Save</button>
       <button class="modal-cancel" onclick="closeModal('setup-modal')">Cancel</button>
@@ -457,6 +462,10 @@ function populateSetupModal(){
   if(ST.brio_settle_s!=null){
     document.getElementById('setup-settle').value=Number(ST.brio_settle_s).toFixed(1);
   }
+  if(ST.whisper_min_energy_threshold!=null){
+    document.getElementById('setup-whisper-min').value=
+      Math.round(ST.whisper_min_energy_threshold);
+  }
 }
 
 function onStart(){
@@ -475,7 +484,11 @@ function saveSetup(){
   var yolo=parseInt(document.getElementById('setup-yolo').value,10)/100.0;
   var presence=parseFloat(document.getElementById('setup-presence').value);
   var settle=parseFloat(document.getElementById('setup-settle').value);
-  var body={dealer:dealer,players:players,yolo_min_conf:yolo,presence_threshold:presence,brio_settle_s:settle};
+  var whisperMin=parseFloat(document.getElementById('setup-whisper-min').value);
+  if(isNaN(whisperMin)) whisperMin=0;
+  var body={dealer:dealer,players:players,yolo_min_conf:yolo,
+            presence_threshold:presence,brio_settle_s:settle,
+            whisper_min_energy_threshold:whisperMin};
   var path=(ST&&ST.night_active)?'/api/console/settings':'/api/console/start_night';
   api(path,body).then(function(){closeModal('setup-modal');refresh();});
 }
