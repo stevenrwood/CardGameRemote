@@ -197,6 +197,15 @@ def _brio_player_names(s):
 
 ZONE_STABLE_FRAMES = 3
 ZONE_MAX_EMPTY_SCANS = 3
+# Frame-to-frame stability check uses a tighter threshold than the
+# baseline-comparison check. A still scene at 30 fps has mean
+# frame-to-frame diff of ~1–5; auto-exposure jitter can spike to
+# 10–15, but a real card placement / hand sweep is well above that.
+# Keeping this lower than monitor.threshold (which is for "is the
+# zone non-empty?") lets us tolerate exposure jitter without
+# resetting the stability count.
+ZONE_STABILITY_THRESHOLD = 15
+ZONE_DIAG_INTERVAL_S = 5.0
 
 
 def _console_watch_dealer(s, frame):
@@ -232,6 +241,7 @@ def _console_watch_dealer(s, frame):
 
     monitor = s.monitor
     threshold = monitor.threshold
+    diag = {}  # name -> (diff_baseline, diff_prev, stable_count) for log
 
     # Per-zone stability check + queue.
     pending_recognition = {}
@@ -264,28 +274,60 @@ def _console_watch_dealer(s, frame):
             # Empty (matches baseline) — reset stability state.
             monitor.stable_count[name] = 0
             monitor.prev_crop[name] = None
+            diag[name] = (diff_baseline, None, 0)
             continue
 
         prev = monitor.prev_crop.get(name)
         monitor.prev_crop[name] = crop.copy()
         if prev is None or prev.shape != crop.shape:
             monitor.stable_count[name] = 1
+            diag[name] = (diff_baseline, None, 1)
             continue
 
         diff_prev = float(np.mean(cv2.absdiff(crop, prev)))
-        if diff_prev > threshold:
+        if diff_prev > ZONE_STABILITY_THRESHOLD:
             # Crop changed — restart the stability count from this
             # frame (we still saw content, just not the same content).
             monitor.stable_count[name] = 1
+            diag[name] = (diff_baseline, diff_prev, 1)
             continue
 
         monitor.stable_count[name] = monitor.stable_count.get(name, 0) + 1
+        diag[name] = (diff_baseline, diff_prev, monitor.stable_count[name])
         if monitor.stable_count[name] >= ZONE_STABLE_FRAMES:
             pending_recognition[name] = crop.copy()
             monitor.pending[name] = True
             log.log(
                 f"[CONSOLE] {name}'s zone stable — queuing for recognition"
             )
+
+    # Periodic diagnostic dump while we're waiting on missing zones
+    # after the prompt. Lets us see whether diff_baseline never
+    # crosses the threshold (zone really empty) vs. diff_prev
+    # keeps spiking past ZONE_STABILITY_THRESHOLD (camera jitter
+    # blocking stability).
+    if (s._dealer_zone_done and s._missing_prompt_fired):
+        now = time.time()
+        if now - getattr(s, "_zone_diag_time", 0.0) >= ZONE_DIAG_INTERVAL_S:
+            missing_now = [
+                nm for nm in watched
+                if monitor.zone_state.get(nm) not in ("recognized", "corrected")
+            ]
+            if missing_now:
+                parts = []
+                for nm in missing_now:
+                    db, dp, sc = diag.get(nm, (None, None, None))
+                    db_s = "—" if db is None else f"{db:.1f}"
+                    dp_s = "—" if dp is None else f"{dp:.1f}"
+                    parts.append(
+                        f"{nm} db={db_s} dp={dp_s} sc={sc}"
+                    )
+                log.log(
+                    f"[CONSOLE] still waiting on missing zones: "
+                    f"{'; '.join(parts)} "
+                    f"(thresholds bl={threshold:.0f} stab={ZONE_STABILITY_THRESHOLD})"
+                )
+            s._zone_diag_time = now
 
     if pending_recognition:
         # Zones that came back empty earlier this round can't trust
