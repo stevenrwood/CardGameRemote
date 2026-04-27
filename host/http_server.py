@@ -1243,10 +1243,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.console_state = "dealing"
                 # Use the slot-by-slot guided flow for the leading down cards
                 # in the first deal phase — 2 for 7 Card Stud, 2 for Hold'em,
-                # 3 for Follow the Queen, 5 for 5 Card Draw. Games with up
-                # cards in the same phase start Brio watching only after
-                # guided completes, so dealer hand motion over local zones
-                # during down-card dealing doesn't trip false alarms.
+                # 3 for Follow the Queen, 5 for 5 Card Draw. Brio watching
+                # already runs in parallel (started above when baselines were
+                # captured) so the up-card watcher doesn't stall on Rodney's
+                # down-card validation.
+                leading_downs = _initial_down_count(ge)
+                will_guide = leading_downs > 0 and not s.pi_offline
                 if will_guide:
                     _start_guided_deal(s, leading_downs)
                 else:
