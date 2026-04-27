@@ -301,8 +301,15 @@ def _console_watch_dealer(s, frame):
             # Empty — reset stability state. fraction-of-high-contrast
             # pixels rejects the "small mean diff over uniformly
             # drifted felt" case the old mean check fell for.
+            # Also reset the empty-scan retry cap when the zone
+            # returns to baseline. Without this, transient noise
+            # (dealer's arm passing over a zone during the GUIDED
+            # down-card phase) could burn through MAX_EMPTY_SCANS
+            # before the real up card lands, locking the zone out.
             monitor.stable_count[name] = 0
             monitor.prev_crop[name] = None
+            if s._empty_scan_count.get(name, 0):
+                s._empty_scan_count[name] = 0
             diag[name] = (diff_baseline, fraction_high, None, 0)
             continue
 

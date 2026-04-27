@@ -1145,35 +1145,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # cards, either via explicit up/community phases or an
                 # open-ended HIT_ROUND (7/27). Baselines are captured now
                 # while the table is empty of up cards, regardless of when
-                # watching actually starts. Whether to watch immediately or
-                # defer until guided finishes depends on whether the FIRST
-                # deal phase itself contains an up card.
-                leading_downs = _initial_down_count(ge)
-                will_guide = leading_downs > 0 and not s.pi_offline
+                # watching actually starts. Brio watching now runs in
+                # PARALLEL with the guided down-card phase — the per-zone
+                # stability gate (3 stable frames) rejects the arm sweeps
+                # the original deferral was guarding against, and any
+                # genuine up-card placement that happens while the dealer
+                # is still validating Rodney's downs gets recognized
+                # immediately instead of stalling until GUIDED completes.
                 needs_brio = up_rounds != 0 or has_hit_round
                 if needs_brio and s.cal.ok and s.latest_frame is not None:
                     s.monitor.capture_baselines(s.latest_frame)
                     s.monitoring = True
-                    if will_guide:
-                        # Any game that uses guided Pi-slot dealing deals
-                        # downs first — regardless of whether the first
-                        # phase also contains an up card — so the dealer
-                        # sweeps every zone multiple times before the up
-                        # cards arrive. Defer Brio until guided completes;
-                        # the per-game guided-completion branches (all-down
-                        # vs mixed vs hit-round) take over from there.
-                        s.console_scan_phase = "idle"
-                        log.log(
-                            "[CONSOLE] Baselines captured; Brio watching "
-                            "deferred until guided downs are validated"
-                        )
-                    else:
-                        s.console_scan_phase = "watching"
-                        s._zones_with_motion = set()
-                        log.log(
-                            f"[CONSOLE] Watching {ge.get_dealer().name}'s "
-                            f"zone for first card"
-                        )
+                    s.console_scan_phase = "watching"
+                    s._zones_with_motion = set()
+                    log.log(
+                        f"[CONSOLE] Watching {ge.get_dealer().name}'s "
+                        f"zone for first card"
+                    )
                 # Start the hand fresh: clear Rodney-side state and turn the
                 # scanner LEDs on so the initial down cards get good scans.
                 with s.table_lock:
