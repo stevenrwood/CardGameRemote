@@ -206,6 +206,33 @@ ZONE_MAX_EMPTY_SCANS = 3
 # resetting the stability count.
 ZONE_STABILITY_THRESHOLD = 15
 ZONE_DIAG_INTERVAL_S = 5.0
+# Fraction-of-high-contrast-pixels presence detector. The 8" zone
+# is much larger than the card (~17 % area), so mean-diff vs
+# baseline is dominated by unchanged felt and barely moves when a
+# card is added. Instead, count pixels whose max-channel diff
+# exceeds a per-pixel cutoff and require a meaningful fraction of
+# the zone to be card-like. Cards produce well over the cutoff in
+# the card area (suit / number prints); empty-zone sensor noise
+# stays well below the fraction.
+ZONE_PRESENCE_PIXEL_DIFF = 40
+ZONE_PRESENCE_FRACTION = 0.04
+
+
+def _zone_presence_metric(crop, baseline):
+    """Return (fraction_high, mean_diff) for crop vs its baseline.
+    fraction_high is the share of pixels whose max-channel absolute
+    diff exceeds ZONE_PRESENCE_PIXEL_DIFF; mean_diff is the legacy
+    scalar kept for diagnostic logging."""
+    absdiff = cv2.absdiff(crop, baseline)
+    if absdiff.ndim == 3:
+        per_pixel = absdiff.max(axis=2)
+    else:
+        per_pixel = absdiff
+    total = per_pixel.size
+    if total == 0:
+        return 0.0, 0.0
+    high = int((per_pixel > ZONE_PRESENCE_PIXEL_DIFF).sum())
+    return high / total, float(absdiff.mean())
 
 
 def _console_watch_dealer(s, frame):
@@ -269,19 +296,21 @@ def _console_watch_dealer(s, frame):
         if crop.shape != baseline.shape:
             continue
 
-        diff_baseline = float(np.mean(cv2.absdiff(crop, baseline)))
-        if diff_baseline < threshold:
-            # Empty (matches baseline) — reset stability state.
+        fraction_high, diff_baseline = _zone_presence_metric(crop, baseline)
+        if fraction_high < ZONE_PRESENCE_FRACTION:
+            # Empty — reset stability state. fraction-of-high-contrast
+            # pixels rejects the "small mean diff over uniformly
+            # drifted felt" case the old mean check fell for.
             monitor.stable_count[name] = 0
             monitor.prev_crop[name] = None
-            diag[name] = (diff_baseline, None, 0)
+            diag[name] = (diff_baseline, fraction_high, None, 0)
             continue
 
         prev = monitor.prev_crop.get(name)
         monitor.prev_crop[name] = crop.copy()
         if prev is None or prev.shape != crop.shape:
             monitor.stable_count[name] = 1
-            diag[name] = (diff_baseline, None, 1)
+            diag[name] = (diff_baseline, fraction_high, None, 1)
             continue
 
         diff_prev = float(np.mean(cv2.absdiff(crop, prev)))
@@ -289,11 +318,14 @@ def _console_watch_dealer(s, frame):
             # Crop changed — restart the stability count from this
             # frame (we still saw content, just not the same content).
             monitor.stable_count[name] = 1
-            diag[name] = (diff_baseline, diff_prev, 1)
+            diag[name] = (diff_baseline, fraction_high, diff_prev, 1)
             continue
 
         monitor.stable_count[name] = monitor.stable_count.get(name, 0) + 1
-        diag[name] = (diff_baseline, diff_prev, monitor.stable_count[name])
+        diag[name] = (
+            diff_baseline, fraction_high, diff_prev,
+            monitor.stable_count[name],
+        )
         if monitor.stable_count[name] >= ZONE_STABLE_FRAMES:
             pending_recognition[name] = crop.copy()
             monitor.pending[name] = True
@@ -316,16 +348,19 @@ def _console_watch_dealer(s, frame):
             if missing_now:
                 parts = []
                 for nm in missing_now:
-                    db, dp, sc = diag.get(nm, (None, None, None))
+                    entry = diag.get(nm, (None, None, None, None))
+                    db, fr, dp, sc = entry
                     db_s = "—" if db is None else f"{db:.1f}"
+                    fr_s = "—" if fr is None else f"{fr:.3f}"
                     dp_s = "—" if dp is None else f"{dp:.1f}"
                     parts.append(
-                        f"{nm} db={db_s} dp={dp_s} sc={sc}"
+                        f"{nm} db={db_s} fr={fr_s} dp={dp_s} sc={sc}"
                     )
                 log.log(
                     f"[CONSOLE] still waiting on missing zones: "
                     f"{'; '.join(parts)} "
-                    f"(thresholds bl={threshold:.0f} stab={ZONE_STABILITY_THRESHOLD})"
+                    f"(presence ≥{ZONE_PRESENCE_FRACTION:.2f}, "
+                    f"stab ≤{ZONE_STABILITY_THRESHOLD})"
                 )
             s._zone_diag_time = now
 
