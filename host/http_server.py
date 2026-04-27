@@ -1197,6 +1197,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s._missing_speech_count = {}
                     s._empty_scan_count = {}
                     s._dealer_zone_done = False
+                    s._dealer_zone_trigger_fired = False
                     s._missing_prompt_fired = False
                     s._zone_prev_pending = {}
                     s.table_state_version += 1
@@ -1342,6 +1343,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             s._missing_speech_count = {}
             s._empty_scan_count = {}
             s._dealer_zone_done = False
+            s._dealer_zone_trigger_fired = False
             s._missing_prompt_fired = False
             s._zone_prev_pending = {}
             # Once the up-card round is confirmed, check Rodney's down slots
@@ -1462,6 +1464,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s._empty_scan_count = {}
                 s._missing_speech_count = {}
                 s._dealer_zone_done = False
+                s._dealer_zone_trigger_fired = False
                 s._missing_prompt_fired = False
                 s._zone_prev_pending = {}
                 if beyond_last_up:

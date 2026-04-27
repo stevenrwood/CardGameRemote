@@ -235,21 +235,63 @@ def _zone_presence_metric(crop, baseline):
     return high / total, float(absdiff.mean())
 
 
+def _auto_scan_all_zones(s, frame, watched):
+    """Internal helper: fire the same batch scan that
+    /api/console/force_scan does. Called when the dealer's zone
+    auto-trigger fires."""
+    monitor = s.monitor
+    s._dealer_zone_trigger_fired = True
+    log.log(
+        f"[CONSOLE] {s.game_engine.get_dealer().name}'s zone stable "
+        f"— auto-scanning all zones"
+    )
+    zone_crops = {}
+    for z in s.cal.zones:
+        nm = z["name"]
+        if nm not in watched:
+            continue
+        if monitor.zone_state.get(nm) == "corrected":
+            continue
+        c = monitor._crop(frame, z)
+        if c is None or c.size == 0:
+            continue
+        zone_crops[nm] = c.copy()
+        monitor.pending[nm] = True
+    if not zone_crops:
+        return
+    s.console_scan_phase = "scanned"
+    monitor.open_speech_gate()
+    s._dealer_zone_done = True
+    Thread(
+        target=monitor._recognize_batch,
+        args=(zone_crops,),
+        daemon=True,
+    ).start()
+
+
 def _console_watch_dealer(s, frame):
-    """Manual-scan watcher.
+    """Watch the dealer's zone for an auto-scan trigger AND keep
+    state for the missing-card prompt.
 
-    Brio no longer auto-queues zones for recognition based on
-    motion or stability — the dealer must hit Scan (button or
-    voice "Scan cards") to fire a force_scan that hits every
-    active zone in one batch. This function still runs each frame
-    so it can fire the missing-card prompt AFTER a manual scan
-    completes (when zones are still empty), and to drain the
-    speech-gate the moment the dealer's zone is recognized.
+    Two scan paths now coexist:
+      1. Manual — dealer hits the Scan button or says "Scan cards",
+         which posts /api/console/force_scan. Always available.
+      2. Auto — when the dealer's own zone shows ZONE_STABLE_FRAMES
+         consecutive stable, non-empty frames, fire the same batch
+         scan. The dealer-zone gate keeps arm sweeps over PLAYER
+         zones from triggering anything (the original problem with
+         per-zone streaming) — in stud / FTQ / one-up 7/27 the
+         dealer fills their own zone last, so dealer-zone-stable is
+         a clean "deal complete" signal.
 
-    Background: we tried per-zone stability streaming, but the
-    dealer's arm sweeps during the down-card deal phase reliably
-    triggered false stability and Claude/YOLO assigned random card
-    values to empty zones. Going manual-only is the user's call.
+    Auto-trigger is suppressed for stand-allowed rounds (7/27 hit)
+    where the dealer never places a card, and for remote-dealer
+    hands where the dealer has no Brio zone — both rely on manual
+    Scan.
+
+    Either path gets the same downstream behavior: speech gate
+    opens, recognition runs, and the missing-card prompt fires
+    once if any zones came back empty.
     """
     phase = s.console_scan_phase
     if phase in ("idle", "confirmed"):
@@ -268,6 +310,46 @@ def _console_watch_dealer(s, frame):
         return
 
     monitor = s.monitor
+
+    # Auto-trigger: dealer's zone has been stable for the threshold
+    # frame count → batch-scan everything. One-shot per round (the
+    # _dealer_zone_trigger_fired flag), and only while no scan is
+    # already running (phase=="watching" — flips to "scanned" the
+    # moment we dispatch).
+    if (phase == "watching"
+            and not stand_allowed
+            and dealer_name in brio_names
+            and not s._dealer_zone_trigger_fired):
+        zone = next(
+            (z for z in s.cal.zones if z["name"] == dealer_name), None
+        )
+        if zone is not None:
+            baseline = monitor.baselines.get(dealer_name)
+            crop = monitor._crop(frame, zone)
+            if (baseline is not None
+                    and crop is not None
+                    and crop.size > 0
+                    and crop.shape == baseline.shape):
+                fr, _db = _zone_presence_metric(crop, baseline)
+                if fr < ZONE_PRESENCE_FRACTION:
+                    monitor.stable_count[dealer_name] = 0
+                    monitor.prev_crop[dealer_name] = None
+                else:
+                    prev = monitor.prev_crop.get(dealer_name)
+                    monitor.prev_crop[dealer_name] = crop.copy()
+                    if prev is None or prev.shape != crop.shape:
+                        monitor.stable_count[dealer_name] = 1
+                    else:
+                        diff_prev = float(np.mean(cv2.absdiff(crop, prev)))
+                        if diff_prev > ZONE_STABILITY_THRESHOLD:
+                            monitor.stable_count[dealer_name] = 1
+                        else:
+                            monitor.stable_count[dealer_name] = (
+                                monitor.stable_count.get(dealer_name, 0) + 1
+                            )
+                            if (monitor.stable_count[dealer_name]
+                                    >= ZONE_STABLE_FRAMES):
+                                _auto_scan_all_zones(s, frame, watched)
 
     # Speech gate. Stand-allowed rounds and remote-dealer hands
     # don't gate — announce per-zone immediately. Otherwise wait
@@ -1107,9 +1189,11 @@ class AppState:
         self.console_total_up_rounds = 0  # total up-card rounds in this game
         self.console_scan_phase = "idle"  # "idle" | "watching" | "scanned" | "confirmed"
         self.console_settle_time = 0.0
-        # Per-round flags driven by the per-zone streaming watcher.
-        # Reset on confirm / next-round so the gate closes again.
+        # Per-round flags driven by the watcher. Reset on confirm /
+        # next-round so the gate closes again and the auto-scan
+        # trigger can re-fire next round.
         self._dealer_zone_done = False
+        self._dealer_zone_trigger_fired = False
         self._missing_prompt_fired = False
         self._missing_speech_count = {}
         self._empty_scan_count = {}
