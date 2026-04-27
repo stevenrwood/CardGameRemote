@@ -413,12 +413,16 @@ def _has_game_command(commands):
     return any(isinstance(c, GameCommand) for c in commands)
 
 
-# Regex for "The game is …" with nothing after — e.g. "The game is.",
-# "the game is...", "Game is". Used to detect the case where Whisper
-# cut the phrase right after "is" and the dealer's actual game name
-# is in the next chunk.
+# Regex for "(the) (name of the) game is …" with nothing after — e.g.
+# "The game is.", "Name of the game is.", "Game is". Used to detect
+# the case where Whisper cut the phrase right after "is" and the
+# dealer's actual game name is in the next chunk. The "name of the
+# game" form catches the longer preamble dealers use at the table
+# ("Name of the game is Follow the Queen") which Whisper sometimes
+# truncates after the prefix.
 _BARE_GAME_PREFIX_RE = re.compile(
-    r"^(?:the\s+)?game\s+is\b[\s.…,!?]*$",
+    r"^(?:(?:the\s+)?name\s+of\s+the\s+)?(?:the\s+)?game\s+is\b"
+    r"[\s.…,!?]*$",
     re.IGNORECASE,
 )
 
@@ -851,13 +855,21 @@ class SpeechListener:
         # dealer will say — keeps it from inventing tokens for
         # less-common names ("Hodgecargo" for "High Chicago").
         if self._game_names:
-            game_lines = " ".join(
-                f"The game is {name}." for name in self._game_names
-            )
+            # Two phrasings per game so Whisper has heard both the
+            # short form ("The game is X") and the long preamble
+            # ("Name of the game is X") that dealers actually use at
+            # the table. Cuts down on the long-utterance hallucination
+            # ("Province value value...") we were seeing.
+            parts = []
+            for name in self._game_names:
+                parts.append(f"The game is {name}.")
+                parts.append(f"Name of the game is {name}.")
+            game_lines = " ".join(parts)
         else:
             game_lines = (
-                "The game is Follow the Queen. The game is 5 Card Draw. "
-                "The game is 7 Card Stud. The game is 3 Toed Pete."
+                "The game is Follow the Queen. "
+                "Name of the game is Follow the Queen. "
+                "The game is 5 Card Draw. The game is 7 Card Stud."
             )
         whisper_prompt = (
             "Steve, Bill, David, Joe, Rodney. "
