@@ -197,6 +197,14 @@ class PotIsRightCommand:
     raw_text: str
 
 @dataclass
+class ScanCardsCommand:
+    """'Scan cards' / 'Scan' — voice equivalent of the Scan button
+    that triggers a manual force_scan of every active Brio zone.
+    Brio no longer auto-scans; this is the dealer's primary trigger
+    after laying down up cards."""
+    raw_text: str
+
+@dataclass
 class FoldCommand:
     """'{player}, folds' — mark a player as folded during betting."""
     player: str
@@ -459,6 +467,22 @@ def parse_speech(text):
         text_lower,
     ):
         return [PotIsRightCommand(raw_text=text)]
+
+    # "Scan cards" / "Scan" / "Scan zones" / "Scam cards" (mishear).
+    # Manual trigger for force_scan now that Brio no longer auto-
+    # scans on stability. Two acceptable forms:
+    #   1. "scan" / "scan." at end-of-utterance, AND
+    #   2. "scan" + (optional "the") + one of the explicit
+    #      keywords (cards / zones / all / now / table).
+    # Avoids matching "scan the room" / "scan in" / "scanning"
+    # while still tolerating trailing filler ("scan cards please").
+    if re.search(
+        r"\b(?:scan|scam)\b"
+        r"(?:[\s.,!?]*$"
+        r"|\s+(?:the\s+)?(?:cards?|zones?|all|now|table)\b)",
+        text_lower,
+    ):
+        return [ScanCardsCommand(raw_text=text)]
 
     # --- Challenge-game votes -----------------------------------------
 
@@ -890,7 +914,7 @@ class SpeechListener:
             f"{game_lines} "
             "Same game again. Let's run that back. "
             "Correction: David, 4 of clubs. "
-            "Confirmed. Pot is right. "
+            "Confirmed. Pot is right. Scan cards. "
             "Bill folds. Steve folds."
         )
         _log("Loading Whisper model (first run downloads ~500MB)...")

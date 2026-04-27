@@ -236,19 +236,20 @@ def _zone_presence_metric(crop, baseline):
 
 
 def _console_watch_dealer(s, frame):
-    """Per-zone streaming recognition.
+    """Manual-scan watcher.
 
-    Each watched Brio zone runs its own stability state machine:
-    when the crop has been non-empty (vs. baseline) AND unchanged
-    from the previous frame for ZONE_STABLE_FRAMES in a row, the
-    zone is queued for recognition. Recognitions complete async
-    and per-card speech is held in a gate until the dealer's zone
-    has been recognized (deal-required rounds) — at which point
-    held announcements drain and any still-empty zones get a
-    one-time "please adjust" prompt.
+    Brio no longer auto-queues zones for recognition based on
+    motion or stability — the dealer must hit Scan (button or
+    voice "Scan cards") to fire a force_scan that hits every
+    active zone in one batch. This function still runs each frame
+    so it can fire the missing-card prompt AFTER a manual scan
+    completes (when zones are still empty), and to drain the
+    speech-gate the moment the dealer's zone is recognized.
 
-    Stand-allowed rounds (e.g. 7/27 hit) and remote-dealer hands
-    skip the gate and announce per zone as recognitions complete.
+    Background: we tried per-zone stability streaming, but the
+    dealer's arm sweeps during the down-card deal phase reliably
+    triggered false stability and Claude/YOLO assigned random card
+    values to empty zones. Going manual-only is the user's call.
     """
     phase = s.console_scan_phase
     if phase in ("idle", "confirmed"):
@@ -267,152 +268,6 @@ def _console_watch_dealer(s, frame):
         return
 
     monitor = s.monitor
-    threshold = monitor.threshold
-    diag = {}  # name -> (diff_baseline, diff_prev, stable_count) for log
-
-    # Per-zone stability check + queue.
-    pending_recognition = {}
-    for z in s.cal.zones:
-        name = z["name"]
-        if name not in watched:
-            continue
-        zstate = monitor.zone_state.get(name)
-        if zstate in ("recognized", "corrected"):
-            # Locked for this round — don't re-scan.
-            continue
-        if monitor.pending.get(name):
-            # Recognition already in flight for this zone.
-            continue
-        if s._empty_scan_count.get(name, 0) >= ZONE_MAX_EMPTY_SCANS:
-            # Capped after enough failed scans this round; dealer
-            # must adjust the card or use the Scan / Correct UI.
-            continue
-        baseline = monitor.baselines.get(name)
-        if baseline is None:
-            continue
-        crop = monitor._crop(frame, z)
-        if crop is None or crop.size == 0:
-            continue
-        if crop.shape != baseline.shape:
-            continue
-
-        fraction_high, diff_baseline = _zone_presence_metric(crop, baseline)
-        if fraction_high < ZONE_PRESENCE_FRACTION:
-            # Empty — reset stability state. fraction-of-high-contrast
-            # pixels rejects the "small mean diff over uniformly
-            # drifted felt" case the old mean check fell for.
-            # Also reset the empty-scan retry cap when the zone
-            # returns to baseline. Without this, transient noise
-            # (dealer's arm passing over a zone during the GUIDED
-            # down-card phase) could burn through MAX_EMPTY_SCANS
-            # before the real up card lands, locking the zone out.
-            monitor.stable_count[name] = 0
-            monitor.prev_crop[name] = None
-            if s._empty_scan_count.get(name, 0):
-                s._empty_scan_count[name] = 0
-            diag[name] = (diff_baseline, fraction_high, None, 0)
-            continue
-
-        prev = monitor.prev_crop.get(name)
-        monitor.prev_crop[name] = crop.copy()
-        if prev is None or prev.shape != crop.shape:
-            monitor.stable_count[name] = 1
-            diag[name] = (diff_baseline, fraction_high, None, 1)
-            continue
-
-        diff_prev = float(np.mean(cv2.absdiff(crop, prev)))
-        if diff_prev > ZONE_STABILITY_THRESHOLD:
-            # Crop changed — restart the stability count from this
-            # frame (we still saw content, just not the same content).
-            monitor.stable_count[name] = 1
-            diag[name] = (diff_baseline, fraction_high, diff_prev, 1)
-            continue
-
-        monitor.stable_count[name] = monitor.stable_count.get(name, 0) + 1
-        diag[name] = (
-            diff_baseline, fraction_high, diff_prev,
-            monitor.stable_count[name],
-        )
-        if monitor.stable_count[name] >= ZONE_STABLE_FRAMES:
-            pending_recognition[name] = crop.copy()
-            monitor.pending[name] = True
-            log.log(
-                f"[CONSOLE] {name}'s zone stable — queuing for recognition"
-            )
-
-    # Periodic diagnostic dump while we're waiting on missing zones
-    # after the prompt. Lets us see whether diff_baseline never
-    # crosses the threshold (zone really empty) vs. diff_prev
-    # keeps spiking past ZONE_STABILITY_THRESHOLD (camera jitter
-    # blocking stability).
-    if (s._dealer_zone_done and s._missing_prompt_fired):
-        now = time.time()
-        if now - getattr(s, "_zone_diag_time", 0.0) >= ZONE_DIAG_INTERVAL_S:
-            missing_now = [
-                nm for nm in watched
-                if monitor.zone_state.get(nm) not in ("recognized", "corrected")
-            ]
-            if missing_now:
-                parts = []
-                for nm in missing_now:
-                    entry = diag.get(nm, (None, None, None, None))
-                    db, fr, dp, sc = entry
-                    db_s = "—" if db is None else f"{db:.1f}"
-                    fr_s = "—" if fr is None else f"{fr:.3f}"
-                    dp_s = "—" if dp is None else f"{dp:.1f}"
-                    parts.append(
-                        f"{nm} db={db_s} fr={fr_s} dp={dp_s} sc={sc}"
-                    )
-                log.log(
-                    f"[CONSOLE] still waiting on missing zones: "
-                    f"{'; '.join(parts)} "
-                    f"(presence ≥{ZONE_PRESENCE_FRACTION:.2f}, "
-                    f"stab ≤{ZONE_STABILITY_THRESHOLD})"
-                )
-            s._zone_diag_time = now
-
-    if pending_recognition:
-        # Zones that came back empty earlier this round can't trust
-        # YOLO for their next pass — Claude validates before commit.
-        force_claude = {
-            n for n in pending_recognition
-            if s._empty_scan_count.get(n, 0) > 0
-        }
-        s.console_scan_phase = "scanned"
-        Thread(
-            target=monitor._recognize_batch,
-            args=(pending_recognition, force_claude),
-            daemon=True,
-        ).start()
-
-    # Detect failed recognitions: a zone whose recognition just
-    # completed (pending flipped True → False) and committed nothing
-    # bumps the per-round empty counter so the cap kicks in.
-    if not hasattr(s, "_zone_prev_pending"):
-        s._zone_prev_pending = {}
-    for name in watched:
-        was = s._zone_prev_pending.get(name, False)
-        is_now = bool(monitor.pending.get(name))
-        s._zone_prev_pending[name] = is_now
-        if was and not is_now:
-            zstate = monitor.zone_state.get(name)
-            card = monitor.last_card.get(name, "")
-            if zstate not in ("recognized", "corrected") or not card:
-                s._empty_scan_count[name] = (
-                    s._empty_scan_count.get(name, 0) + 1
-                )
-                log.log(
-                    f"[CONSOLE] {name} scan returned empty "
-                    f"(count {s._empty_scan_count[name]})"
-                )
-                # Reset the per-zone stability tracker so the next
-                # placement (or an adjustment by the dealer) starts
-                # a fresh 3-frame stability cycle. Stale prev_crop
-                # from before the scan would otherwise keep
-                # diff_prev high every frame and the count never
-                # gets back up to ZONE_STABLE_FRAMES.
-                monitor.stable_count[name] = 0
-                monitor.prev_crop[name] = None
 
     # Speech gate. Stand-allowed rounds and remote-dealer hands
     # don't gate — announce per-zone immediately. Otherwise wait
@@ -4108,7 +3963,8 @@ def _process_voice_command(cmd):
         return
     from speech_recognition_module import (
         GameCommand, RepeatGameCommand, CardCallCommand, InferredCardCommand,
-        CorrectionCommand, ConfirmCommand, PotIsRightCommand, FoldCommand,
+        CorrectionCommand, ConfirmCommand, PotIsRightCommand,
+        ScanCardsCommand, FoldCommand,
         PassCommand, GoOutCommand, ChallengeWinnerCommand,
         UnrecognizedCommand,
     )
@@ -4248,6 +4104,18 @@ def _process_voice_command(cmd):
             return
         log.log("[VOICE] Pot is right → /api/console/next_round")
         _voice_post("/api/console/next_round")
+        return
+
+    if isinstance(cmd, ScanCardsCommand):
+        # Manual scan trigger. Allow during any phase that has a
+        # game running and zones to scan — the dealer might want
+        # to re-scan during up_round (initial scan) or pre_confirm
+        # (re-scan after a missing-card prompt).
+        if phase not in ("up_round", "pre_confirm"):
+            log.log(f"[VOICE] Ignoring 'Scan cards' in phase {phase}")
+            return
+        log.log("[VOICE] Scan cards → /api/console/force_scan")
+        _voice_post("/api/console/force_scan")
         return
 
     if isinstance(cmd, FoldCommand):
