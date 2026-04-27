@@ -318,6 +318,21 @@ class SevenTwentySevenGame(BaseGame):
         # no reason to keep dealing hit rounds between them.
         return 3
 
+    def hand_should_end(self, state) -> bool:
+        # End when too few players remain (default check) OR when every
+        # remaining non-folded player is frozen — at that point no one
+        # can take another hit, so the next round would just sit on an
+        # empty table waiting for a "Scan cards" that will never come.
+        if super().hand_should_end(state):
+            return True
+        remaining = [
+            n for n in state.console_active_players
+            if n not in state.folded_players
+        ]
+        if not remaining:
+            return True
+        return all(self.freezes.get(n, 0) >= 3 for n in remaining)
+
     # --- table decorations ---
 
     def decorate_table_players(self, entries, state) -> None:

@@ -1371,6 +1371,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/next_round":
             ge = s.game_engine
+            # Per-game "should this hand end now?" hook. For 7/27 this
+            # catches the "all remaining players are frozen" case
+            # without waiting for a phantom hit round; for everyone
+            # else it's the same min_players_to_continue check that
+            # _maybe_announce_hand_over already runs after Confirm.
+            impl = getattr(s, "current_game_impl", None)
+            if impl is not None and impl.hand_should_end(s):
+                s.console_state = "hand_over"
+                s.console_scan_phase = "idle"
+                log.log("[CONSOLE] hand_should_end → hand_over")
+                with s.table_lock:
+                    s.table_state_version += 1
+                return self._r(200, "application/json", json.dumps({
+                    "ok": True, "state": "hand_over",
+                }))
             # All-down games (5 Card Draw, 3 Toed Pete) track betting rounds
             # independently from console_up_round because they have no up
             # rounds. 5CD flow:

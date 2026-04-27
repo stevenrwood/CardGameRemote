@@ -119,6 +119,23 @@ class BaseGame:
         """
         return 2
 
+    def hand_should_end(self, state) -> bool:
+        """Return True if no further dealing rounds are possible and
+        the next /api/console/next_round should resolve to hand_over
+        instead of starting another round.
+
+        Default: too few non-folded players to keep dealing. 7/27
+        overrides this to also catch the "every remaining player is
+        frozen" case — once nobody can hit, the round of comparison
+        is the whole hand and another up-card round would just sit
+        there waiting on cards that never come.
+        """
+        remaining = [
+            n for n in state.console_active_players
+            if n not in state.folded_players
+        ]
+        return len(remaining) < self.min_players_to_continue(state)
+
     def _maybe_announce_hand_over(self, state) -> None:
         """Speak + log a hand-over notice once the active count drops
         below ``min_players_to_continue``. Doesn't change console_state

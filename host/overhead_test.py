@@ -411,8 +411,12 @@ def _console_watch_dealer(s, frame):
     #   - every queued recognition has resolved (no zone pending).
     # Waiting on pending zones is what stops "Missing cards: Rodney"
     # from speaking 400ms before Rodney's own recognition lands.
+    # Skipped entirely on stand-allowed rounds (7/27 hits) — empty
+    # zones are expected when a player chooses to stand, so we wait
+    # for the dealer's explicit "Scan cards" / Force Scan instead.
     if (s._dealer_zone_done
             and not s._missing_prompt_fired
+            and not stand_allowed
             and not any(monitor.pending.get(nm) for nm in watched)):
         s._missing_prompt_fired = True
         missing = []
