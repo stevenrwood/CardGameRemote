@@ -70,13 +70,6 @@ class ZoneMonitor:
         # without waiting for any other zone.
         self.stable_count = {}
         self.prev_crop = {}
-        # Speech gate: while closed, _announce_card pushes the
-        # rendered phrase onto _held_speech instead of speaking.
-        # The host opens the gate once the dealer's zone has been
-        # recognized (deal-required rounds), or immediately
-        # (stand-allowed rounds and remote-dealer hands).
-        self._speech_open = True
-        self._held_speech = []
         self.zone_state = {}
         self.pending = {}
         self.recognition_details = {}  # name -> {yolo, yolo_conf, claude, final}
@@ -122,38 +115,25 @@ class ZoneMonitor:
                 self.pending[z["name"]] = False
                 self.stable_count[z["name"]] = 0
                 self.prev_crop[z["name"]] = None
-        # Each round starts with the speech gate closed; the host
-        # opens it once the dealer's zone has finished recognizing.
-        self._held_speech = []
-        self._speech_open = False
         log.log("Baselines captured")
 
+    # No-op shims kept so callers that opt to "force-open" the gate
+    # (force_scan / rescan_all / dealer-zone-done) don't have to be
+    # edited in lockstep. Speech now fires immediately per-zone.
     def open_speech_gate(self):
-        """Speak (and clear) any announcements that have been held
-        since the gate was last closed, then leave the gate open so
-        new recognitions speak immediately."""
-        self._speech_open = True
-        held = self._held_speech
-        self._held_speech = []
-        for text in held:
-            speech.say(text)
+        return
 
     def close_speech_gate(self):
-        self._speech_open = False
+        return
 
     def _announce_card(self, name, result):
-        """Speak the recognized card unless we already announced this
-        same value for this zone. Suppresses the duplicate burst when
-        force_scan re-runs over already-recognized zones. Honors the
-        speech gate — held announcements drain when the host opens it."""
+        """Speak the recognized card immediately unless we already
+        announced this same value for this zone (which would happen
+        if force_scan re-runs over already-recognized zones)."""
         if self.last_announced.get(name) == result:
             return
         self.last_announced[name] = result
-        text = self._speech_formatter(name, result)
-        if self._speech_open:
-            speech.say(text)
-        else:
-            self._held_speech.append(text)
+        speech.say(self._speech_formatter(name, result))
 
     def check_zones(self, frame):
         """Check all zones. YOLO runs for each changed zone, then one batched

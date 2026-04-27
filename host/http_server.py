@@ -1643,18 +1643,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "final": new_card,
                         "corrected": True,
                     }
-                    # If the corrected card already landed in console_hand_cards
-                    # (post-Confirm correction), update that entry in place so
-                    # dedup / wild recompute / hand value / best hand all see
-                    # the new value. Match on BOTH player AND the old card
-                    # value — otherwise a mid-round correction (the common
-                    # case) would overwrite a previous rounds entry because
-                    # the current round hasnt been appended yet.
-                    for entry in reversed(s.console_hand_cards):
-                        if (entry.get("player") == player
-                                and entry.get("card") == old_card):
-                            entry["card"] = new_card
-                            break
+                    # Update console_hand_cards ONLY when the correction
+                    # is post-Confirm — otherwise a mid-round correction
+                    # whose old_card matches a prior round's legitimate
+                    # entry (e.g. Steve gets Jack of Clubs in round 2,
+                    # then YOLO mis-reads his round-4 Queen as another
+                    # Jack of Clubs) would clobber that prior round's
+                    # value. While the round is still mid-scan
+                    # (scan_phase == "scanned"), the corrected card lives
+                    # in monitor.last_card and gets appended on Confirm;
+                    # console_hand_cards is for already-committed rounds.
+                    if s.console_scan_phase in ("confirmed", "idle"):
+                        for entry in reversed(s.console_hand_cards):
+                            if (entry.get("player") == player
+                                    and entry.get("card") == old_card):
+                                entry["card"] = new_card
+                                break
                     # Save corrected crop to training_data for future YOLO
                     # training. Delete the prior (wrong-label) save for this
                     # zone so the bad label doesnt poison the dataset.
