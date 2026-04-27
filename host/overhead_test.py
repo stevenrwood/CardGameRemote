@@ -282,12 +282,14 @@ def _console_watch_dealer(s, frame):
          zones from triggering anything (the original problem with
          per-zone streaming) — in stud / FTQ / one-up 7/27 the
          dealer fills their own zone last, so dealer-zone-stable is
-         a clean "deal complete" signal.
+         a clean "deal complete" signal. (Even when Rodney is the
+         engine-side dealer, the physical dealer at the table fills
+         Rodney's Brio zone last in the rotation — same trigger.)
 
     Auto-trigger is suppressed for stand-allowed rounds (7/27 hit)
-    where the dealer never places a card, and for remote-dealer
-    hands where the dealer has no Brio zone — both rely on manual
-    Scan.
+    where the dealer never places a card — those rely on manual
+    Scan. Otherwise it runs whenever the dealer's name is among
+    the active Brio zones (which covers every game variant).
 
     Either path gets the same downstream behavior: speech gate
     opens, recognition runs, and the missing-card prompt fires
