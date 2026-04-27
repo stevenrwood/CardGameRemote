@@ -2085,20 +2085,34 @@ def _pi_poll_stop(s):
 
 
 def _stuck_slots_at_new_hand(s) -> list[int]:
-    """Fetch /slots once and return the slot numbers that have a
-    recognized card. Empty list when slots are clear (or the Pi is
-    unreachable — we don't want to false-buzz on transient Pi
-    timeouts)."""
+    """Fetch /slots once and return slot numbers that look like they
+    actually hold a card. Returns [] when the Pi is unreachable so
+    we don't false-buzz on transient timeouts.
+
+    Uses ``pi_confidence_threshold`` (the same auto-accept bar the
+    main poll loop uses to commit cards into ``rodney_downs``)
+    rather than just ``recognized=True``. The Pi will happily flag
+    an empty slot as recognized with 5 % confidence on shadows /
+    fingerprints / dust; alerting on those was the false-positive
+    that buzzed the table 10× at the start of an empty FTQ deal."""
     doc = _pi_fetch_slots(s)
     if doc is None:
         return []
     occupied = []
+    threshold = getattr(s, "pi_confidence_threshold", 0.70)
     for entry in doc.get("slots", []):
         slot_num = entry.get("slot")
         if slot_num is None:
             continue
-        if entry.get("recognized") and entry.get("rank") and entry.get("suit"):
-            occupied.append(slot_num)
+        if not (entry.get("recognized") and entry.get("rank") and entry.get("suit")):
+            continue
+        try:
+            conf = float(entry.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            conf = 0.0
+        if conf < threshold:
+            continue
+        occupied.append(slot_num)
     return sorted(occupied)
 
 
