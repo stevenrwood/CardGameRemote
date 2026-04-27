@@ -37,6 +37,34 @@ CONFIG_FILE = HOST_DIR.parent / "local" / "config.json"
 
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
 
+# Mirror of ZONE_PRESENCE_PIXEL_DIFF / ZONE_PRESENCE_FRACTION in
+# overhead_test.py. Inlined here to avoid a circular import. Used as
+# an "is the zone non-empty?" guard against YOLO hallucinating a card
+# on an essentially-empty crop (the Round 10 Jack-of-Spades
+# regression).
+_PRESENCE_PIXEL_DIFF = 40
+_PRESENCE_FRACTION = 0.04
+
+
+def _crop_presence(crop, baseline):
+    """Fraction of pixels in ``crop`` whose max-channel diff vs
+    ``baseline`` exceeds ``_PRESENCE_PIXEL_DIFF``. Mirrors
+    overhead_test._zone_presence_metric. Returns 1.0 (i.e. "treat as
+    present") if shapes don't match — the caller should fall back to
+    its normal flow rather than misclassify a real card as empty."""
+    if crop is None or baseline is None or crop.shape != baseline.shape:
+        return 1.0
+    absdiff = cv2.absdiff(crop, baseline)
+    if absdiff.ndim == 3:
+        per_pixel = absdiff.max(axis=2)
+    else:
+        per_pixel = absdiff
+    total = per_pixel.size
+    if total == 0:
+        return 0.0
+    high = int((per_pixel > _PRESENCE_PIXEL_DIFF).sum())
+    return high / total
+
 
 class ZoneMonitor:
     def __init__(self, threshold, get_zones, stats_cb=None,
@@ -195,8 +223,20 @@ class ZoneMonitor:
                     details["yolo"] = result
                     details["yolo_conf"] = round(conf * 100)
 
+                    # Presence sanity check: if the crop barely differs
+                    # from the captured baseline, the zone is empty and
+                    # any YOLO hit is a hallucination. Demote to Claude
+                    # so we don't auto-commit a phantom card. Seen in
+                    # 7/27 round 10 — YOLO's Jack-of-Spades hallucination
+                    # walked from 30% to 53% over three rounds and
+                    # finally cleared the auto-accept threshold on a
+                    # zone that had been empty all along.
+                    presence = _crop_presence(crop, self.baselines.get(name))
+                    presence_low = presence < _PRESENCE_FRACTION
+
                     if (result != "No card" and conf >= self.yolo_min_conf
-                            and name not in force_claude):
+                            and name not in force_claude
+                            and not presence_low):
                         # YOLO confident — accept it
                         total_ms = (time.time() - t0) * 1000
                         self.last_card[name] = result
@@ -208,6 +248,14 @@ class ZoneMonitor:
                         self._save(name, crop, result)
                         self._announce_card(name, result)
                     else:
+                        if (presence_low and result != "No card"
+                                and conf >= self.yolo_min_conf):
+                            log.log(
+                                f"[{name}] YOLO {result} ({conf:.0%}) "
+                                f"presence={presence:.1%} < "
+                                f"{_PRESENCE_FRACTION:.0%} — "
+                                f"forcing Claude verification"
+                            )
                         # Need Claude
                         need_claude[name] = (crop, details)
                         self.zone_state[name] = "processing"
