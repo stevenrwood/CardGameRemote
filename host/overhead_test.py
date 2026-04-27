@@ -235,6 +235,41 @@ def _zone_presence_metric(crop, baseline):
     return high / total, float(absdiff.mean())
 
 
+def _all_active_zones_present(s, frame, watched, dealer_name):
+    """Return True iff every watched zone (excluding the dealer's
+    own) is either already recognized / corrected OR has non-empty
+    content (fraction-of-high-contrast pixels above the presence
+    threshold).
+
+    Used as a second gate on the dealer-zone auto-scan trigger:
+    the dealer-zone-stable signal alone isn't enough in games
+    where the dealer doesn't reliably fill last (e.g. 7/27 where
+    the dealer may flip their own card before dealing to others).
+    Waiting for every other zone to actually contain a card stops
+    the auto-scan from running over mostly-empty zones and asking
+    Claude to identify nothing.
+    """
+    monitor = s.monitor
+    for nm in watched:
+        if nm == dealer_name:
+            continue
+        if monitor.zone_state.get(nm) in ("recognized", "corrected"):
+            continue
+        z = next((zz for zz in s.cal.zones if zz["name"] == nm), None)
+        if z is None:
+            continue
+        baseline = monitor.baselines.get(nm)
+        if baseline is None:
+            continue
+        crop = monitor._crop(frame, z)
+        if crop is None or crop.size == 0 or crop.shape != baseline.shape:
+            continue
+        fr, _db = _zone_presence_metric(crop, baseline)
+        if fr < ZONE_PRESENCE_FRACTION:
+            return False
+    return True
+
+
 def _auto_scan_all_zones(s, frame, watched):
     """Internal helper: fire the same batch scan that
     /api/console/force_scan does. Called when the dealer's zone
@@ -351,7 +386,9 @@ def _console_watch_dealer(s, frame):
                             )
                             if (monitor.stable_count[dealer_name]
                                     >= ZONE_STABLE_FRAMES):
-                                _auto_scan_all_zones(s, frame, watched)
+                                if _all_active_zones_present(
+                                        s, frame, watched, dealer_name):
+                                    _auto_scan_all_zones(s, frame, watched)
 
     # Speech gate. Stand-allowed rounds and remote-dealer hands
     # don't gate — announce per-zone immediately. Otherwise wait
