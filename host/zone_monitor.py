@@ -252,19 +252,39 @@ class ZoneMonitor:
         names = list(need_claude.keys())
         log.log(f"[CLAUDE] Batch call for {len(names)} zones: {', '.join(names)}")
 
-        # Build multi-image message
+        # Build multi-image message. Surface YOLO's low-confidence
+        # guess (rank+suit and the % score) per image — Claude can
+        # use it as a strong prior when YOLO is "almost there" and
+        # ignore it when YOLO is clearly off. Without this hint
+        # Claude was independently mis-identifying cards on first-
+        # round scans where YOLO had the right answer at 25-35%
+        # confidence but couldn't clear the auto-accept bar.
         content = []
         for name in names:
             crop, details = need_claude[name]
+            yolo_guess = details.get("yolo") or ""
+            yolo_conf = details.get("yolo_conf") or 0
+            label = f"Image {name}"
+            if yolo_guess and yolo_guess != "No card":
+                label += (
+                    f" (YOLO's low-confidence guess: {yolo_guess} "
+                    f"at {yolo_conf}% — verify or correct)"
+                )
+            elif yolo_guess == "No card":
+                label += " (YOLO saw no card — confirm or identify)"
+            label += ":"
             b64 = base64.b64encode(
                 cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes()
             ).decode()
-            content.append({"type": "text", "text": f"Image {name}:"})
+            content.append({"type": "text", "text": label})
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
         content.append({"type": "text", "text":
             "For each labeled image above, identify the playing card. "
             "Reply with one line per image: 'Name: Rank of Suit' (e.g. 'Steve: 4 of Clubs'). "
-            "If unclear or no card visible, reply 'Name: No card'."})
+            "If unclear or no card visible, reply 'Name: No card'. "
+            "Trust YOLO's guess only if it actually matches what you see "
+            "in the image — overrule it freely when the image clearly "
+            "shows a different card."})
 
         # Retry with exponential backoff on 529 overloaded / 500 errors
         t0 = time.time()
