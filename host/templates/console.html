@@ -61,6 +61,19 @@ h2{font-size:.85em;color:#888;text-transform:uppercase;letter-spacing:1px;margin
 .picker-row label{width:50px;font-size:.9em;color:#888}
 .picker-row select{flex:1}
 .hint{font-size:.75em;color:#666;margin-top:3px}
+/* Click feedback: every button briefly flashes brighter and
+   shrinks slightly so the dealer sees the press registered, even
+   if the resulting API call hasn't returned yet. Event delegation
+   in script.js below tags any clicked, non-disabled button. */
+@keyframes btn-flash {
+  0%   { transform:scale(.93); filter:brightness(1.7);
+         box-shadow:0 0 12px rgba(255,213,79,.85); }
+  60%  { transform:scale(1.0);  filter:brightness(1.2);
+         box-shadow:0 0 6px rgba(255,213,79,.4); }
+  100% { transform:scale(1.0);  filter:brightness(1.0);
+         box-shadow:none; }
+}
+button.flash{animation:btn-flash .35s ease-out}
 </style></head><body>
 
 <h1>Poker Console</h1>
@@ -734,6 +747,22 @@ document.addEventListener('keydown', function(ev) {
   ev.preventDefault();
   scanNow();
 });
+
+// Press-feedback flash on every button click. Delegated so it
+// covers buttons that get rendered later (Pass / Out per-player,
+// correction modal entries, etc.). Re-applies the class even on a
+// re-click while the previous animation is mid-flight by toggling
+// off → on across an animation-frame.
+document.addEventListener('click',function(ev){
+  var b=ev.target;
+  if(!b||b.tagName!=='BUTTON'||b.disabled) return;
+  b.classList.remove('flash');
+  // Force reflow so the animation restarts when the same button
+  // gets hit twice quickly.
+  void b.offsetWidth;
+  b.classList.add('flash');
+  setTimeout(function(){b.classList.remove('flash');},400);
+},true);
 
 setInterval(refresh,2000);
 refresh();
