@@ -112,7 +112,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         routes = {
             "/": self._page, "/app": self._page,
             "/calibrate": self._calibrate_page,
-            "/snapshot": lambda s: self._jpeg(s.latest_frame),
+            "/snapshot": lambda s: self._jpeg(s.capture.capture() if s.capture else s.latest_frame),
             "/snapshot/cropped": lambda s: self._r(200,"image/jpeg",s.latest_jpg) if s.latest_jpg else self._r(503,"text/plain","wait"),
             "/api/state": self._api_state,
             "/api/log": lambda s: self._r(200,"application/json",json.dumps({"lines":log.get(100)})),
@@ -1775,11 +1775,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
     def _zone_img(self, s, name):
-        if not s.latest_frame is not None:
+        # Pull a fresh frame straight from the capture object instead of
+        # relying on s.latest_frame, which is owned by bg_loop. If bg_loop
+        # ever stalls (it has no try/except), s.latest_frame goes stale —
+        # /zone/<name> stays live as long as the capture thread is alive.
+        frame = s.capture.capture() if s.capture is not None else s.latest_frame
+        if frame is None:
             return self._r(503,"text/plain","No frame")
         z = next((z for z in s.cal.zones if z["name"]==name), None)
         if not z: return self._r(404,"text/plain","Not found")
-        crop = s.monitor._crop(s.latest_frame, z)
+        crop = s.monitor._crop(frame, z)
         if crop is None: return self._r(500,"text/plain","Crop failed")
         j = to_jpeg(crop, 90)
         if j: self._r(200,"image/jpeg",j)

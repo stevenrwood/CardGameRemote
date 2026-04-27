@@ -4279,78 +4279,93 @@ def _process_voice_command(cmd):
 # ---------------------------------------------------------------------------
 
 def bg_loop():
+    # The original loop had no exception handling, so a single bad
+    # iteration (e.g. a cv2 op throwing on a transient frame) silently
+    # killed the thread — recognition stopped, /snapshot froze on the
+    # last good frame, and the only way out was a host restart. Wrap
+    # the body so the loop survives and logs the problem instead.
     while not _state.quit_flag:
-        frame = _state.capture.capture()
-        if frame is not None:
-            _state.latest_frame = frame
-            # Recognition/motion detection runs FIRST so card arrival
-            # doesn't wait on the display-JPEG encode below. On a 4K
-            # Brio frame to_jpeg was eating 0.5-1.5s per bg_loop pass.
-            if _state.monitoring and _state.cal.ok:
-                _console_watch_dealer(_state, frame)
+        try:
+            _bg_loop_iter()
+        except Exception as e:
+            log.log(f"[BG_LOOP] iteration error: {type(e).__name__}: {e}")
+            time.sleep(1)
 
-            # Display JPEG is cheap once we downscale — the UI renders
-            # it inside a small iframe anyway. Keep the overlay drawn
-            # on the full frame (zone coordinates are in 4K space),
-            # then scale the encoded output.
-            disp = crop_circle(frame, _state.cal).copy()
-            draw_overlay(disp, _state.cal, _state.monitor)
-            small = cv2.resize(disp, (1280, 720), interpolation=cv2.INTER_AREA)
-            _state.latest_jpg = to_jpeg(small, 70)
 
-            # Data collection auto-cycle
-            if _state.collect_mode:
-                _collect_auto_cycle(_state)
+def _bg_loop_iter():
+    frame = _state.capture.capture()
+    if frame is None:
+        time.sleep(1)
+        return
+    _state.latest_frame = frame
+    # Recognition/motion detection runs FIRST so card arrival
+    # doesn't wait on the display-JPEG encode below. On a 4K
+    # Brio frame to_jpeg was eating 0.5-1.5s per bg_loop pass.
+    if _state.monitoring and _state.cal.ok:
+        _console_watch_dealer(_state, frame)
 
-            # Test mode: check if card appeared in the active zone
-            tm = _state.test_mode
-            if tm and tm["waiting"] == "card" and _state.cal.ok:
-                zone = _state.cal.zones[tm["zone_idx"]]
-                crop = _state.monitor.check_single(frame, zone)
-                if crop is not None:
-                    log.log(f"[{zone['name']}] Card detected, recognizing...")
-                    result = _state.monitor.last_card.get(zone["name"], "")
-                    if not result or result == "No card":
-                        _state.monitor._recognize(zone["name"], crop)
-                        result = _state.monitor.last_card.get(zone["name"], "No card")
-                    if result and result != "No card":
-                        tm["result"] = result
-                        tm["waiting"] = "confirm"
-                        tm["confirm_time"] = time.time()
-                        speech.say(f"{zone['name']}, {result}")
+    # Display JPEG is cheap once we downscale — the UI renders
+    # it inside a small iframe anyway. Keep the overlay drawn
+    # on the full frame (zone coordinates are in 4K space),
+    # then scale the encoded output.
+    disp = crop_circle(frame, _state.cal).copy()
+    draw_overlay(disp, _state.cal, _state.monitor)
+    small = cv2.resize(disp, (1280, 720), interpolation=cv2.INTER_AREA)
+    _state.latest_jpg = to_jpeg(small, 70)
 
-            # Test mode: auto-confirm after 4 seconds
-            if tm and tm["waiting"] == "confirm":
-                if time.time() - tm.get("confirm_time", 0) > 4:
-                    # Auto-confirm — advance to next zone
-                    tm["zone_idx"] += 1
-                    if tm["zone_idx"] >= len(_state.cal.zones):
-                        _state.test_mode = None
-                        log.log("[TEST] All zones tested")
-                    else:
-                        tm["waiting"] = "card"
-                        tm["result"] = ""
-                        next_name = _state.cal.zones[tm["zone_idx"]]["name"]
-                        speech.say(f"{next_name} is next")
-                        log.log(f"[TEST] Auto-confirmed. Next: {next_name}")
+    # Data collection auto-cycle
+    if _state.collect_mode:
+        _collect_auto_cycle(_state)
 
-            # Deal mode
-            dm = _state.deal_mode
-            if dm and _state.cal.ok:
-                if dm["phase"] == "dealing":
-                    _deal_check_dealer_zone(_state)
-                elif dm["phase"] == "settling":
-                    if time.time() - dm.get("settle_time", 0) >= 2:
-                        log.log("[DEAL] Scanning all zones")
-                        dm["phase"] = "scanning"
-                        dm["announced_this_round"] = set()
-                        _deal_scan_all_zones(_state)
-                elif dm["phase"] == "retry_missing":
-                    _deal_retry_missing(_state)
-                elif dm["phase"] == "waiting_to_clear":
-                    _deal_check_zones_clear(_state)
+    # Test mode: check if card appeared in the active zone
+    tm = _state.test_mode
+    if tm and tm["waiting"] == "card" and _state.cal.ok:
+        zone = _state.cal.zones[tm["zone_idx"]]
+        crop = _state.monitor.check_single(frame, zone)
+        if crop is not None:
+            log.log(f"[{zone['name']}] Card detected, recognizing...")
+            result = _state.monitor.last_card.get(zone["name"], "")
+            if not result or result == "No card":
+                _state.monitor._recognize(zone["name"], crop)
+                result = _state.monitor.last_card.get(zone["name"], "No card")
+            if result and result != "No card":
+                tm["result"] = result
+                tm["waiting"] = "confirm"
+                tm["confirm_time"] = time.time()
+                speech.say(f"{zone['name']}, {result}")
 
-        time.sleep(1)  # 1 second capture rate
+    # Test mode: auto-confirm after 4 seconds
+    if tm and tm["waiting"] == "confirm":
+        if time.time() - tm.get("confirm_time", 0) > 4:
+            # Auto-confirm — advance to next zone
+            tm["zone_idx"] += 1
+            if tm["zone_idx"] >= len(_state.cal.zones):
+                _state.test_mode = None
+                log.log("[TEST] All zones tested")
+            else:
+                tm["waiting"] = "card"
+                tm["result"] = ""
+                next_name = _state.cal.zones[tm["zone_idx"]]["name"]
+                speech.say(f"{next_name} is next")
+                log.log(f"[TEST] Auto-confirmed. Next: {next_name}")
+
+    # Deal mode
+    dm = _state.deal_mode
+    if dm and _state.cal.ok:
+        if dm["phase"] == "dealing":
+            _deal_check_dealer_zone(_state)
+        elif dm["phase"] == "settling":
+            if time.time() - dm.get("settle_time", 0) >= 2:
+                log.log("[DEAL] Scanning all zones")
+                dm["phase"] = "scanning"
+                dm["announced_this_round"] = set()
+                _deal_scan_all_zones(_state)
+        elif dm["phase"] == "retry_missing":
+            _deal_retry_missing(_state)
+        elif dm["phase"] == "waiting_to_clear":
+            _deal_check_zones_clear(_state)
+
+    time.sleep(1)  # 1 second capture rate
 
 
 
