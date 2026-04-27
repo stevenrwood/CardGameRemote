@@ -1,25 +1,29 @@
 """
 Log buffer — in-memory tail + dual-stream file mirror.
 
-Two streams:
+Three layers:
 
-  log.txt                 The "between games" stream. Holds
-                          host startup, settings changes, calibration
-                          activity, voice noise — everything that
-                          happens while no game is in progress.
+  ~/Library/Logs/cardgame-host/log.txt
+        Pre-session "scratch" log — host startup, errors before any
+        Start Poker / Start Testing button has been pressed.
 
-  YYYY-MM-DD HH:MM:SS X   A per-game file opened when a hand starts
-                          and closed when that hand ends or the next
-                          one begins. ``X`` is a filename-safe
-                          abbreviation of the game name (FTQ, 7CS,
-                          7-27, etc).
+  ~/Library/Logs/cardgame-host/<session>/log.txt
+        Inside each session folder, the "between-games" stream for
+        that session. Holds settings changes, voice noise, anything
+        that happens while no game is active during this session.
 
-The host calls ``log.start_game(name)`` from /api/console/deal and
-``log.end_game()`` from any path that ends a hand (End Hand,
-Exit Poker, etc). While a game file is open every ``log.log()``
-line goes to the game file ONLY — log.txt sees nothing until the
-game ends. A ``most_recent_game`` symlink in the log directory
-always points at the freshest game file.
+  ~/Library/Logs/cardgame-host/<session>/YYYY-MM-DD HH:MM:SS X.txt
+        One per-game file inside the session, opened at /api/console/
+        deal and closed at hand end. ``X`` is a filename-safe
+        abbreviation of the game name (FTQ, 7CS, 7-27, etc).
+
+  ~/Library/Logs/cardgame-host/<session>/most_recent_game
+        Symlink inside the session folder, points at the freshest
+        game log file.
+
+Session folder names:
+  Start Poker   → "YYYY-MM-DD HH:MM:SS Poker Night"  (per-night history)
+  Start Testing → "Testing"                          (rolling, wiped each start)
 
 A single module-level ``log = LogBuffer()`` is shared by the rest
 of the host code. Logs live in ~/Library/Logs/cardgame-host/ so
@@ -30,6 +34,7 @@ Access.
 
 import os
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -37,8 +42,9 @@ from threading import Lock
 
 LOG_DIR = Path.home() / "Library" / "Logs" / "cardgame-host"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+# Pre-session "before any session was started" log file. Sessions
+# rotate to their own log.txt inside their session folder.
 LOG_FILE = LOG_DIR / "log.txt"
-RECENT_LINK = LOG_DIR / "most_recent_game"
 
 
 # Hand-curated abbreviations for the templates we ship; anything not
@@ -75,10 +81,19 @@ class LogBuffer:
         self._lock = Lock()
         # Path to the active per-game log file when a hand is in
         # progress; None otherwise. While set, log() writes to this
-        # file INSTEAD of log.txt.
+        # file INSTEAD of the session log.txt.
         self._game_path = None
-        # Overwrite log file on startup so each host run starts fresh.
+        # Session folder. None before Start Poker / Start Testing —
+        # logging falls through to the root log.txt.
+        self._session_dir = None
+        # Overwrite the root log.txt on startup so the next pre-
+        # session run starts fresh.
         LOG_FILE.write_text("")
+
+    def _session_log_path(self):
+        if self._session_dir is None:
+            return LOG_FILE
+        return self._session_dir / "log.txt"
 
     def log(self, msg):
         # ms precision so we can time sub-second pipeline stages.
@@ -89,7 +104,7 @@ class LogBuffer:
         with self._lock:
             self._lines.append(line)
             self._lines = self._lines[-500:]
-            target = self._game_path or LOG_FILE
+            target = self._game_path or self._session_log_path()
         try:
             with open(target, "a") as f:
                 f.write(line + "\n")
@@ -101,26 +116,76 @@ class LogBuffer:
             return list(self._lines[-n:])
 
     def clear(self):
-        """Wipe the in-memory buffer and the live log file."""
+        """Wipe the in-memory buffer and the active log file."""
         with self._lock:
             self._lines = []
+            target = self._session_log_path()
         try:
-            LOG_FILE.write_text("")
+            target.write_text("")
         except Exception:
             pass
 
+    @property
+    def session_dir(self):
+        return self._session_dir
+
+    def start_session(self, kind: str) -> str:
+        """Open a new session folder and route subsequent logs into
+        it. ``kind`` is "poker" or "testing":
+          poker   → "YYYY-MM-DD HH:MM:SS Poker Night/"  (per-night)
+          testing → "Testing/"  (wiped each start, single rolling slot)
+
+        Closes any prior session / per-game file first. Returns the
+        session folder's name."""
+        # Close any in-flight game from the previous session so its
+        # trailing line lands in the right file.
+        self.end_game()
+        if kind == "testing":
+            folder = LOG_DIR / "Testing"
+            # Wipe and recreate so each Start Testing run is a
+            # clean slate.
+            try:
+                if folder.exists():
+                    shutil.rmtree(folder)
+            except Exception:
+                pass
+        else:
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            folder = LOG_DIR / f"{stamp} Poker Night"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "log.txt").write_text("")
+        except Exception:
+            pass
+        with self._lock:
+            self._session_dir = folder
+        self.log(f"=== Session started: {folder.name} ===")
+        return folder.name
+
+    def end_session(self) -> None:
+        """Close the active session. Subsequent log() lines flow
+        back into the root log.txt until the next start_session().
+        Idempotent."""
+        with self._lock:
+            active = self._session_dir
+        if active is None:
+            return
+        self.end_game()
+        self.log(f"=== Session ended: {active.name} ===")
+        with self._lock:
+            self._session_dir = None
+
     def start_game(self, game_name: str) -> str:
-        """Open a fresh per-game log file for ``game_name``. If a
-        previous game file is still open, close it first. Updates the
-        ``most_recent_game`` symlink to point at the new file. Returns
-        the new file's name.
-        """
-        # Close any prior game first so its trailing line lands in
-        # the right file before we switch.
+        """Open a fresh per-game log file inside the active session
+        folder (or LOG_DIR if no session). If a previous game file
+        is still open, close it first. Updates the
+        ``most_recent_game`` symlink to point at the new file.
+        Returns the new file's name."""
         self.end_game()
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         abbrev = _game_abbrev(game_name)
-        path = LOG_DIR / f"{stamp} {abbrev}.txt"
+        parent = self._session_dir or LOG_DIR
+        path = parent / f"{stamp} {abbrev}.txt"
         try:
             with open(path, "w") as f:
                 f.write("")
@@ -128,10 +193,11 @@ class LogBuffer:
             pass
         with self._lock:
             self._game_path = path
+        link = parent / "most_recent_game"
         try:
-            if RECENT_LINK.is_symlink() or RECENT_LINK.exists():
-                RECENT_LINK.unlink()
-            os.symlink(path.name, RECENT_LINK)
+            if link.is_symlink() or link.exists():
+                link.unlink()
+            os.symlink(path.name, link)
         except Exception:
             pass
         self.log(f"=== Game started: {game_name} ===")
@@ -139,37 +205,26 @@ class LogBuffer:
 
     def end_game(self) -> None:
         """Close the current per-game log file (if any). Subsequent
-        log() lines flow back into log.txt until start_game() runs
-        again. Idempotent."""
+        log() lines flow back into the session log.txt until
+        start_game() runs again. Idempotent."""
         with self._lock:
             active = self._game_path
         if active is None:
             return
-        # Write the close marker to the game file BEFORE clearing the
-        # pointer so the marker lands in the right stream.
         self.log("=== Game ended ===")
         with self._lock:
             self._game_path = None
 
     # -- Legacy compatibility shims ----------------------------------
-    # Existing callers still hit start_night() / end_night() to
-    # bracket a poker night. The old behavior wrote a poker_*.txt
-    # archive that mirrored every line; that's superseded by the
-    # per-game files. We keep the names so the rest of the codebase
-    # doesn't have to be edited in lockstep, but they're now no-ops
-    # beyond a couple of marker lines in log.txt.
+    # Older callers used start_night() / end_night() to bracket the
+    # session. They now just delegate to the new session methods so
+    # the rest of the codebase keeps working.
 
-    def start_night(self) -> str:
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.log(f"=== Poker night started {stamp} ===")
-        return ""
+    def start_night(self, kind: str = "poker") -> str:
+        return self.start_session(kind)
 
     def end_night(self) -> None:
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        # Make sure no per-game file is left open if a hand was mid-
-        # flight at exit.
-        self.end_game()
-        self.log(f"=== Poker night ended {stamp} ===")
+        self.end_session()
 
 
 log = LogBuffer()

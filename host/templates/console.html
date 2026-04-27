@@ -79,8 +79,14 @@ button.flash{animation:btn-flash .35s ease-out}
 <h1>Poker Console</h1>
 
 <div class="hdr">
-  <button id="start-btn" class="btn-start" onclick="onStart()">Start</button>
-  <button id="exit-btn" class="btn-exit" onclick="onExit()" style="display:none">Exit Poker</button>
+  <button id="start-poker-btn" class="btn-start"
+          onclick="onStart('poker')">Start Poker</button>
+  <button id="start-testing-btn" class="btn-setup"
+          onclick="onStart('testing')">Start Testing</button>
+  <button id="setup-btn" class="btn-setup"
+          onclick="onStart()" style="display:none">Setup</button>
+  <button id="exit-btn" class="btn-exit"
+          onclick="onExit()" style="display:none">Exit Poker</button>
 </div>
 
 <div id="main" class="dim">
@@ -328,9 +334,20 @@ function render(){
   var restartBtn=document.getElementById('restart-game-btn');
   restartBtn.disabled=!ST.game_in_progress;
 
-  var sbtn=document.getElementById('start-btn');
-  sbtn.textContent=ST.night_active?'Setup':'Start';
-  sbtn.className=ST.night_active?'btn-setup':'btn-start';
+  // Pre-session: show "Start Poker" + "Start Testing".
+  // During a session: collapse to a single "Setup" button.
+  var pokerBtn=document.getElementById('start-poker-btn');
+  var testBtn=document.getElementById('start-testing-btn');
+  var setupBtn=document.getElementById('setup-btn');
+  if(ST.night_active){
+    pokerBtn.style.display='none';
+    testBtn.style.display='none';
+    setupBtn.style.display='block';
+  } else {
+    pokerBtn.style.display='block';
+    testBtn.style.display='block';
+    setupBtn.style.display='none';
+  }
 
   var ebtn=document.getElementById('exit-btn');
   ebtn.style.display=ST.night_active?'block':'none';
@@ -512,10 +529,24 @@ function populateSetupModal(){
   }
 }
 
-function onStart(){
+// Track which session kind the dealer chose pre-session so
+// saveSetup can pass it along to /api/console/start_night.
+var _pendingSessionKind=null;
+
+function onStart(kind){
+  if(kind==='poker'||kind==='testing'){
+    _pendingSessionKind=kind;
+  }
   populateSetupModal();
-  document.getElementById('setup-title').textContent=
-    (ST&&ST.night_active)?'Adjust settings':'Start night';
+  var title;
+  if(ST&&ST.night_active){
+    title='Adjust settings';
+  } else if(_pendingSessionKind==='testing'){
+    title='Start Testing';
+  } else {
+    title='Start Poker';
+  }
+  document.getElementById('setup-title').textContent=title;
   document.getElementById('setup-modal').style.display='block';
 }
 
@@ -533,8 +564,18 @@ function saveSetup(){
   var body={dealer:dealer,players:players,yolo_min_conf:yolo,
             presence_threshold:presence,brio_settle_s:settle,
             whisper_min_energy_threshold:whisperMin};
-  var path=(ST&&ST.night_active)?'/api/console/settings':'/api/console/start_night';
-  api(path,body).then(function(){closeModal('setup-modal');refresh();});
+  var path;
+  if(ST&&ST.night_active){
+    path='/api/console/settings';
+  } else {
+    path='/api/console/start_night';
+    body.kind=_pendingSessionKind||'poker';
+  }
+  api(path,body).then(function(){
+    _pendingSessionKind=null;
+    closeModal('setup-modal');
+    refresh();
+  });
 }
 
 function onExit(){

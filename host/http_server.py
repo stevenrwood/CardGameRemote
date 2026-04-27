@@ -866,6 +866,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "total_up_rounds": s.console_total_up_rounds,
                 "scan_phase": s.console_scan_phase,
                 "night_active": s.night_active,
+                "session_kind": getattr(s, "session_kind", "poker"),
                 "console_state": s.console_state,
                 "game_in_progress": game_in_progress,
                 "phase_label": phase_label,
@@ -930,11 +931,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._r(200, "application/json", json.dumps({"dealer": ge.get_dealer().name}))
 
         elif p == "/api/console/start_night":
-            # Start the night: rotate log file, flip night_active, accept
-            # any initial settings (dealer/players/thresholds) at the same
-            # time so the modal submits once.
-            archive = log.start_night()
+            # Start a session: open a session folder, flip
+            # night_active, accept any initial settings so the modal
+            # submits once. The Console UI surfaces two buttons —
+            # Start Poker / Start Testing — that hit this endpoint
+            # with body.kind = "poker" or "testing".
+            kind = (data.get("kind") or "poker").lower()
+            if kind not in ("poker", "testing"):
+                kind = "poker"
+            archive = log.start_session(kind)
             s.night_active = True
+            s.session_kind = kind
             # Fresh night → forget any tunnel-seen flag from a prior
             # session so the local view starts unredacted until Rodney
             # actually connects this night.

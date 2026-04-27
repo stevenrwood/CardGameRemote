@@ -1311,9 +1311,14 @@ class AppState:
         # work while this is set.
         self.guided_deal = None
         self.guided_deal_thread = None
-        # "Poker night" flag — set by Start, cleared by Exit Poker. The
-        # console UI gates the game dropdown + action controls on this.
+        # "Poker night" flag — set by Start Poker / Start Testing,
+        # cleared by Exit Poker. The console UI gates the game
+        # dropdown + action controls on this.
         self.night_active = False
+        # Which kind of session is active: "poker" or "testing".
+        # Drives the Setup-modal title and any UI hint that wants
+        # to surface the mode.
+        self.session_kind = "poker"
         # High-level console state machine surfaced to the UI.
         # "idle" | "dealing" | "betting" | "hand_over"
         self.console_state = "idle"
