@@ -60,6 +60,7 @@ from overhead_test import (
     _parse_card_code,
     _pi_poll_start,
     _pi_poll_stop,
+    _alert_stuck_cards_at_new_hand,
     _process_deal_text,
     _recompute_follow_the_queen,
     _resolve_verify,
@@ -438,6 +439,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.folded_players.discard(valid)
                 _table_log_add(s, f"{valid} {'folded' if folded else 'unfolded'}")
                 s.table_state_version += 1
+            # If the player who just folded was the most recently
+            # announced "high hand / bet first," speak the new
+            # next-highest. Skips when the fold is reversed (unfold)
+            # or when nobody held that title yet.
+            if folded and s.last_bet_first == valid:
+                impl = getattr(s, "current_game_impl", None)
+                if impl is not None:
+                    impl._announce_round(s)
             self._r(200, "application/json",
                     json.dumps({"ok": True, "player": valid, "folded": folded}))
 
@@ -1151,6 +1160,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.pi_offline = not pi_up
                 s.pi_flash_held = False  # reset our tracker regardless
                 log.log(f"[PI] Deal-time ping: {'reachable' if pi_up else 'OFFLINE (suppressing calls)'}")
+                # Stuck-cards alert: if the previous hand left cards
+                # in the scanner, beep 10 times over 20s so the
+                # dealer collects them before the new deal starts.
+                # Skips silently when the Pi is offline or all slots
+                # are clear.
+                if pi_up:
+                    _alert_stuck_cards_at_new_hand(s)
                 # Brio watching: triggered for any game that will produce up
                 # cards, either via explicit up/community phases or an
                 # open-ended HIT_ROUND (7/27). Baselines are captured now
@@ -1189,6 +1205,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.rodney_draws_done = 0
                     s.console_betting_round = 0
                     s.console_trailing_done = False
+                    s.last_bet_first = None
                     s.stats = {"yolo_right": 0, "yolo_wrong": 0,
                                "claude_right": 0, "claude_wrong": 0,
                                "pi_auto": 0,

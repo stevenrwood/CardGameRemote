@@ -1358,6 +1358,10 @@ class AppState:
         self.pi_flash_held = False           # tracked so we don't spam hold/release
         self.folded_players = set()     # Rodney's view of who's folded this hand
         self.freezes = {}               # 7/27: player_name -> freezes in a row
+        # Last name spoken as "Bet first" by _announce_round; consulted
+        # by /api/table/fold to decide whether to re-announce the next-
+        # highest hand once the previously-announced high hand folds.
+        self.last_bet_first: str | None = None
         # True when Deal pinged the Pi and got no answer; stays set until the
         # next Deal so we skip hitting the Pi (flash/hold, /slots, LEDs, etc).
         self.pi_offline = False
@@ -2070,84 +2074,64 @@ def _pi_poll_stop(s):
 
 
 # ---------------------------------------------------------------------------
-# Stuck-cards reminder
+# Stuck-cards alert at new-hand start
 # ---------------------------------------------------------------------------
 #
-# After the final up-card round of a hand, the dealer is supposed to
-# collect the cards out of the scanner before the next hand starts.
-# When they forget, the host nags via the Pi's piezo: two beeps every
-# 30 s until the slots are clear (or until a new hand begins).
-STUCK_CARDS_BUZZ_INTERVAL_S = 30.0
+# When a new hand begins, any card still in the scanner from the
+# previous hand is a problem — the dealer forgot to collect it. We
+# beep the Pi piezo 10 times over 20 s so the dealer can pull them
+# out before the deal continues. Replaces the old every-30-s nag
+# loop, which kept buzzing the table for the whole post-game window.
 
 
-def _final_round_with_stuck_cards(s) -> bool:
-    """True when the host should nag about cards still in the scanner.
-
-    Triggered while:
-      - night is active, AND
-      - the Pi reports cards present in at least one slot
-        (s.pi_prev_slots non-empty), AND
-      - the hand is past its final up-card round (scan_phase=='idle')
-        OR the hand has resolved entirely (state=='hand_over').
-    """
-    if not getattr(s, "night_active", False):
-        return False
-    if not s.pi_prev_slots:
-        return False
-    return (s.console_scan_phase == "idle"
-            or s.console_state == "hand_over")
-
-
-def _refresh_pi_prev_slots_for_buzzer(s):
-    """Single /slots fetch to update pi_prev_slots while the host's
-    main poll loop is dormant (post-final-round). Replaces the old
-    "keep polling every 5s during stuck-cards" mode that was
-    overloading the Pi with continuous capture+YOLO. Called once per
-    30s buzzer tick — light enough not to crash a marginal Pi."""
-    if not getattr(s, "night_active", False):
-        return
-    if (s.console_scan_phase != "idle"
-            and s.console_state != "hand_over"):
-        return
+def _stuck_slots_at_new_hand(s) -> list[int]:
+    """Fetch /slots once and return the slot numbers that have a
+    recognized card. Empty list when slots are clear (or the Pi is
+    unreachable — we don't want to false-buzz on transient Pi
+    timeouts)."""
     doc = _pi_fetch_slots(s)
     if doc is None:
-        return
-    fresh = {}
+        return []
+    occupied = []
     for entry in doc.get("slots", []):
         slot_num = entry.get("slot")
         if slot_num is None:
             continue
         if entry.get("recognized") and entry.get("rank") and entry.get("suit"):
-            fresh[slot_num] = f"{entry['rank']}{entry['suit'][0]}"
-    s.pi_prev_slots = fresh
+            occupied.append(slot_num)
+    return sorted(occupied)
 
 
-def _stuck_cards_buzzer_loop(s):
-    """Daemon thread. Beeps the Pi piezo twice every 30 s while
-    _final_round_with_stuck_cards is true; otherwise silent. Lives
-    for the lifetime of the host process — it's cheap to spin since
-    most ticks are no-ops."""
-    while True:
-        time.sleep(STUCK_CARDS_BUZZ_INTERVAL_S)
-        try:
-            _refresh_pi_prev_slots_for_buzzer(s)
-            if _final_round_with_stuck_cards(s):
-                slots = sorted(s.pi_prev_slots.keys())
-                log.log(
-                    f"[CARDS-STUCK] Cards still in slots {slots} "
-                    f"after final round — buzzing"
-                )
-                _pi_buzz(s, n=2)
-        except Exception as e:
-            log.log(f"[CARDS-STUCK] reminder error: {type(e).__name__}: {e}")
-
-
-def _stuck_cards_buzzer_start(s):
-    if getattr(s, "_stuck_buzz_thread", None) is not None:
+def _alert_stuck_cards_at_new_hand(s):
+    """If new-hand init found cards still seated in scanner slots,
+    spawn a daemon thread that beeps the piezo 10 times spaced
+    roughly 2 s apart. Caller must have already verified that we're
+    starting a hand and the Pi is reachable."""
+    occupied = _stuck_slots_at_new_hand(s)
+    if not occupied:
         return
-    t = Thread(target=_stuck_cards_buzzer_loop, args=(s,), daemon=True)
-    s._stuck_buzz_thread = t
-    t.start()
+    log.log(
+        f"[CARDS-STUCK] New hand starting with cards in slots "
+        f"{occupied} — alerting dealer (10 beeps over 20s)"
+    )
+
+    def _run():
+        # 10 beeps: 1 s on / 1 s off each = 20 s total.
+        for _ in range(10):
+            try:
+                _pi_buzz(s, n=1, on_time=1.0, off_time=1.0)
+            except Exception as e:
+                log.log(
+                    f"[CARDS-STUCK] beep failed: {type(e).__name__}: {e}"
+                )
+                return
+            # Bail early if the dealer cleared the slots mid-alert.
+            occ = _stuck_slots_at_new_hand(s)
+            if not occ:
+                log.log("[CARDS-STUCK] Slots cleared — alert stopping early")
+                return
+
+    Thread(target=_run, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -4545,7 +4529,6 @@ def main():
     # starting it here is safe even if the Pi is off.
     _pi_poll_start(_state)
     log.log(f"Pi poller started against {_state.pi_base_url}")
-    _stuck_cards_buzzer_start(_state)
     log.log("Server at http://localhost:8888")
 
     # Start background capture

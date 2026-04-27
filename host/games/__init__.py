@@ -202,7 +202,11 @@ class BaseGame:
         each, log the per-player result, and speak the winner. Base
         class method — subclasses should never need to override this
         directly; customize via ``score_hand`` + ``_player_visible_cards``
-        instead."""
+        instead.
+
+        Records ``state.last_bet_first`` so the fold handler can
+        re-announce when the announced "high hand" player folds (the
+        next-highest then becomes high)."""
         ge = self.engine
         wild_ranks = list(getattr(ge, "wild_ranks", []) or [])
         scored: dict[str, ScoreResult] = {}
@@ -216,6 +220,7 @@ class BaseGame:
             scored[name] = result
             log.log(f"[{type(self).__name__}] {name}: {result.speech}")
         if not scored:
+            state.last_bet_first = None
             return
         best_name, best_result = max(
             scored.items(), key=lambda kv: kv[1].value
@@ -223,6 +228,7 @@ class BaseGame:
         phrase = f"{best_name}, {best_result.speech}"
         log.log(f"[{type(self).__name__}] Bet first: {phrase}")
         speech.say(phrase)
+        state.last_bet_first = best_name
 
     # --- zone + scan policy ---
 
