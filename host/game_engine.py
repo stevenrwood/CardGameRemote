@@ -56,6 +56,17 @@ class GameTemplate:
     class_name: str = ""
     repeatable: bool = False
     notes: str = ""
+    # Filename-safe abbreviation used when the host opens the per-game
+    # log file ("YYYY-MM-DD HH:MM:SS <log_abbrev>.txt"). Empty falls
+    # back to a sanitized version of name.
+    log_abbrev: str = ""
+    # Default ante in cents; the Start-Game form pre-fills this when
+    # the dealer picks the game. Override-able per-deal.
+    default_ante_cents: int = 50
+    # Default betting limit code: "1_2" / "1_all_way" / "pot". Same
+    # codes as the BETTING_LIMIT_LABELS map. Pot-limit games (Texas
+    # Hold'em, 3 Toed Pete, Challenge variants) set this to "pot".
+    default_betting: str = "1_2"
 
 
 @dataclass
@@ -572,6 +583,7 @@ def _default_templates() -> list[GameTemplate]:
     return [
         GameTemplate(
             name="5 Card Draw",
+            log_abbrev="5CD",
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down"] * 5),
                 Phase(type=PhaseType.BETTING),
@@ -584,6 +596,7 @@ def _default_templates() -> list[GameTemplate]:
         # second draw at 2 in that case — see _max_draw_for_game.
         GameTemplate(
             name="5 Card Double Draw",
+            log_abbrev="5CDD",
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down"] * 5),
                 Phase(type=PhaseType.BETTING),
@@ -595,6 +608,8 @@ def _default_templates() -> list[GameTemplate]:
         ),
         GameTemplate(
             name="3 Toed Pete",
+            log_abbrev="3TP",
+            default_betting="pot",
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down"] * 3),
                 Phase(type=PhaseType.BETTING),
@@ -608,6 +623,7 @@ def _default_templates() -> list[GameTemplate]:
         ),
         GameTemplate(
             name="7 Card Stud",
+            log_abbrev="7CS",
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down", "down", "up"]),
                 Phase(type=PhaseType.BETTING),
@@ -623,28 +639,34 @@ def _default_templates() -> list[GameTemplate]:
         ),
         GameTemplate(
             name="7 Stud Deuces Wild",
+            log_abbrev="7SDW",
             phases_from="7 Card Stud",
             wild_cards={"ranks": ["2"], "label": "Deuces Wild"},
         ),
         GameTemplate(
             name="Follow the Queen",
+            log_abbrev="FTQ",
             phases_from="7 Card Stud",
             wild_cards={"ranks": ["Q"], "label": "Queens wild"},
             dynamic_wild="follow_the_queen",
         ),
         GameTemplate(
             name="High Chicago",
+            log_abbrev="HC",
             phases_from="7 Card Stud",
             notes="Split pot: best poker hand + highest spade in the hole",
         ),
         GameTemplate(
             name="Eight or Better",
+            log_abbrev="8B",
             phases_from="7 Card Stud",
             notes="Split pot: best high hand + best low hand (highest card "
                   "8 or under, no pair) qualifies for the low half",
         ),
         GameTemplate(
             name="Challenge",
+            log_abbrev="CHL",
+            default_betting="pot",
             params=["R1", "R2", "R3"],
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down"] * 3),
@@ -661,21 +683,28 @@ def _default_templates() -> list[GameTemplate]:
         ),
         GameTemplate(
             name="High, Low, High",
+            log_abbrev="HLH",
+            default_betting="pot",
             phases_from="Challenge",
             with_params={"R1": "High", "R2": "Low", "R3": "High"},
         ),
         GameTemplate(
             name="Low, High, Low",
+            log_abbrev="LHL",
+            default_betting="pot",
             phases_from="Challenge",
             with_params={"R1": "Low", "R2": "High", "R3": "Low"},
         ),
         GameTemplate(
             name="Low, Low, High",
+            log_abbrev="LLH",
+            default_betting="pot",
             phases_from="Challenge",
             with_params={"R1": "Low", "R2": "Low", "R3": "High"},
         ),
         GameTemplate(
             name="7/27",
+            log_abbrev="7-27",
             class_name="SevenTwentySevenGame",
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down", "down"]),
@@ -688,6 +717,7 @@ def _default_templates() -> list[GameTemplate]:
         ),
         GameTemplate(
             name="7/27 (one up)",
+            log_abbrev="7-27 1up",
             class_name="SevenTwentySevenGame",
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down", "up"]),
@@ -699,6 +729,8 @@ def _default_templates() -> list[GameTemplate]:
         ),
         GameTemplate(
             name="Texas Hold'em",
+            log_abbrev="TXH",
+            default_betting="pot",
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down"] * 2),
                 Phase(type=PhaseType.BETTING),

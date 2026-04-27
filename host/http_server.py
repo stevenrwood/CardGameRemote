@@ -1078,9 +1078,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if game_name not in ge.templates:
                 self._r(400, "application/json", json.dumps({"error": f"Unknown game: {game_name}"}))
             else:
-                # Accept optional ante + betting-limit from the Start
-                # Game form. Omitting them (e.g. voice "Same game
-                # again") keeps the previous hand's values.
+                # Pull per-game defaults from the GameTemplate first
+                # so the values used here reflect "the right ante/
+                # limit for this game" when the dealer didn't pick
+                # anything explicitly.
+                tpl = ge.templates[game_name]
+                if tpl.default_ante_cents:
+                    s.ante_cents = int(tpl.default_ante_cents)
+                if tpl.default_betting in BETTING_LIMIT_LABELS:
+                    s.betting_limit = tpl.default_betting
+                # Then honor any explicit override from the Start
+                # Game form (which the UI pre-fills with the same
+                # template defaults). Omitting them (e.g. voice
+                # "Same game again") keeps the per-template values.
                 raw_ante = data.get("ante_cents")
                 if raw_ante is not None:
                     try:
@@ -1111,16 +1121,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # them as 0 (unbounded) so the UI stays in "confirmed /
                 # Next Round" flow instead of switching to idle.
                 s.console_up_round = 0
-                template = ge.templates[game_name]
+                # `tpl` was looked up earlier for ante/betting defaults.
                 has_hit_round = any(
                     phase.type.value == "hit_round" and phase.card_type == "up"
-                    for phase in template.phases
+                    for phase in tpl.phases
                 )
                 if has_hit_round:
                     up_rounds = 0  # 0 = unbounded
                 else:
                     up_rounds = 0
-                    for phase in template.phases:
+                    for phase in tpl.phases:
                         if phase.type.value == "deal" and "up" in phase.pattern:
                             up_rounds += 1
                         elif phase.type.value == "community":
@@ -1129,7 +1139,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Open a per-game log file before the New hand line
                 # is written so the log line itself lands in the
                 # right file.
-                log.start_game(game_name)
+                log.start_game(game_name, tpl.log_abbrev)
                 log.log(f"[CONSOLE] New hand: {game_name}, dealer: {result['dealer']}")
                 if result.get("wild_label"):
                     log.log(f"[CONSOLE] {result['wild_label']}")

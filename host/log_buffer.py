@@ -175,15 +175,23 @@ class LogBuffer:
         with self._lock:
             self._session_dir = None
 
-    def start_game(self, game_name: str) -> str:
+    def start_game(self, game_name: str, abbrev: str = "") -> str:
         """Open a fresh per-game log file inside the active session
         folder (or LOG_DIR if no session). If a previous game file
         is still open, close it first. Updates the
         ``most_recent_game`` symlink to point at the new file.
+
+        ``abbrev`` is the filename-safe game abbreviation. Callers
+        with a GameTemplate should pass template.log_abbrev — falls
+        back to the in-module mapping (then to a sanitized form of
+        game_name) if blank.
+
         Returns the new file's name."""
         self.end_game()
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        abbrev = _game_abbrev(game_name)
+        # Trust an explicit caller-provided abbrev (likely from
+        # GameTemplate.log_abbrev); fall back to the local map.
+        abbrev = (abbrev or "").strip() or _game_abbrev(game_name)
         parent = self._session_dir or LOG_DIR
         path = parent / f"{stamp} {abbrev}.txt"
         try:
