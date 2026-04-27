@@ -42,7 +42,7 @@ import http.server
 import numpy as np
 
 from game_engine import GameEngine
-from log_buffer import log, LOG_DIR, LOG_FILE, LOG_ARCHIVE_DIR
+from log_buffer import log, LOG_DIR, LOG_FILE
 from speech import speech, _resolve_best_voice
 from brio_capture import FrameCapture, CAPTURE_FILE
 from zone_monitor import ZoneMonitor, TRAINING_DIR, CONFIG_FILE, CLAUDE_MODEL, YOLO_MODEL_PATH

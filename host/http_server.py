@@ -1119,6 +1119,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         elif phase.type.value == "community":
                             up_rounds += 1
                 s.console_total_up_rounds = up_rounds
+                # Open a per-game log file before the New hand line
+                # is written so the log line itself lands in the
+                # right file.
+                log.start_game(game_name)
                 log.log(f"[CONSOLE] New hand: {game_name}, dealer: {result['dealer']}")
                 if result.get("wild_label"):
                     log.log(f"[CONSOLE] {result['wild_label']}")
@@ -1540,6 +1544,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.monitor.recognition_details[z["name"]] = {}
                 s.monitor.recognition_crops[z["name"]] = None
             log.log(f"[CONSOLE] Hand over — next dealer: {result['next_dealer']}")
+            # Close the per-game log file. Subsequent log lines flow
+            # back into log.txt until the next /api/console/deal.
+            log.end_game()
             # Clear Rodney-side hand state and turn scanner LEDs off now
             # that no cards are expected.
             with s.table_lock:
