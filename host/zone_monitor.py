@@ -383,6 +383,13 @@ class ZoneMonitor:
                         else:
                             details["claude"] = "No card"
                             self.zone_state[name] = "empty"
+                            # Distinguish "we asked Claude and the zone
+                            # is empty" from "we never scanned this
+                            # zone yet" (last_card == ""). The voice
+                            # orphan-card inference uses this to skip
+                            # zones already confirmed empty instead of
+                            # routing a misheard rank/suit there.
+                            self.last_card[name] = "No card"
                             log.log(f"[{name}] Claude: No card")
                         self.recognition_details[name] = details
                         self.recognition_crops[name] = crop

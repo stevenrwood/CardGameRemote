@@ -199,6 +199,7 @@ button.flash{animation:btn-flash .35s ease-out}
     </div>
     <div class="modal-btns">
       <button class="modal-save" onclick="saveCorrection()">Save</button>
+      <button class="modal-cancel" onclick="clearCorrection()">No Card</button>
       <button class="modal-cancel" onclick="closeModal('correct-modal')">Cancel</button>
     </div>
   </div>
@@ -729,6 +730,11 @@ function saveCorrection(){
   var suit=document.getElementById('correct-suit').value;
   if(!rank||!suit){alert('Pick both rank and suit');return;}
   api('/api/console/correct',{corrections:[{player:correctPlayer,rank:rank,suit:suit}]})
+    .then(function(){closeModal('correct-modal');refresh();});
+}
+
+function clearCorrection(){
+  api('/api/console/correct',{corrections:[{player:correctPlayer,clear:true}]})
     .then(function(){closeModal('correct-modal');refresh();});
 }
 

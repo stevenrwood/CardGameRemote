@@ -390,22 +390,21 @@ def _console_watch_dealer(s, frame):
                                         s, frame, watched, dealer_name):
                                     _auto_scan_all_zones(s, frame, watched)
 
-    # Speech gate. Stand-allowed rounds and remote-dealer hands
-    # don't gate — announce per-zone immediately. Otherwise wait
-    # until the dealer's zone has been recognized.
+    # Mark "dealer has placed their card" for the missing-card
+    # prompt gate. The speech gate itself is gone (announcements
+    # now fire immediately per zone), but _dealer_zone_done still
+    # gates the "Missing cards: X and Y" prompt below. Stand-
+    # allowed rounds (7/27 hit) and remote-dealer hands don't
+    # need to wait on the dealer placing — flip the flag right
+    # away. Otherwise wait until the dealer's zone is recognized.
     needs_gate = (not stand_allowed) and (dealer_name in brio_names)
     if not needs_gate:
-        if not monitor._speech_open:
-            monitor.open_speech_gate()
+        if not s._dealer_zone_done:
             s._dealer_zone_done = True
     elif not s._dealer_zone_done:
         if monitor.zone_state.get(dealer_name) == "recognized":
             s._dealer_zone_done = True
-            monitor.open_speech_gate()
-            log.log(
-                "[CONSOLE] Dealer zone recognized — "
-                "draining held announcements"
-            )
+            log.log("[CONSOLE] Dealer zone recognized")
 
     # Missing-zone prompt fires once per round, AFTER:
     #   - the speech gate is open (dealer done / stand-allowed), AND
@@ -4167,7 +4166,13 @@ def _process_voice_command(cmd):
             if name not in scan_set:
                 continue
             existing = s.monitor.last_card.get(name, "")
-            if not existing or existing == "No card":
+            # Only target zones that haven't been resolved yet
+            # (last_card == ""). Zones marked "No card" are
+            # explicit Claude/YOLO/user verdicts that the zone is
+            # empty — routing an orphan rank/suit there caused the
+            # 7/27 round-2 phantom 7-of-Hearts that sent Steve a
+            # card he never received.
+            if not existing:
                 target = name
                 break
         if target is None:

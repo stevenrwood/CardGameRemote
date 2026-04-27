@@ -1622,6 +1622,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 player = c.get("player", "")
                 rank = c.get("rank", "")
                 suit = c.get("suit", "")
+                clear = bool(c.get("clear"))
+                # "No card" correction — wipes a phantom card the
+                # recognizer hallucinated. Sets last_card to "No
+                # card" so orphan-inference skips this zone, and
+                # zone_state to "corrected" so rescan_all preserves
+                # the user's verdict (otherwise the next force_scan
+                # would re-hallucinate).
+                if player and clear:
+                    old_card = s.monitor.last_card.get(player, "")
+                    prior_details = s.monitor.recognition_details.get(player, {}) or {}
+                    prior_source = prior_details.get("source")
+                    if old_card and old_card != "No card" and prior_source in ("yolo", "claude"):
+                        _stats_bump(s, f"{prior_source}_right", -1)
+                        _stats_bump(s, f"{prior_source}_wrong", +1)
+                    s.monitor.last_card[player] = "No card"
+                    s.monitor.zone_state[player] = "corrected"
+                    s.monitor.recognition_details[player] = {
+                        "yolo": prior_details.get("yolo", ""),
+                        "yolo_conf": prior_details.get("yolo_conf", 0),
+                        "claude": prior_details.get("claude", ""),
+                        "final": "No card",
+                        "corrected": True,
+                    }
+                    s.monitor._delete_last_save(player)
+                    if s.console_scan_phase in ("confirmed", "idle"):
+                        s.console_hand_cards = [
+                            e for e in s.console_hand_cards
+                            if not (e.get("player") == player
+                                    and e.get("card") == old_card)
+                        ]
+                    log.log(f"[CONSOLE] Cleared {player}: {old_card or '(empty)'} -> No card")
+                    if old_card and old_card != "No card":
+                        changed_any = True
+                    continue
                 if player and rank and suit:
                     RANK_TO_NAME = {"A": "Ace", "K": "King", "Q": "Queen", "J": "Jack"}
                     SUIT_TO_NAME = {"spades": "Spades", "hearts": "Hearts",
