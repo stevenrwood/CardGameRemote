@@ -441,15 +441,23 @@ def parse_speech(text):
 
     # --- Single-phrase commands first (cheapest to check) --------------
 
-    # "Confirmed" — voice equivalent of the Confirm Cards button. Also
-    # tolerate slight mis-transcriptions like "confirm" or "confirmed."
-    # standalone, but NOT inside a longer phrase like "confirmed bill 4
-    # of clubs" (which would be a weird sentence anyway).
-    if re.fullmatch(r"(confirmed?|confirm cards?)[.!]?", text_lower):
+    # "Confirmed" — voice equivalent of the Confirm Cards button.
+    # Tolerate slight mis-transcriptions ("confirm" / "confirmed.")
+    # and surrounding filler ("OK, confirmed", "alright confirmed
+    # cards please"). Use re.search w/ word boundaries so trailing
+    # filler like "confirmed bill 4 of clubs" is rejected — that
+    # `\b` after `confirm(ed|s)` prevents matching when the word
+    # continues into something else.
+    if re.search(r"\b(confirmed?|confirm\s+cards?)\b[\s.!]*$", text_lower):
         return [ConfirmCommand(raw_text=text)]
 
-    # "Pot is right" (sometimes mis-heard as "pot is writes" etc.)
-    if re.fullmatch(r"(the\s+)?pot[\s,]*is\s+(right|write|ripe)[.!]?", text_lower):
+    # "Pot is right" with common Whisper mishearings (right / write /
+    # ripe / rite). re.search w/ word boundaries lets phrases like
+    # "OK, pot is right" or "Pot is right, dealer" through.
+    if re.search(
+        r"\b(?:the\s+)?pot[\s,]*is\s+(?:right|write|ripe|rite)\b",
+        text_lower,
+    ):
         return [PotIsRightCommand(raw_text=text)]
 
     # --- Challenge-game votes -----------------------------------------
