@@ -1095,6 +1095,9 @@ def _announce_poker_hand_bet_first(s):
         phrase = f"{best_player}, {hand_phrase} is high. Your bet."
         log.log(f"[POKER] Bet first: {phrase} ({best_result.label})")
         speech.say(phrase)
+        s.last_bet_first = best_player
+    else:
+        s.last_bet_first = None
 
 
 def _check_follow_the_queen_round(s, round_cards, announce=True):

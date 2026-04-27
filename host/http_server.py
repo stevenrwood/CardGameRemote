@@ -442,11 +442,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # If the player who just folded was the most recently
             # announced "high hand / bet first," speak the new
             # next-highest. Skips when the fold is reversed (unfold)
-            # or when nobody held that title yet.
+            # or when nobody held that title yet. We hit BOTH paths
+            # so the right one fires regardless of game type:
+            #   - impl._announce_round drives 7/27 (and any future
+            #     game that overrides score_hand).
+            #   - _announce_poker_hand_bet_first drives stud / FTQ
+            #     where the poker-hand comparison lives outside the
+            #     BaseGame.
             if folded and s.last_bet_first == valid:
                 impl = getattr(s, "current_game_impl", None)
                 if impl is not None:
                     impl._announce_round(s)
+                _announce_poker_hand_bet_first(s)
             self._r(200, "application/json",
                     json.dumps({"ok": True, "player": valid, "folded": folded}))
 
