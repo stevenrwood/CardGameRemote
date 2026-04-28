@@ -18,6 +18,7 @@ Endpoints:
 """
 
 import argparse
+import functools
 import io
 import json
 import logging
@@ -211,31 +212,56 @@ class SlotLed:
 
 
 class Camera:
-    """Pi camera wrapper. Captures a BGR numpy frame."""
+    """Pi camera wrapper. Captures a BGR numpy frame.
+
+    Constructor never raises — if picamera2 is missing, the requested
+    camera index isn't present, or libcamera fails to initialize, we
+    log a warning and return an "unavailable" Camera (cam=None,
+    available=False) so the service can come up in degraded mode.
+    Routes that need a working camera should bail with HTTP 503 via
+    the ``require_camera`` decorator instead of crashing.
+    """
     def __init__(self, camera_index: int = 0):
         self.camera_index = camera_index
         self.cam = None
-        self._lock = Lock()
-        if not _CAMERA_OK:
-            raise RuntimeError("picamera2 not available — cannot initialize camera")
-        self.cam = Picamera2(camera_num=camera_index)
-        # Video configuration keeps the pipeline continuously streaming
-        # with multiple buffers, so capture_array() grabs the latest frame
-        # instantly instead of blocking for a full still-capture cycle.
-        # At 2304x1296 the IMX708 comfortably runs at 25-30 fps with our
-        # 40 ms exposure.
-        cfg = self.cam.create_video_configuration(
-            main={"size": (2304, 1296), "format": "RGB888"},
-            buffer_count=4,
-        )
-        self.cam.configure(cfg)
-        # Runtime-tunable settings (defaults tuned for scanner box LEDs)
+        self.available = False
         self.exposure_us = 40000    # 40ms
         self.gain = 2.0             # analogue gain
-        self._apply_controls()
-        self.cam.start()
-        time.sleep(0.5)  # warmup + AF settle
-        log.info(f"Camera {camera_index} started at {cfg['main']['size']} (video mode)")
+        self._lock = Lock()
+        if not _CAMERA_OK:
+            log.warning(
+                f"Camera {camera_index}: picamera2 not available — "
+                f"camera disabled, service in degraded mode"
+            )
+            return
+        try:
+            self.cam = Picamera2(camera_num=camera_index)
+            # Video configuration keeps the pipeline continuously streaming
+            # with multiple buffers, so capture_array() grabs the latest frame
+            # instantly instead of blocking for a full still-capture cycle.
+            # At 2304x1296 the IMX708 comfortably runs at 25-30 fps with our
+            # 40 ms exposure.
+            cfg = self.cam.create_video_configuration(
+                main={"size": (2304, 1296), "format": "RGB888"},
+                buffer_count=4,
+            )
+            self.cam.configure(cfg)
+            self._apply_controls()
+            self.cam.start()
+            time.sleep(0.5)  # warmup + AF settle
+            self.available = True
+            log.info(
+                f"Camera {camera_index} started at {cfg['main']['size']} "
+                f"(video mode)"
+            )
+        except (IndexError, RuntimeError, OSError) as e:
+            log.warning(
+                f"Camera {camera_index}: init failed "
+                f"({type(e).__name__}: {e}) — camera disabled, "
+                f"service in degraded mode"
+            )
+            self.cam = None
+            self.available = False
 
     def _apply_controls(self):
         controls = {
@@ -327,7 +353,12 @@ class AppState:
         self.scan_lock = Lock()
         self.cameras: dict[int, Camera] = {}
         for idx in camera_indices:
-            self.cameras[idx] = Camera(idx)
+            cam = Camera(idx)
+            if cam.available:
+                self.cameras[idx] = cam
+            # Camera() already logged a warning on failure; just skip
+            # silently here so AppState init keeps going. Routes that
+            # need the camera return HTTP 503 instead.
         self.detector = CardDetector(str(REFERENCE_DIR))
         # Pi-trained YOLO model. Loaded lazily so that if ultralytics isn't
         # installed or the weights aren't deployed yet, the service still
@@ -445,9 +476,40 @@ _state: AppState | None = None
 app = Flask(__name__)
 
 
+def require_camera(f):
+    """Short-circuit a route with HTTP 503 when no camera is attached.
+
+    Keeps the Pi service running in degraded mode (LEDs / buzzer /
+    calibration / training endpoints still work) while making sure
+    capture-dependent endpoints fail loudly with a clear error
+    instead of crashing on `_state.cameras` being empty.
+    """
+    @functools.wraps(f)
+    def wrapper(*a, **kw):
+        if _state is None or not _state.cameras:
+            return jsonify({
+                "ok": False,
+                "error": "camera unavailable",
+                "detail": (
+                    "no Pi camera detected at startup; service is "
+                    "running in degraded mode. Reseat the camera "
+                    "ribbon and restart scan_controller."
+                ),
+            }), 503
+        return f(*a, **kw)
+    return wrapper
+
+
 @app.get("/ping")
 def ping():
-    return jsonify({"ok": True, "camera": _CAMERA_OK, "gpio": _GPIO_OK})
+    cameras_up = bool(_state and _state.cameras)
+    return jsonify({
+        "ok": True,
+        "camera": _CAMERA_OK,
+        "gpio": _GPIO_OK,
+        "cameras_up": cameras_up,
+        "degraded": not cameras_up,
+    })
 
 
 def _pick_camera(default: int = 0) -> int:
@@ -464,6 +526,7 @@ def _pick_camera(default: int = 0) -> int:
 
 
 @app.get("/capture")
+@require_camera
 def capture():
     assert _state is not None
     idx = _pick_camera()
@@ -476,6 +539,7 @@ def capture():
 
 
 @app.get("/capture/image")
+@require_camera
 def capture_image():
     assert _state is not None
     idx = _pick_camera()
@@ -488,6 +552,7 @@ def capture_image():
 
 
 @app.get("/capture/both")
+@require_camera
 def capture_both():
     """Capture from all cameras in a single flash and return both JPEGs side-by-side."""
     assert _state is not None
@@ -502,6 +567,7 @@ def capture_both():
 
 
 @app.post("/camera_settings")
+@require_camera
 def camera_settings():
     """Update exposure and gain on all cameras at runtime.
 
@@ -541,6 +607,7 @@ def test_slots_page():
 
 
 @app.get("/test_slots/data")
+@require_camera
 def test_slots_data():
     """JSON payload for /test_slots. Holds the flash for 4 seconds so the
     LEDs are at fully steady brightness, captures both cameras, crops
@@ -674,6 +741,7 @@ def _test_slots_data_locked():
 
 
 @app.get("/test_slots/image/<int:slot_num>")
+@require_camera
 def test_slots_image(slot_num: int):
     """Serve the crop cached by the most recent /test_slots/data call.
 
@@ -871,6 +939,7 @@ def post_presence_threshold():
 
 
 @app.post("/slots/<int:slot_num>/scan")
+@require_camera
 def scan_slot(slot_num: int):
     """Capture one slot (with flash), do brightness-based presence check,
     then run YOLO only if a card is actually there. Intended for the
@@ -942,6 +1011,7 @@ def save_calibration():
 
 
 @app.get("/slots")
+@require_camera
 def slots_state():
     """Capture both cameras, crop each slot, run recognition, return state.
 
@@ -1037,6 +1107,7 @@ def slots_state():
 
 
 @app.get("/slots/<int:slot_num>/image")
+@require_camera
 def slot_image(slot_num: int):
     """Return JPEG of just the specified slot's cropped region."""
     assert _state is not None
@@ -1056,6 +1127,7 @@ def slot_image(slot_num: int):
 
 
 @app.get("/slots/image")
+@require_camera
 def slots_image():
     """Capture both cameras and draw calibrated slot rectangles for verification."""
     assert _state is not None
@@ -1165,6 +1237,7 @@ def train_status():
 
 
 @app.post("/train/capture")
+@require_camera
 def train_capture():
     """Capture a specific slot and save its image as a per-slot template.
 
@@ -1254,6 +1327,7 @@ def train_page():
 
 
 @app.get("/train/validate/<int:slot_num>")
+@require_camera
 def train_validate(slot_num: int):
     """Render a 4x13 grid of all 52 templates for a slot so the user can
     eyeball whether every capture is complete and correct."""
