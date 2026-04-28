@@ -23,7 +23,7 @@ def _announce_poker_hand_bet_first(s):
     """Announce who bets first at a poker-hand game based on best visible
     hand. Skips 7/27 (its own announcer), Challenge games, and all-down
     games (5CD, 3 Toed Pete) where nobody has an up card to compare."""
-    from overhead_test import _get_deal_order
+    from game_meta import _get_deal_order
 
     ge = s.game_engine
     if not ge.current_game:

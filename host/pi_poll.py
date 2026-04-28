@@ -37,7 +37,8 @@ def _simulate_offline_slot_scans(s):
     conf=0.20 — low enough to queue a verify modal on Confirm Cards where
     Rodney can override with the actual card.
     """
-    from overhead_test import _total_downs_in_pattern, _table_log_add
+    from game_meta import _total_downs_in_pattern
+    from verify_queue import _table_log_add
 
     max_slot = _total_downs_in_pattern(s.game_engine)
     if max_slot <= 0:
@@ -59,7 +60,7 @@ def _simulate_offline_slot_scans(s):
 
 def _update_flash_for_deal_state(s):
     """Hold LEDs while a down card is the next expected deal; release otherwise."""
-    from overhead_test import _next_deal_position_type
+    from game_meta import _next_deal_position_type
 
     nxt = _next_deal_position_type(s)
     _pi_flash(s, nxt == "down")
@@ -75,12 +76,8 @@ def _pi_poll_loop(s):
           slot until the verify modal is resolved).
     - Slots that go empty clear their rodney_downs entry too.
     """
-    from overhead_test import (
-        _next_deal_position_type,
-        _promote_next_verify,
-        _table_log_add,
-        _total_downs_in_pattern,
-    )
+    from game_meta import _next_deal_position_type, _total_downs_in_pattern
+    from verify_queue import _promote_next_verify, _table_log_add
 
     log.log("[PI] poll loop started")
     offline_streak = 0

@@ -76,7 +76,7 @@ def _pi_fetch_slots(s):
     import urllib.request
     # Late import avoids a circular dep: overhead_test imports this module,
     # and _total_downs_in_pattern is a small helper that reads game phases.
-    from overhead_test import _total_downs_in_pattern
+    from game_meta import _total_downs_in_pattern
     max_slot = _total_downs_in_pattern(s.game_engine)
     if max_slot <= 0:
         return {"slots": []}

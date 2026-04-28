@@ -82,7 +82,7 @@ def _enqueue_down_card_verifies(s):
     FTQ slot 3 during round 1) would otherwise pop a verify modal for a
     card that doesn't exist yet.
     """
-    from overhead_test import _initial_down_count
+    from game_meta import _initial_down_count
 
     ge = s.game_engine
     initial = _initial_down_count(ge)

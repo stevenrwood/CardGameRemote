@@ -386,7 +386,7 @@ def _start_next_challenge_round(s):
     # live in overhead_test.py. Importing here at runtime keeps the
     # module on the leaf side of the import graph (overhead_test
     # imports challenge, not the other way around).
-    from overhead_test import _guided_replace_loop, _start_guided_deal_range
+    from guided_deal import _guided_replace_loop, _start_guided_deal_range
 
     per_player_cents = _challenge_ante_cents_for(
         s, s.challenge_shuffle_count or 0, s.challenge_round_index or 0,

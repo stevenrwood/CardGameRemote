@@ -54,7 +54,7 @@ def _announce_trailing_done(s):
     one consolidated announcement instead of one stale one after the
     6th-street confirm.
     """
-    from overhead_test import _announce_poker_hand_bet_first
+    from poker_announce import _announce_poker_hand_bet_first
 
     ge = s.game_engine
     if not ge or not ge.current_game:
@@ -81,7 +81,8 @@ def _guided_deal_loop(s):
 
     External code stops the loop by setting s.guided_deal = None.
     """
-    from overhead_test import _stats_bump, _table_log_add
+    from overhead_test import _stats_bump
+    from verify_queue import _table_log_add
     from games.challenge import _begin_challenge_vote, _game_is_challenge
 
     gd = s.guided_deal
@@ -415,7 +416,8 @@ def _guided_replace_loop(s):
     Shared by draw-phase replacement (mode='replace') and the trailing-down
     deal for stud games (mode='trailing'); only the completion transition
     differs."""
-    from overhead_test import _stats_bump, _table_log_add
+    from overhead_test import _stats_bump
+    from verify_queue import _table_log_add
     from games.challenge import _begin_challenge_vote, _game_is_challenge
 
     gd = s.guided_deal

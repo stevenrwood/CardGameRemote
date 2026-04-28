@@ -79,15 +79,16 @@ def _build_table_state(s):
     Rodney sees his hand in full. Every other player is just a down-count
     plus Brio up-card scans. The log is the tail of table_log.
     """
-    # Lazy import: the helpers below live in overhead_test.py and would
-    # cause a circular import if we pulled them at module-load time.
-    # By the time _build_table_state runs, overhead_test is fully
-    # loaded.
-    from overhead_test import (
+    # Lazy imports — challenge.py + game_meta.py would cause a
+    # circular import if pulled at module load. By the time
+    # _build_table_state actually runs, both are fully loaded.
+    from games.challenge import (
         _challenge_can_mark,
         _challenge_required_cards,
-        _game_has_draw_phase,
         _game_is_challenge,
+    )
+    from game_meta import (
+        _game_has_draw_phase,
         _max_draw_for_game,
         _total_card_rounds,
         _total_draw_phases,
