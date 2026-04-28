@@ -70,15 +70,6 @@ if grep -q "YOUR_KEY_HERE" "$CONFIG_FILE" 2>/dev/null; then
     warn "The app will still run for calibration and change detection"
 fi
 
-# --- Set up Python virtual environment ---
-if [ ! -d "$VENV_DIR" ]; then
-    info "Creating Python virtual environment..."
-    python3 -m venv "$VENV_DIR"
-fi
-
-info "Activating virtual environment..."
-source "$VENV_DIR/bin/activate"
-
 # --- Ensure Homebrew is in PATH (Apple Silicon) ---
 if [ -f /opt/homebrew/bin/brew ]; then
     eval "$(/opt/homebrew/bin/brew shellenv)"
@@ -93,11 +84,66 @@ if ! command -v brew &>/dev/null; then
     fi
 fi
 
+# --- Ensure Python 3.10+ ---
+# The codebase uses PEP 604 union syntax (`int | None`) in several
+# places, which requires Python 3.10+. Apple's CommandLineTools
+# python3 is pinned to 3.9 — silently importing under it crashes the
+# speech listener at startup. Detect and upgrade via Homebrew when
+# the active python3 is too old.
+NEED_MIN_MINOR=10
+DESIRED_MINOR=13   # current stable when we need to install fresh
+
+py_minor() {
+    "$1" -c 'import sys; print(sys.version_info.minor)' 2>/dev/null || echo 0
+}
+
+PYTHON_BIN="$(command -v python3 || true)"
+CUR_MINOR=$(py_minor "$PYTHON_BIN")
+
+if [ "$CUR_MINOR" -lt "$NEED_MIN_MINOR" ]; then
+    warn "Detected python3 = 3.${CUR_MINOR}; need 3.${NEED_MIN_MINOR}+"
+    info "Installing python@${DESIRED_MINOR} via Homebrew..."
+    brew install "python@${DESIRED_MINOR}"
+    BREW_PYTHON_PREFIX="$(brew --prefix "python@${DESIRED_MINOR}")"
+    # Homebrew exposes the unversioned `python3` under libexec/bin
+    # so it doesn't conflict with system python on PATH.
+    if [ -x "${BREW_PYTHON_PREFIX}/libexec/bin/python3" ]; then
+        PYTHON_BIN="${BREW_PYTHON_PREFIX}/libexec/bin/python3"
+    elif [ -x "${BREW_PYTHON_PREFIX}/bin/python3.${DESIRED_MINOR}" ]; then
+        PYTHON_BIN="${BREW_PYTHON_PREFIX}/bin/python3.${DESIRED_MINOR}"
+    else
+        error "Could not locate Homebrew python@${DESIRED_MINOR} after install"
+    fi
+    CUR_MINOR=$(py_minor "$PYTHON_BIN")
+fi
+
+info "Using $PYTHON_BIN (Python 3.${CUR_MINOR})"
+
 # --- Install ffmpeg if needed ---
 if ! command -v ffmpeg &>/dev/null; then
     info "Installing ffmpeg..."
     brew install ffmpeg
 fi
+
+# --- Set up Python virtual environment ---
+# If the existing venv was built against an old Python (we just
+# upgraded out from under it), rebuild rather than silently using
+# the stale interpreter.
+if [ -d "$VENV_DIR" ]; then
+    VENV_MINOR=$(py_minor "$VENV_DIR/bin/python")
+    if [ "$VENV_MINOR" -lt "$NEED_MIN_MINOR" ]; then
+        warn "Existing venv at ${VENV_DIR} is Python 3.${VENV_MINOR}; rebuilding with 3.${CUR_MINOR}"
+        rm -rf "$VENV_DIR"
+    fi
+fi
+
+if [ ! -d "$VENV_DIR" ]; then
+    info "Creating Python virtual environment..."
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+fi
+
+info "Activating virtual environment..."
+source "$VENV_DIR/bin/activate"
 
 # --- Install Python dependencies ---
 info "Installing/updating dependencies..."
