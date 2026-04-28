@@ -115,8 +115,8 @@ def _speak_voice_status() -> None:
     Runs on the debounce Timer thread — the global _state may have
     moved on between the voice calls and the timer firing, so always
     re-check phase and re-derive the watched set before speaking."""
-    import overhead_test
-    s = overhead_test._state
+    import runtime_state
+    s = runtime_state._state
     if s is None:
         return
     phase = _derive_voice_phase(s)
@@ -192,8 +192,8 @@ def _process_voice_command(cmd):
     doesn't accidentally skip ahead, and a "Pot is right" during deal
     doesn't short-circuit the scan phase.
     """
-    import overhead_test
-    s = overhead_test._state
+    import runtime_state
+    s = runtime_state._state
     if s is None:
         return
     from speech_recognition_module import (

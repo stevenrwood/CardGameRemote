@@ -4,7 +4,7 @@ the bg_loop background thread, and the optional speech-input listener.
 Stays a thin module: the heavy lifting lives in the topic-named
 modules (brio_watcher, guided_deal, voice_dispatch, etc.). Every
 runtime singleton (the BrioCapture, the ZoneMonitor, the AppState)
-is constructed here and stashed on ``overhead_test._state`` so the
+is constructed here and stashed on ``runtime_state._state`` so the
 re-exports across the codebase keep resolving to a single instance.
 """
 
@@ -42,7 +42,7 @@ from test_modes import (
     _deal_scan_all_zones,
 )
 from voice_dispatch import _process_voice_command
-import overhead_test
+import runtime_state
 
 
 def _stats_bump(state, key, delta=1):
@@ -60,7 +60,7 @@ def bg_loop():
     # killed the thread — recognition stopped, /snapshot froze on the
     # last good frame, and the only way out was a host restart. Wrap
     # the body so the loop survives and logs the problem instead.
-    while not overhead_test._state.quit_flag:
+    while not runtime_state._state.quit_flag:
         try:
             _bg_loop_iter()
         except Exception as e:
@@ -69,7 +69,7 @@ def bg_loop():
 
 
 def _bg_loop_iter():
-    s = overhead_test._state
+    s = runtime_state._state
     frame = s.capture.capture()
     if frame is None:
         time.sleep(1)
@@ -260,7 +260,7 @@ def main():
         # extend this — 7/27 appends "with N or less down below"
         # when the player's running up-card total nears 27.
         default = f"{name}, {card_text}"
-        s = overhead_test._state
+        s = runtime_state._state
         impl = getattr(s, "current_game_impl", None) if s else None
         if impl is None:
             return default
@@ -273,11 +273,11 @@ def main():
     monitor = ZoneMonitor(
         threshold=args.threshold,
         get_zones=lambda: cal.zones,
-        stats_cb=lambda key: _stats_bump(overhead_test._state, key),
+        stats_cb=lambda key: _stats_bump(runtime_state._state, key),
         speech_formatter=_per_card_speech,
     )
-    overhead_test._state = AppState(capture, cal, monitor)
-    overhead_test._state.latest_frame = frame
+    runtime_state._state = AppState(capture, cal, monitor)
+    runtime_state._state.latest_frame = frame
     # Apply any persisted YOLO min-confidence now that the monitor exists.
     _persisted = _load_host_config()
     if "yolo_min_conf" in _persisted:
@@ -286,7 +286,7 @@ def main():
         except (TypeError, ValueError):
             pass
 
-    # Import Handler now that overhead_test._state is populated. The
+    # Import Handler now that runtime_state._state is populated. The
     # http_server module's `from overhead_test import …` block runs
     # at this point and sees a fully-loaded helper surface.
     from http_server import Handler
@@ -301,8 +301,8 @@ def main():
     # Auto-start Pi slot poller so /table populates Rodney's hand without a
     # manual kick. The loop handles Pi-unreachable with a retry delay, so
     # starting it here is safe even if the Pi is off.
-    _pi_poll_start(overhead_test._state)
-    log.log(f"Pi poller started against {overhead_test._state.pi_base_url}")
+    _pi_poll_start(runtime_state._state)
+    log.log(f"Pi poller started against {runtime_state._state.pi_base_url}")
     log.log("Server at http://localhost:8888")
 
     # Start background capture
@@ -325,7 +325,7 @@ def main():
             # covers every game name the dealer might say (including
             # ones Whisper would otherwise hallucinate, like
             # "Hodgecargo" for "High Chicago").
-            game_names = list(overhead_test._state.game_engine.templates.keys())
+            game_names = list(runtime_state._state.game_engine.templates.keys())
             listener = SpeechListener(
                 callback=_process_voice_command,
                 game_names=game_names,
@@ -333,11 +333,11 @@ def main():
                 # the dealer can adjust the floor mid-night via the
                 # Setup modal without restarting the host.
                 min_energy_threshold_fn=(
-                    lambda: overhead_test._state.whisper_min_energy_threshold
+                    lambda: runtime_state._state.whisper_min_energy_threshold
                 ),
             )
             listener.start()
-            overhead_test._state.whisper_listener = listener
+            runtime_state._state.whisper_listener = listener
             log.log("[VOICE] speech-input listener started (--listen)")
         except Exception as e:
             import traceback
@@ -367,7 +367,7 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n  Shutting down...")
-        overhead_test._state.quit_flag = True
+        runtime_state._state.quit_flag = True
 
 
 if __name__ == "__main__":

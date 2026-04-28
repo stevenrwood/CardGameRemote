@@ -4,14 +4,12 @@ HTTP server — BaseHTTPRequestHandler routing for the overhead test app.
 Every endpoint the browser hits is a method or dispatch arm below.
 Handler stays thin: each route either renders a page (loaded from
 ui_templates), proxies a Pi call (pi_scanner), or delegates to a
-game-flow helper still defined in overhead_test.
+game-flow helper imported from one of the topic modules
+(brio_watcher, guided_deal, voice_dispatch, table_state, etc.).
 
-Module load order note: this file is imported from the bottom of
-overhead_test.py, after every helper it names has been defined. That
-is what makes `from overhead_test import ...` below work without a
-circular-import failure. ``_state`` is accessed as ``ot._state`` at
-request time because the module global is reassigned inside main()
-and a `from` import would snapshot the pre-main None.
+``_state`` is accessed as ``runtime_state._state`` at request time
+because the module global is reassigned inside main() and a `from`
+import would snapshot the pre-main None.
 """
 
 import base64
@@ -25,7 +23,7 @@ from threading import Thread
 
 import cv2
 
-import overhead_test as ot
+import runtime_state
 from log_buffer import log
 from speech import speech
 from ui_templates import (
@@ -107,7 +105,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
     def do_GET(self):
-        s = ot._state
+        s = runtime_state._state
         if not s: return self._r(500,"text/plain","Not ready")
         p = self.path.split("?")[0]
         routes = {
@@ -152,7 +150,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._r(404,"text/plain","Not found")
 
     def do_POST(self):
-        s = ot._state
+        s = runtime_state._state
         if not s: return self._r(500,"text/plain","Not ready")
         body = self.rfile.read(int(self.headers.get("Content-Length",0))).decode()
         data = json.loads(body) if body else {}
