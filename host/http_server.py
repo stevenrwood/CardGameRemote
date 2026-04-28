@@ -37,68 +37,79 @@ from pi_scanner import (
 )
 from zone_monitor import TRAINING_DIR
 from games import make_game
-from overhead_test import (
-    PLAYER_NAMES,
-    _announce_poker_hand_bet_first,
-    _build_table_state,
-    _redact_remote_downs,
+from host_constants import CALIBRATION_FILE, PLAYER_NAMES
+from frame_utils import crop_circle, to_jpeg
+from poker_announce import _announce_poker_hand_bet_first
+from table_state import _build_table_state, _parse_card_any, _redact_remote_downs
+from verify_queue import (
+    _enqueue_down_card_verifies,
+    _parse_card_code,
+    _resolve_verify,
+    _table_log_add,
+)
+from pi_poll import (
+    _alert_stuck_cards_at_new_hand,
+    _pi_poll_start,
+    _pi_poll_stop,
+    _update_flash_for_deal_state,
+)
+from guided_deal import (
+    _start_guided_deal,
+    _start_guided_deal_range,
+    _start_guided_replace,
+    _start_guided_trailing_deal,
+    _stop_guided_deal,
+)
+from game_meta import (
+    BETTING_LIMIT_LABELS,
+    FORCED_POT_LIMIT_GAMES,
+    _betting_limit_label,
+    _betting_limit_spoken,
+    _forced_betting_limit,
+    _game_has_draw_phase,
+    _get_deal_order,
+    _initial_down_count,
+    _max_draw_for_game,
+    _skip_inactive_dealer,
+    _speak_ante,
+    _total_draw_phases,
+    _trailing_down_slots,
+)
+from games.challenge import (
+    CHALLENGE_SUBSEQUENT_ANTE_CENTS,
+    MAX_PASSES_PER_ROUND,
+    _begin_challenge_vote,
+    _challenge_ante_cents_for,
+    _challenge_required_cards,
+    _clear_rodney_challenge_leds,
+    _fmt_money,
+    _game_is_challenge,
+    _handle_challenge_winner,
+    _log_and_speak,
+    _resolve_challenge_round,
+    _set_challenge_vote,
+)
+from games.follow_the_queen import (
     _check_follow_the_queen_round,
+    _recompute_follow_the_queen,
+)
+from test_modes import (
     _collect_mode_json,
     _collect_redo,
     _collect_start_deal,
     _collect_start_first,
     _deal_mode_json,
-    _dedup_round_cards_against_seen,
-    _enqueue_down_card_verifies,
-    _game_has_draw_phase,
-    _get_deal_order,
-    _initial_down_count,
-    _max_draw_for_game,
-    _parse_card_any,
-    _parse_card_code,
-    _pi_poll_start,
-    _pi_poll_stop,
-    _alert_stuck_cards_at_new_hand,
     _process_deal_text,
-    _recompute_follow_the_queen,
-    _resolve_verify,
-    _skip_inactive_dealer,
     _start_collect_mode,
     _start_deal_mode,
-    _start_guided_deal,
-    _start_guided_deal_range,
-    _start_guided_replace,
-    _start_guided_trailing_deal,
-    _game_is_challenge,
-    _fmt_money,
-    _log_and_speak,
-    _set_challenge_vote,
-    _resolve_challenge_round,
-    _handle_challenge_winner,
-    _begin_challenge_vote,
-    _challenge_required_cards,
-    _challenge_ante_cents_for,
-    _clear_rodney_challenge_leds,
-    _forced_betting_limit,
-    _betting_limit_label,
-    _betting_limit_spoken,
-    _speak_ante,
-    FORCED_POT_LIMIT_GAMES,
-    BETTING_LIMIT_LABELS,
-    CHALLENGE_SUBSEQUENT_ANTE_CENTS,
-    MAX_PASSES_PER_ROUND,
-    _stats_bump,
     _stop_collect_mode,
     _stop_deal_mode,
-    _stop_guided_deal,
-    _table_log_add,
-    _total_draw_phases,
-    _trailing_down_slots,
-    _update_flash_for_deal_state,
-    crop_circle,
-    to_jpeg,
 )
-from overhead_test import CALIBRATION_FILE
+# These three still live in overhead_test until slice 4 reshouses them.
+from overhead_test import (
+    _dedup_round_cards_against_seen,
+    _stats_bump,
+)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
