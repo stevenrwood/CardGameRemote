@@ -6,9 +6,9 @@ challenge / draw / verify state, the tail of the table log. This
 module owns the shape of that document and the helpers used to
 build it (card parsing, best-hand evaluation).
 
-Cross-module helpers (challenge / game-meta) are imported lazily
-inside ``_build_table_state`` so we can ship this slice without
-breaking the existing import order in ``overhead_test.py``.
+Cross-module helpers (challenge / game-meta) are imported
+lazily inside ``_build_table_state`` so this module stays
+import-cheap and load-order-flexible.
 """
 
 import re

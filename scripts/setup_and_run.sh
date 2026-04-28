@@ -121,4 +121,4 @@ info "Controls: c=calibrate, r=reset baselines, s=snapshot, q=quit"
 echo ""
 
 cd "$REPO_DIR"
-"$VENV_DIR/bin/python" host/overhead_test.py "$@"
+"$VENV_DIR/bin/python" host/main.py "$@"

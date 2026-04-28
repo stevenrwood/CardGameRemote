@@ -5,7 +5,9 @@ Stays a thin module: the heavy lifting lives in the topic-named
 modules (brio_watcher, guided_deal, voice_dispatch, etc.). Every
 runtime singleton (the BrioCapture, the ZoneMonitor, the AppState)
 is constructed here and stashed on ``runtime_state._state`` so the
-re-exports across the codebase keep resolving to a single instance.
+rest of the codebase reaches a single canonical instance.
+
+Run with ``python3 host/main.py`` (or ``scripts/setup_and_run.sh``).
 """
 
 import argparse
@@ -277,9 +279,7 @@ def main():
         except (TypeError, ValueError):
             pass
 
-    # Import Handler now that runtime_state._state is populated. The
-    # http_server module's `from overhead_test import …` block runs
-    # at this point and sees a fully-loaded helper surface.
+    # Import Handler now that runtime_state._state is populated.
     from http_server import Handler
 
     # Start server. ThreadingHTTPServer gives each client connection its own

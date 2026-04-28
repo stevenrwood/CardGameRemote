@@ -7,11 +7,11 @@ verify modal). Also owns the one-shot "10 beeps over 20 s"
 alert that fires at the start of a new hand if the previous
 hand's cards are still seated in the scanner.
 
-Cross-module helpers (``_next_deal_position_type``,
-``_promote_next_verify``, ``_table_log_add``) live in
-overhead_test.py and are imported lazily inside the loop to
-avoid a circular import — by the time the daemon thread first
-runs, overhead_test is fully loaded.
+Cross-module helpers (``_next_deal_position_type`` from
+game_meta, ``_promote_next_verify`` / ``_table_log_add`` from
+verify_queue) are imported lazily inside the loop body to keep
+this module's load-time import surface small and to dodge any
+circular-import risk during boot.
 """
 
 import random
