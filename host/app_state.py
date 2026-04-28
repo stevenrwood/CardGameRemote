@@ -1,21 +1,24 @@
 """AppState — the single big mutable object that ties together
 calibration, the Brio capture thread, the ZoneMonitor, the game
 engine, and the per-hand console / table flow.
-
-Pulled out of overhead_test.py so the module is small enough to
-read at a glance. overhead_test.py still re-exports ``AppState``
-and the module-level ``_state`` slot for backward compatibility
-with http_server.py's ``import overhead_test as ot`` block.
 """
 
 import os
-import re
 from threading import Lock
 
 from game_engine import GameEngine
 from pi_scanner import _load_host_config
 
 from host_constants import DEFAULT_BRIO_SETTLE_S, PLAYER_NAMES
+
+
+def _stats_bump(state, key, delta=1):
+    """Increment a key in state.stats if state exists. Zone monitor uses
+    this to tally YOLO vs Claude recognitions without needing a hard
+    dependency on AppState being initialized yet (first-run safety)."""
+    if state is None or not hasattr(state, "stats"):
+        return
+    state.stats[key] = state.stats.get(key, 0) + delta
 
 
 class AppState:

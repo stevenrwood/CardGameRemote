@@ -105,11 +105,8 @@ from test_modes import (
     _stop_collect_mode,
     _stop_deal_mode,
 )
-# These three still live in overhead_test until slice 4 reshouses them.
-from overhead_test import (
-    _dedup_round_cards_against_seen,
-    _stats_bump,
-)
+from app_state import _stats_bump
+from confirm_helpers import _dedup_round_cards_against_seen
 
 
 class Handler(http.server.BaseHTTPRequestHandler):

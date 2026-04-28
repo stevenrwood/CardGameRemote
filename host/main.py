@@ -30,7 +30,7 @@ from host_constants import (
     DEFAULT_THRESHOLD,
 )
 from calibration import Calibration
-from app_state import AppState
+from app_state import AppState, _stats_bump
 from frame_utils import crop_circle, draw_overlay, to_jpeg
 from brio_watcher import _console_watch_dealer
 from pi_poll import _pi_poll_start
@@ -43,15 +43,6 @@ from test_modes import (
 )
 from voice_dispatch import _process_voice_command
 import runtime_state
-
-
-def _stats_bump(state, key, delta=1):
-    """Increment a key in state.stats if state exists. Zone monitor uses
-    this to tally YOLO vs Claude recognitions without needing a hard
-    dependency on AppState being initialized yet (first-run safety)."""
-    if state is None or not hasattr(state, "stats"):
-        return
-    state.stats[key] = state.stats.get(key, 0) + delta
 
 
 def bg_loop():

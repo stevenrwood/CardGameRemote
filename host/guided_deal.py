@@ -81,7 +81,7 @@ def _guided_deal_loop(s):
 
     External code stops the loop by setting s.guided_deal = None.
     """
-    from overhead_test import _stats_bump
+    from app_state import _stats_bump
     from verify_queue import _table_log_add
     from games.challenge import _begin_challenge_vote, _game_is_challenge
 
@@ -416,7 +416,7 @@ def _guided_replace_loop(s):
     Shared by draw-phase replacement (mode='replace') and the trailing-down
     deal for stud games (mode='trailing'); only the completion transition
     differs."""
-    from overhead_test import _stats_bump
+    from app_state import _stats_bump
     from verify_queue import _table_log_add
     from games.challenge import _begin_challenge_vote, _game_is_challenge
 

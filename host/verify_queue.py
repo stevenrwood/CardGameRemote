@@ -132,7 +132,7 @@ def _resolve_verify(s, card_dict):
     (and by extension, a hint about whether GUIDED_GOOD_CONF is set too
     low or too high).
     """
-    from overhead_test import _stats_bump
+    from app_state import _stats_bump
 
     with s.table_lock:
         pv = s.pending_verify
