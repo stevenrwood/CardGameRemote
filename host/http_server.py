@@ -122,9 +122,11 @@ def _run_after_delay(seconds: float, fn, *args, **kwargs):
 
 
 def _finish_ante_and_start_deal(s):
-    """Transition out of the ANTE phase: speak the full Start-Game
-    announcement, accumulate the Challenge round-1 ante into the
-    pot, and kick off the guided down-card deal.
+    """Transition out of the ANTE phase: accumulate the Challenge
+    round-1 ante into the pot and kick off the guided down-card
+    deal. The dealer + game preamble was already spoken when the
+    deal was clicked, and the ANTE phase itself spoke the ante
+    value, so we don't re-narrate either here.
 
     Idempotent: if the console state has already moved past 'ante'
     (e.g. the dealer voiced an override which raced the timer), this
@@ -142,15 +144,14 @@ def _finish_ante_and_start_deal(s):
     if _game_is_challenge(ge) and (s.challenge_round_index or 0) == 0:
         n_players = len(s.console_active_players)
         s.pot_cents += s.ante_cents * n_players
-    # Single Start-Game announcement — dealer + game + ante +
-    # betting limit + pot.
-    dealer_name = ge.get_dealer().name
-    game_name = ge.current_game.name
-    _log_and_speak(s,
-        f"Dealer is {dealer_name}. Game is {game_name}. "
-        f"{_speak_ante(s.ante_cents)} ante. "
-        f"{_betting_limit_spoken(s.betting_limit)}. "
-        f"Pot is {_fmt_money(s.pot_cents)}.")
+    # Log the finalized hand setup for debugging — no speech, the
+    # dealer/game/ante were each already announced in their own
+    # places (dealer+game at deal click, ante at ANTE-phase entry).
+    log.log(
+        f"[CONSOLE] Hand setup: ante={_speak_ante(s.ante_cents)}, "
+        f"betting={_betting_limit_spoken(s.betting_limit)}, "
+        f"pot={_fmt_money(s.pot_cents)}"
+    )
     # Make sure any stale guided session from a prior hand is gone.
     _stop_guided_deal(s)
     s.console_state = "dealing"
@@ -1316,16 +1317,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # (freeze counters, local flags) now that common state is
                 # reset and the engine knows the current game.
                 s.current_game_impl.on_hand_start(s)
+                # Short start-of-hand announcement — just dealer +
+                # game. Ante is announced separately when the ANTE
+                # phase begins (next), and betting limit / pot
+                # carryover stay in the log only.
+                dealer_name = ge.get_dealer().name
+                _log_and_speak(s,
+                    f"Dealer is {dealer_name}. Game is {game_name}.")
                 # Enter the 5-second voice-override ANTE phase. The
                 # dealer can say "the ante is a quarter / fifty cents
                 # / a dollar / etc." to override the per-template
                 # default before the deal kicks off; "what is the
                 # ante" re-speaks the current value without
                 # advancing. After 5 s of silence (or an explicit
-                # voice override), _finish_ante_and_start_deal runs
-                # the Start-Game announcement, accumulates the
-                # Challenge round-1 ante into the pot, and starts the
-                # guided deal.
+                # voice override), _finish_ante_and_start_deal
+                # accumulates the Challenge round-1 ante into the
+                # pot and starts the guided deal.
                 s.console_state = "ante"
                 # Cancel any stale timer from a previous hand.
                 if s.ante_timer is not None:
