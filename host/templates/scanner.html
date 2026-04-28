@@ -98,7 +98,8 @@ pre{background:#0d1117;padding:8px;border-radius:6px;font-size:.8em;max-height:2
 </div>
 <div id="main">
   <div id="left">
-    <img id="tableimg" src="/snapshot/cropped" style="width:100%;cursor:pointer"
+    <img id="tableimg" src="/snapshot/cropped"
+         style="width:100%;cursor:pointer;display:block;border-top:40px solid #000;border-bottom:40px solid #000"
          onclick="this.src='/snapshot/cropped?'+Date.now()">
     <div style="margin-top:8px">
       <button class="btn-off" style="padding:3px 8px;font-size:.75em" onclick="openLogWindow()">Log Window</button>
@@ -230,20 +231,48 @@ function update(){
     sb+=' | Monitor: '+(d.monitoring?'ON':'OFF');
     document.getElementById('status-bar').textContent=sb;
 
-    // Zones
-    var zh='';
+    // Zones — first build/update the row scaffolding, then preload-and-
+    // swap each thumbnail so a slow image fetch doesn't blank the row.
+    // Use /zone_snap/<name> which returns the most recent recognition
+    // crop (set by the scan pipeline) and falls back to /zone/<name>
+    // (live current view) when no scan has happened yet.
+    var container=document.getElementById('zones');
+    if(!update._zoneInit){
+      var zh='';
+      players.forEach(function(name){
+        zh+='<div class="zone" id="zone-row-'+name+'">'
+          +'<img id="zone-img-'+name+'" alt="'+name+'" '
+          +'style="width:100px;height:100px;object-fit:cover;'
+          +'background:#222;border-radius:4px">'
+          +'<div class="zone-info">'
+          +'<div class="zone-name">'+name+'</div>'
+          +'<div class="zone-state" style="color:#888;font-size:.8em"></div>'
+          +'<div class="zone-card"></div></div></div>';
+      });
+      container.innerHTML=zh;
+      update._zoneInit=true;
+    }
     players.forEach(function(name){
       var z=d.zones[name]||{};
       var st=z.state||'empty';
       var card=z.card||'';
       var bc={'recognized':'#4caf50','processing':'#ff9800'}[st]||'#444';
-      zh+='<div class="zone" style="border-color:'+bc+'">'
-        +'<img src="/zone/'+name+'?'+Date.now()+'" onerror="this.style.display=\\'none\\'">'
-        +'<div class="zone-info"><div class="zone-name">'+name+'</div>'
-        +'<div style="color:#888;font-size:.8em">'+st+'</div>'
-        +'<div class="zone-card" style="color:'+bc+'">'+card+'</div></div></div>';
+      var row=document.getElementById('zone-row-'+name);
+      if(row) row.style.borderColor=bc;
+      var info=row?row.querySelector('.zone-state'):null;
+      if(info) info.textContent=st;
+      var cardEl=row?row.querySelector('.zone-card'):null;
+      if(cardEl){cardEl.textContent=card;cardEl.style.color=bc}
+      // Preload the new thumbnail; only swap once it's actually loaded
+      // so the visible <img> never goes blank between updates.
+      var preload=new Image();
+      preload.dataset && (preload.dataset.name=name);
+      preload.onload=(function(targetName){return function(){
+        var el=document.getElementById('zone-img-'+targetName);
+        if(el) el.src=this.src;
+      }})(name);
+      preload.src='/zone_snap/'+encodeURIComponent(name)+'?'+Date.now();
     });
-    document.getElementById('zones').innerHTML=zh;
 
     // Collect mode panel
     var cp=document.getElementById('collect-panel');
