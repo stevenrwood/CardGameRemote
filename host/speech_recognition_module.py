@@ -257,7 +257,7 @@ class UnrecognizedCommand:
 # Text parsing
 # ---------------------------------------------------------------------------
 
-def _ante_phrase_to_cents(phrase: str) -> int | None:
+def _ante_phrase_to_cents(phrase: str):
     """Map a closed-vocab ante utterance to an integer cents value.
     Returns None on anything not in the allowlist.
 
