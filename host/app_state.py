@@ -190,6 +190,12 @@ class AppState:
         # the dealer only has to change what's actually different.
         self.ante_cents: int = 50          # $0.50 default
         self.betting_limit: str = "1_2"    # "1_2" | "1_all_way" | "pot"
+        # 5-second voice-override window between /api/console/deal and
+        # the actual deal kickoff. ante_timer fires
+        # /api/console/finish_ante if the dealer doesn't override the
+        # default ante by speech in that window. Cancelled when an
+        # AnteCommand arrives or the dealer clicks through manually.
+        self.ante_timer = None
         # None when the current hand isn't a Challenge variant. Otherwise
         # 0/1/2 for rounds 1/2/3. Resets to 0 on reshuffle.
         self.challenge_round_index = None

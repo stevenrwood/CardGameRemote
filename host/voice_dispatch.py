@@ -50,6 +50,8 @@ def _derive_voice_phase(s):
     ge = s.game_engine
     if ge is None or ge.current_game is None:
         return "pre_game"
+    if s.console_state == "ante":
+        return "ante"
     if s.console_state == "dealing":
         if s.console_scan_phase == "scanned":
             return "pre_confirm"
@@ -201,10 +203,33 @@ def _process_voice_command(cmd):
         CorrectionCommand, ConfirmCommand, PotIsRightCommand,
         ScanCardsCommand, FoldCommand,
         PassCommand, GoOutCommand, ChallengeWinnerCommand,
+        AnteCommand, AnteQueryCommand,
         UnrecognizedCommand,
     )
     from games.challenge import _handle_challenge_winner
     phase = _derive_voice_phase(s)
+
+    if isinstance(cmd, AnteQueryCommand):
+        if phase != "ante":
+            log.log(f"[VOICE] Ignoring 'what is the ante' in phase {phase}")
+            return
+        # Re-speak current value, do NOT cancel the 5s timer.
+        log.log(f"[VOICE] Ante query → repeat current value ({s.ante_cents}¢)")
+        _voice_post("/api/console/ante", {"action": "repeat"})
+        return
+
+    if isinstance(cmd, AnteCommand):
+        if phase != "ante":
+            log.log(
+                f"[VOICE] Ignoring 'the ante is {cmd.cents}¢' in phase {phase}"
+            )
+            return
+        log.log(f"[VOICE] Ante set to {cmd.cents}¢; advancing to deal")
+        _voice_post(
+            "/api/console/ante",
+            {"action": "set", "cents": int(cmd.cents)},
+        )
+        return
 
     if isinstance(cmd, GameCommand):
         if phase != "pre_game":

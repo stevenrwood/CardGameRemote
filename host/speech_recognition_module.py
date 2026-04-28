@@ -233,6 +233,22 @@ class ChallengeWinnerCommand:
     raw_text: str
 
 @dataclass
+class AnteCommand:
+    """'the ante is {amount}' — sets the ante amount during the
+    pre-deal ANTE phase. Closed vocabulary so Whisper has a fighting
+    chance: 25 / 50 / 75 cents, "a quarter", "a dollar"."""
+    cents: int
+    raw_text: str
+
+
+@dataclass
+class AnteQueryCommand:
+    """'what is the ante' — re-speak the current ante without
+    advancing to deal. Does not reset the 5-second timer."""
+    raw_text: str
+
+
+@dataclass
 class UnrecognizedCommand:
     raw_text: str
 
@@ -240,6 +256,30 @@ class UnrecognizedCommand:
 # ---------------------------------------------------------------------------
 # Text parsing
 # ---------------------------------------------------------------------------
+
+def _ante_phrase_to_cents(phrase: str) -> int | None:
+    """Map a closed-vocab ante utterance to an integer cents value.
+    Returns None on anything not in the allowlist.
+
+    Closed list (per spec):
+      "a quarter"             → 25
+      "25 / twenty-five cents" → 25
+      "50 / fifty cents"       → 50
+      "75 / seventy-five cents" → 75
+      "a dollar"               → 100
+    """
+    p = re.sub(r"[\s-]+", " ", phrase.strip().lower())
+    p = re.sub(r"\bcents?\b|\bc\b", "", p).strip()
+    if p in ("a quarter", "quarter", "twenty five", "25"):
+        return 25
+    if p in ("fifty", "50"):
+        return 50
+    if p in ("seventy five", "75"):
+        return 75
+    if p in ("a dollar", "dollar", "one dollar", "1 dollar", "100"):
+        return 100
+    return None
+
 
 def _fuzzy_match_game(text):
     # Normalize: lowercase, collapse hyphens / commas / slashes to
@@ -467,6 +507,34 @@ def parse_speech(text):
         text_lower,
     ):
         return [PotIsRightCommand(raw_text=text)]
+
+    # --- Ante commands (only meaningful in the pre-deal ANTE phase;
+    # voice_dispatch gates them by phase, so we just parse here) -------
+
+    # "what is the ante" / "what's the ante" — query, doesn't change
+    # state. Mis-transcriptions: "wat is the ante", "what's the auntie"
+    # (Whisper actually does this for kid-voiced callers).
+    if re.search(
+        r"\b(what\s+is|what\'?s|whats)\s+(the\s+)?(ante|auntie)\b",
+        text_lower,
+    ):
+        return [AnteQueryCommand(raw_text=text)]
+
+    # "the ante is {amount}" — closed vocabulary: 25/50/75 cents,
+    # quarter, dollar. Leading "the" is optional ("ante is fifty
+    # cents" works too).
+    ante_match = re.search(
+        r"\b(?:the\s+)?ante\s+is\s+"
+        r"(a\s+quarter|a\s+dollar|"
+        r"(?:25|50|75|twenty[\s-]?five|fifty|seventy[\s-]?five)"
+        r"\s*(?:cents?|c)?)",
+        text_lower,
+    )
+    if ante_match:
+        phrase = ante_match.group(1)
+        cents = _ante_phrase_to_cents(phrase)
+        if cents is not None:
+            return [AnteCommand(cents=cents, raw_text=text)]
 
     # "Scan cards" / "Scan" / "Scan zones" / "Scam cards" (mishear).
     # Manual trigger for force_scan now that Brio no longer auto-
@@ -915,7 +983,10 @@ class SpeechListener:
             "Same game again. Let's run that back. "
             "Correction: David, 4 of clubs. "
             "Confirmed. Pot is right. Scan cards. "
-            "Bill folds. Steve folds."
+            "Bill folds. Steve folds. "
+            "What is the ante. The ante is twenty-five cents. "
+            "The ante is fifty cents. The ante is seventy-five cents. "
+            "The ante is a quarter. The ante is a dollar."
         )
         _log("Loading Whisper model (first run downloads ~500MB)...")
         try:

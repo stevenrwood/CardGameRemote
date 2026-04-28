@@ -109,6 +109,66 @@ from app_state import _stats_bump
 from confirm_helpers import _dedup_round_cards_against_seen
 
 
+def _run_after_delay(seconds: float, fn, *args, **kwargs):
+    """Sleep then call fn(*args). Used by the ANTE-phase 5-second
+    timer; running in a daemon Thread instead of threading.Timer so
+    `Thread.cancel()` semantics match the rest of the codebase
+    (cancel via a flag, not Timer.cancel)."""
+    time.sleep(seconds)
+    try:
+        fn(*args, **kwargs)
+    except Exception as e:
+        log.log(f"[ANTE] timer callback error: {type(e).__name__}: {e}")
+
+
+def _finish_ante_and_start_deal(s):
+    """Transition out of the ANTE phase: speak the full Start-Game
+    announcement, accumulate the Challenge round-1 ante into the
+    pot, and kick off the guided down-card deal.
+
+    Idempotent: if the console state has already moved past 'ante'
+    (e.g. the dealer voiced an override which raced the timer), this
+    just returns. The ante_timer slot is cleared either way.
+    """
+    s.ante_timer = None
+    if s.console_state != "ante":
+        return
+    ge = s.game_engine
+    if ge is None or ge.current_game is None:
+        return
+    # Challenge round 1 — pot grows by ante × players. Subsequent
+    # rounds use _start_next_challenge_round which has its own
+    # ante-accumulation logic.
+    if _game_is_challenge(ge) and (s.challenge_round_index or 0) == 0:
+        n_players = len(s.console_active_players)
+        s.pot_cents += s.ante_cents * n_players
+    # Single Start-Game announcement — dealer + game + ante +
+    # betting limit + pot.
+    dealer_name = ge.get_dealer().name
+    game_name = ge.current_game.name
+    _log_and_speak(s,
+        f"Dealer is {dealer_name}. Game is {game_name}. "
+        f"{_speak_ante(s.ante_cents)} ante. "
+        f"{_betting_limit_spoken(s.betting_limit)}. "
+        f"Pot is {_fmt_money(s.pot_cents)}.")
+    # Make sure any stale guided session from a prior hand is gone.
+    _stop_guided_deal(s)
+    s.console_state = "dealing"
+    # Use the slot-by-slot guided flow for the leading down cards
+    # in the first deal phase. Brio watching already runs in
+    # parallel (started during the ANTE phase when baselines were
+    # captured) so the up-card watcher doesn't stall on Rodney's
+    # down-card validation.
+    leading_downs = _initial_down_count(ge)
+    will_guide = leading_downs > 0 and not s.pi_offline
+    if will_guide:
+        _start_guided_deal(s, leading_downs)
+    else:
+        _update_flash_for_deal_state(s)
+    with s.table_lock:
+        s.table_state_version += 1
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
@@ -1233,6 +1293,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.table_state_version += 1
                 # Challenge-game per-hand reset. pot_cents is NOT reset —
                 # it accumulates across hands until a 1-out-all-pass award.
+                # Round-1 ante accumulation is deferred to
+                # _finish_ante_and_start_deal because the ante value can
+                # still change during the upcoming voice-override window.
                 challenge_hand = _game_is_challenge(ge)
                 if challenge_hand:
                     s.challenge_round_index = 0
@@ -1247,43 +1310,88 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     # its own slots.
                     _clear_rodney_challenge_leds(s)
                     s.rodney_overflow = []
-                    n_players = len(s.console_active_players)
-                    s.pot_cents += s.ante_cents * n_players
                 else:
                     s.challenge_round_index = None
-                # Single Start-Game announcement — dealer + game + ante
-                # + betting limit + current pot. The pot line runs for
-                # every game so the dealer can cross-check the physical
-                # chip stack against what we've tracked before the deal
-                # starts. "No pot carryover" means this should always
-                # read $0.00 at a fresh hand start; non-zero pot means
-                # the previous hand didn't resolve cleanly.
-                dealer_name = ge.get_dealer().name
-                _log_and_speak(s,
-                    f"Dealer is {dealer_name}. Game is {game_name}. "
-                    f"{_speak_ante(s.ante_cents)} ante. "
-                    f"{_betting_limit_spoken(s.betting_limit)}. "
-                    f"Pot is {_fmt_money(s.pot_cents)}.")
                 # Let the per-game class wire up its own per-hand state
                 # (freeze counters, local flags) now that common state is
                 # reset and the engine knows the current game.
                 s.current_game_impl.on_hand_start(s)
-                # Make sure any stale guided session from a prior hand is gone.
-                _stop_guided_deal(s)
-                s.console_state = "dealing"
-                # Use the slot-by-slot guided flow for the leading down cards
-                # in the first deal phase — 2 for 7 Card Stud, 2 for Hold'em,
-                # 3 for Follow the Queen, 5 for 5 Card Draw. Brio watching
-                # already runs in parallel (started above when baselines were
-                # captured) so the up-card watcher doesn't stall on Rodney's
-                # down-card validation.
-                leading_downs = _initial_down_count(ge)
-                will_guide = leading_downs > 0 and not s.pi_offline
-                if will_guide:
-                    _start_guided_deal(s, leading_downs)
-                else:
-                    _update_flash_for_deal_state(s)
+                # Enter the 5-second voice-override ANTE phase. The
+                # dealer can say "the ante is a quarter / fifty cents
+                # / a dollar / etc." to override the per-template
+                # default before the deal kicks off; "what is the
+                # ante" re-speaks the current value without
+                # advancing. After 5 s of silence (or an explicit
+                # voice override), _finish_ante_and_start_deal runs
+                # the Start-Game announcement, accumulates the
+                # Challenge round-1 ante into the pot, and starts the
+                # guided deal.
+                s.console_state = "ante"
+                # Cancel any stale timer from a previous hand.
+                if s.ante_timer is not None:
+                    try:
+                        s.ante_timer.cancel()
+                    except Exception:
+                        pass
+                    s.ante_timer = None
+                _log_and_speak(s, f"Ante is {_speak_ante(s.ante_cents)}.")
+                t = Thread(
+                    target=_run_after_delay,
+                    args=(5.0, _finish_ante_and_start_deal, s),
+                    daemon=True,
+                )
+                s.ante_timer = t
+                t.start()
+                with s.table_lock:
+                    s.table_state_version += 1
                 self._r(200, "application/json", json.dumps(result))
+
+        elif p == "/api/console/ante":
+            # Voice / button entry point for the ANTE phase. Two
+            # actions:
+            #   action="set"   — finalize ante to `cents` and advance
+            #                    to deal kickoff. Cancels the 5 s
+            #                    timer.
+            #   action="repeat" — re-speak the current ante. Doesn't
+            #                    cancel the timer or change state.
+            if s.console_state != "ante":
+                return self._r(
+                    409, "application/json",
+                    json.dumps({
+                        "ok": False,
+                        "error": f"not in ante phase (state={s.console_state})",
+                    }),
+                )
+            action = str(data.get("action", "")).lower()
+            if action == "repeat":
+                _log_and_speak(s, f"Ante is {_speak_ante(s.ante_cents)}.")
+                self._r(200, "application/json", json.dumps({"ok": True}))
+            elif action == "set":
+                try:
+                    cents = int(data.get("cents", 0))
+                except (TypeError, ValueError):
+                    cents = 0
+                if cents <= 0:
+                    return self._r(
+                        400, "application/json",
+                        json.dumps({"ok": False, "error": "invalid cents"}),
+                    )
+                s.ante_cents = cents
+                # Cancel the auto-advance timer and run the finish
+                # path now.
+                if s.ante_timer is not None:
+                    try:
+                        s.ante_timer.cancel()
+                    except Exception:
+                        pass
+                    s.ante_timer = None
+                _finish_ante_and_start_deal(s)
+                self._r(200, "application/json", json.dumps({"ok": True, "cents": cents}))
+            else:
+                self._r(
+                    400, "application/json",
+                    json.dumps({"ok": False, "error": f"unknown action {action!r}"}),
+                )
 
         elif p == "/api/console/confirm":
             ge = s.game_engine
