@@ -231,17 +231,18 @@ function update(){
     sb+=' | Monitor: '+(d.monitoring?'ON':'OFF');
     document.getElementById('status-bar').textContent=sb;
 
-    // Zones — first build/update the row scaffolding, then preload-and-
-    // swap each thumbnail so a slow image fetch doesn't blank the row.
-    // Use /zone_snap/<name> which returns the most recent recognition
-    // crop (set by the scan pipeline) and falls back to /zone/<name>
-    // (live current view) when no scan has happened yet.
+    // Zones — build the row scaffolding once, then on every poll
+    // update text fields in place and reassign the thumbnail src
+    // directly. /zone_snap/<name> returns the most recent
+    // recognition crop and falls back to /zone/<name> (live) when
+    // no scan has happened yet, so it always has something to show.
     var container=document.getElementById('zones');
     if(!update._zoneInit){
       var zh='';
       players.forEach(function(name){
         zh+='<div class="zone" id="zone-row-'+name+'">'
           +'<img id="zone-img-'+name+'" alt="'+name+'" '
+          +'src="/zone_snap/'+encodeURIComponent(name)+'?'+Date.now()+'" '
           +'style="width:100px;height:100px;object-fit:cover;'
           +'background:#222;border-radius:4px">'
           +'<div class="zone-info">'
@@ -263,15 +264,10 @@ function update(){
       if(info) info.textContent=st;
       var cardEl=row?row.querySelector('.zone-card'):null;
       if(cardEl){cardEl.textContent=card;cardEl.style.color=bc}
-      // Preload the new thumbnail; only swap once it's actually loaded
-      // so the visible <img> never goes blank between updates.
-      var preload=new Image();
-      preload.dataset && (preload.dataset.name=name);
-      preload.onload=(function(targetName){return function(){
-        var el=document.getElementById('zone-img-'+targetName);
-        if(el) el.src=this.src;
-      }})(name);
-      preload.src='/zone_snap/'+encodeURIComponent(name)+'?'+Date.now();
+      var img=document.getElementById('zone-img-'+name);
+      if(img){
+        img.src='/zone_snap/'+encodeURIComponent(name)+'?'+Date.now();
+      }
     });
 
     // Collect mode panel
