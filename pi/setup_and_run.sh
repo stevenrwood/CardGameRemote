@@ -62,6 +62,43 @@ set_conf_key "ap_password" "poker"          "$CONF"
 systemctl restart comitup
 
 # ---------------------------------------------------------------------------
+# 1.5. Python deps — picamera2/cv2/flask/gpiozero from apt, ultralytics
+#      via pip with the CPU-only PyTorch wheel index. Going through the
+#      default PyPI wheel for ultralytics drags in the CUDA-pinned torch
+#      build (nvidia-cudnn-cu12, nvidia-cublas-cu12, etc.) which won't
+#      run on the Pi anyway and chews through ~6 GB of SD card.
+# ---------------------------------------------------------------------------
+
+echo "==> Installing apt-provided Python packages"
+apt-get install -y \
+    python3-opencv \
+    python3-picamera2 \
+    python3-flask \
+    python3-gpiozero \
+    python3-pip \
+    python3-pil
+
+# flask-sock has no apt package; small enough to pull via pip directly.
+echo "==> Installing flask-sock (pip)"
+pip3 install --break-system-packages --quiet flask-sock
+
+# Ultralytics + CPU-only torch. Two steps so torch comes from the
+# pytorch.org CPU wheel index — otherwise pip resolves the manylinux
+# wheel that depends on the nvidia-* CUDA packages and the install
+# fills the SD card before the Pi even boots a card scan.
+if ! python3 -c "import ultralytics" 2>/dev/null; then
+    echo "==> Installing CPU-only PyTorch (pytorch.org wheel index)"
+    pip3 install --break-system-packages --quiet \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch torchvision
+
+    echo "==> Installing ultralytics (PyPI; torch already in place)"
+    pip3 install --break-system-packages --quiet ultralytics
+else
+    echo "==> ultralytics already installed"
+fi
+
+# ---------------------------------------------------------------------------
 # 2. scan_controller systemd service
 # ---------------------------------------------------------------------------
 
