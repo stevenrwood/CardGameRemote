@@ -62,6 +62,71 @@ set_conf_key "ap_password" "poker"          "$CONF"
 systemctl restart comitup
 
 # ---------------------------------------------------------------------------
+# 1.25. Enable both CSI cameras on the CM4 IO Board.
+#
+# The Pi 4/5 auto-detects a single camera via camera_auto_detect=1, but
+# the CM4 IO Board has two CAM connectors and neither is detected
+# automatically — you have to explicitly load the IMX708 (Camera Module 3)
+# overlay for each. Without these three lines, picamera2 returns an empty
+# global_camera_info() and scan_controller stays in degraded mode.
+#
+# Substitute imx477 (HQ) or imx219 (v2) for whichever sensor you have.
+# Idempotent: each line is upserted in /boot/firmware/config.txt under
+# the [all] section. A reboot is required when any line changes;
+# the script tracks that and prints a reminder at the end.
+# ---------------------------------------------------------------------------
+
+# Bookworm/Trixie put it at /boot/firmware; older Pi OS at /boot.
+if [ -f /boot/firmware/config.txt ]; then
+    BOOT_CFG=/boot/firmware/config.txt
+elif [ -f /boot/config.txt ]; then
+    BOOT_CFG=/boot/config.txt
+else
+    echo "WARNING: no boot config.txt found; skipping camera-overlay setup" >&2
+    BOOT_CFG=""
+fi
+
+CAMERA_CFG_CHANGED=0
+
+# Ensure exactly one line `<full_line>` exists in $BOOT_CFG. If a line
+# matching `^<line_prefix>` is already there with a different value,
+# replace it. Otherwise append. Returns nonzero exit on any actual change.
+ensure_config_line() {
+    local file="$1" line_prefix="$2" full_line="$3"
+    if grep -qFx "$full_line" "$file"; then
+        return 1   # already present, no change
+    fi
+    if grep -qE "^${line_prefix}" "$file"; then
+        sed -i -E "s|^${line_prefix}.*|${full_line}|" "$file"
+    else
+        # Append, prefixed by a header comment if first edit.
+        if ! grep -qF "# CardGameRemote: CM4 dual-camera setup" "$file"; then
+            printf "\n# CardGameRemote: CM4 dual-camera setup\n" >> "$file"
+        fi
+        echo "$full_line" >> "$file"
+    fi
+    return 0   # changed
+}
+
+if [ -n "$BOOT_CFG" ]; then
+    echo "==> Ensuring CM4 dual-camera dtoverlay in ${BOOT_CFG}"
+    if ensure_config_line "$BOOT_CFG" "camera_auto_detect=" "camera_auto_detect=0"; then
+        CAMERA_CFG_CHANGED=1
+    fi
+    if ensure_config_line "$BOOT_CFG" "dtoverlay=imx708,cam0" "dtoverlay=imx708,cam0"; then
+        CAMERA_CFG_CHANGED=1
+    fi
+    if ensure_config_line "$BOOT_CFG" "dtoverlay=imx708,cam1" "dtoverlay=imx708,cam1"; then
+        CAMERA_CFG_CHANGED=1
+    fi
+    if [ "$CAMERA_CFG_CHANGED" -eq 1 ]; then
+        echo "    -> ${BOOT_CFG} updated; reboot required for cameras to enumerate"
+    else
+        echo "    -> already configured, no change"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # 1.5. Python deps — picamera2/cv2/flask/gpiozero from apt, ultralytics
 #      via pip with the CPU-only PyTorch wheel index. Going through the
 #      default PyPI wheel for ultralytics drags in the CUDA-pinned torch
@@ -136,3 +201,11 @@ echo
 echo "Check status:"
 echo "   sudo systemctl status scan_controller"
 echo "   sudo journalctl -u scan_controller -f"
+
+if [ "${CAMERA_CFG_CHANGED:-0}" -eq 1 ]; then
+    echo
+    echo "*** REBOOT REQUIRED ***"
+    echo "   ${BOOT_CFG} was updated to enable both CM4 CSI cameras."
+    echo "   Reboot before scan_controller will see the cameras:"
+    echo "   sudo reboot"
+fi
