@@ -458,13 +458,31 @@ class AppState:
         return frames
 
     def recognize(self, frame: np.ndarray) -> dict:
+        """Try YOLO first; fall through to slot-template matching using
+        the union of all loaded slot templates (no slot context). Used
+        by /capture as a single-frame smoke test."""
         t0 = time.time()
-        result = self.detector.identify(frame)
+        result = None
+        source = None
+        if self.yolo is not None and getattr(self.yolo, "available", False):
+            pred = self.yolo.identify(frame)
+            if pred is not None:
+                rank, suit, conf = pred
+                result = type(
+                    "_R", (),
+                    {"rank": rank, "suit": suit, "confidence": conf},
+                )()
+                source = "yolo"
+        if result is None and self.detector.has_any_slot_templates():
+            result = self.detector.identify_slot(frame, slot_num=None)
+            if result is not None:
+                source = "tmpl"
         ms = (time.time() - t0) * 1000
         if result is None:
             return {"recognized": False, "ms": round(ms)}
         return {
             "recognized": True,
+            "source": source,
             "rank": result.rank,
             "suit": result.suit,
             "confidence": round(float(result.confidence), 3),
@@ -503,28 +521,20 @@ def require_camera(f):
 @app.get("/ping")
 def ping():
     cameras_up = bool(_state and _state.cameras)
-    has_corner = False
     has_slots = False
     yolo_up = False
     if _state is not None:
         det = _state.detector
-        try:
-            has_corner = det.has_any_corner_templates()
-        except AttributeError:
-            has_corner = bool(getattr(det, "corner_templates", None))
-        try:
-            has_slots = det.has_any_slot_templates()
-        except AttributeError:
-            pass
+        has_slots = det.has_any_slot_templates()
         yolo_up = bool(_state.yolo and getattr(_state.yolo, "available", False))
-    trained = has_corner or has_slots or yolo_up
+    trained = has_slots or yolo_up
     return jsonify({
         "ok": True,
         "camera": _CAMERA_OK,
         "gpio": _GPIO_OK,
         "cameras_up": cameras_up,
         "trained": trained,
-        "templates": {"corner": has_corner, "slots": has_slots, "yolo": yolo_up},
+        "templates": {"slots": has_slots, "yolo": yolo_up},
         "degraded": (not cameras_up) or (not trained),
     })
 
@@ -698,15 +708,14 @@ def _test_slots_data_locked():
                     rank, suit, conf = pred
                     source = "yolo"
             if rank is None:
-                if _state.detector.has_any_slot_templates():
-                    res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
-                    fallback_source = "tmpl"
-                else:
-                    res = _state.detector.identify(crop)
-                    fallback_source = "corner"
+                # Fall back to per-slot template matching. identify_slot
+                # returns None when no templates exist for the slot, so
+                # we can call it unconditionally — the result stays
+                # "rank is None" and the route reports unrecognized.
+                res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
                 if res is not None:
                     rank, suit, conf = res.rank, res.suit, float(res.confidence)
-                    source = fallback_source
+                    source = "tmpl"
         ms = round((time.time() - t0) * 1000)
         code = f"{rank}{suit[0]}" if rank and suit else "-"
         log.info(
@@ -1085,15 +1094,10 @@ def slots_state():
                 rank, suit, conf = pred
                 source = "yolo"
         if rank is None:
-            if _state.detector.has_any_slot_templates():
-                res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
-                fallback_source = "tmpl"
-            else:
-                res = _state.detector.identify(crop)
-                fallback_source = "corner"
+            res = _state.detector.identify_slot(crop, slot_num=slot["slot"])
             if res is not None:
                 rank, suit, conf = res.rank, res.suit, float(res.confidence)
-                source = fallback_source
+                source = "tmpl"
         ms = round((time.time() - t0) * 1000)
         code = f"{rank}{suit[0]}" if rank and suit else "-"
         log.info(
