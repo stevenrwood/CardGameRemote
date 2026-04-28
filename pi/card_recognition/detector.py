@@ -11,12 +11,16 @@ Usage:
     # result = {"rank": "K", "suit": "hearts", "confidence": 0.95}
 """
 
+import logging
 import os
 import re
 import cv2
 import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 
 # Standard poker card dimensions (ratio used for perspective correction)
@@ -205,6 +209,10 @@ class CardDetector:
         suit = SUIT_ABBREV.get(match.group(2).lower())
         return (rank, suit) if suit else None
 
+    def has_any_corner_templates(self) -> bool:
+        """True if at least one corner template has been loaded."""
+        return bool(self.corner_templates)
+
     def identify(self, image: np.ndarray) -> CardResult | None:
         """
         Identify a playing card in the given image.
@@ -213,12 +221,22 @@ class CardDetector:
             image: BGR image (from cv2.imread or camera capture)
 
         Returns:
-            CardResult with rank, suit, and confidence, or None if no card found.
+            CardResult with rank, suit, and confidence, or None if no
+            card found OR if no corner templates have been trained yet.
+            Returning None on the no-templates case (with a one-time
+            log warning) lets the service stay up on a fresh image —
+            routes that do their own thing on None already cope, and
+            /ping reports detector availability so the user sees why
+            recognition is silent.
         """
         if not self.corner_templates:
-            raise RuntimeError(
-                "No corner templates loaded. Run train.py first."
-            )
+            if not getattr(self, "_warned_no_templates", False):
+                logger.warning(
+                    "identify() called with no corner templates loaded — "
+                    "returning None. Run train.py to capture templates."
+                )
+                self._warned_no_templates = True
+            return None
 
         card_img = self._extract_card(image)
         if card_img is None:
