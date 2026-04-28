@@ -520,7 +520,7 @@ def require_camera(f):
 
 @app.get("/ping")
 def ping():
-    cameras_up = bool(_state and _state.cameras)
+    cameras = bool(_state and _state.cameras)
     has_slots = False
     yolo_up = False
     if _state is not None:
@@ -530,12 +530,11 @@ def ping():
     trained = has_slots or yolo_up
     return jsonify({
         "ok": True,
-        "camera": _CAMERA_OK,
         "gpio": _GPIO_OK,
-        "cameras_up": cameras_up,
+        "cameras": cameras,
         "trained": trained,
         "templates": {"slots": has_slots, "yolo": yolo_up},
-        "degraded": (not cameras_up) or (not trained),
+        "degraded": (not cameras) or (not trained),
     })
 
 
