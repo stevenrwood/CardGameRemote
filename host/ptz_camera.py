@@ -225,9 +225,12 @@ def _clamp(val: int, rng: tuple[int, int] | None) -> int:
 def _set_pan_tilt(pan: int, tilt: int) -> tuple[bool, str]:
     pan = _clamp(pan, _pan_range)
     tilt = _clamp(tilt, _tilt_range)
+    # uvc-util multi-component syntax requires braces, e.g.
+    #   --set=pan-tilt-abs={pan,tilt}
+    # Bare "pan,tilt" gets rejected with "Invalid value for ...".
     rc, _, err = _run([
         "-I", str(_device_index),
-        "-s", f"pan-tilt-abs={pan},{tilt}",
+        "-s", f"pan-tilt-abs={{{pan},{tilt}}}",
     ])
     if rc != 0:
         return False, err.strip() or "uvc-util failed"
