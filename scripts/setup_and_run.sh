@@ -160,8 +160,18 @@ pip install --quiet pyobjc-framework-AVFoundation
 # ultralytics drives YOLO-based up-card recognition from the Brio. Without
 # it, host/zone_monitor.py logs "YOLO load failed" at startup and every
 # up-card falls through to the Claude API path (slower + costs credits).
-# Bundles its own torch/torchvision wheels — first install is ~200MB.
-pip install --quiet ultralytics
+# Idempotent — skip when already importable so re-running the launcher
+# doesn't redo the ~200MB torch+ultralytics install.
+#
+# Unlike the Pi side (which has to force --index-url for CPU-only torch
+# to avoid pulling 6GB of NVIDIA CUDA wheels on Linux), default PyPI
+# torch wheels on macOS are already CPU/MPS — no special index needed.
+if ! python -c "import ultralytics" 2>/dev/null; then
+    info "Installing ultralytics (first run pulls torch + torchvision)..."
+    pip install --quiet ultralytics
+else
+    info "ultralytics already installed"
+fi
 
 # --- Create training data directory ---
 mkdir -p "$REPO_DIR/host/training_data"
