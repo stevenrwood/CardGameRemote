@@ -69,36 +69,94 @@ SLOT_LED_GOOD_CONF = 0.50
 # A card blocks that ceiling light and the slot reads noticeably dimmer.
 # present = mean_brightness < SLOT_PRESENCE_BRIGHTNESS_CEILING.
 # Persisted + runtime-tunable from /test_slots.
-SLOT_PRESENCE_FILE = Path(__file__).parent / "slot_presence.txt"
 DEFAULT_PRESENCE_BRIGHTNESS = 140.0
 # Fixed-focus distance (mm) from camera lens to card cutout, measured along
-# the folded optical path (camera → mirror → card). Single integer in this
-# file; 0 or missing → fall back to Continuous AF. The camera converts mm
-# to dioptres (1000/mm) and sets LensPosition with AfMode=Manual.
-FOCUS_DISTANCE_FILE = Path(__file__).parent / "focus_distance_mm.txt"
+# the folded optical path (camera → mirror → card). 0 → fall back to
+# Continuous AF. The camera converts mm to dioptres (1000/mm) and sets
+# LensPosition with AfMode=Manual.
 DEFAULT_FOCUS_DISTANCE_MM = 210
+DEFAULT_FLASH_BRIGHTNESS = 1.0
+
+# Single JSON file for all runtime-tunable Pi settings. Lives next to
+# scan_controller.py and is gitignored (it's local Pi state). On first
+# run any pre-existing pi/{slot_presence,flash_brightness,focus_distance_mm}.txt
+# values get migrated in once and the .txt files become dead — feel free
+# to rm them after the migration log line appears.
+CONFIG_FILE = Path(__file__).parent / "config.json"
+LEGACY_PRESENCE_FILE = Path(__file__).parent / "slot_presence.txt"
+LEGACY_FLASH_FILE = Path(__file__).parent / "flash_brightness.txt"
+LEGACY_FOCUS_FILE = Path(__file__).parent / "focus_distance_mm.txt"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("scan")
 
 
-def _load_focus_distance_mm() -> int:
-    """Read the manual-focus distance from FOCUS_DISTANCE_FILE. Falls back
-    to DEFAULT_FOCUS_DISTANCE_MM if the file is missing or unparseable.
-    Returns 0 to mean 'use Continuous AF'."""
+_CONFIG_DEFAULTS = {
+    "presence_threshold": DEFAULT_PRESENCE_BRIGHTNESS,
+    "flash_brightness": DEFAULT_FLASH_BRIGHTNESS,
+    "focus_distance_mm": DEFAULT_FOCUS_DISTANCE_MM,
+}
+
+
+def _migrate_legacy_files(cfg: dict) -> bool:
+    """Pull values from the old single-value .txt files into cfg. Returns
+    True if anything was migrated. Caller is responsible for writing cfg
+    back to disk afterwards."""
+    migrated = False
+    legacy = [
+        (LEGACY_PRESENCE_FILE, "presence_threshold", float),
+        (LEGACY_FLASH_FILE, "flash_brightness", float),
+        (LEGACY_FOCUS_FILE, "focus_distance_mm", lambda s: int(float(s))),
+    ]
+    for path, key, cast in legacy:
+        if path.exists():
+            try:
+                cfg[key] = cast(path.read_text().strip())
+                migrated = True
+                log.info(f"Migrated {path.name} → config.json[{key}]={cfg[key]}")
+            except Exception as e:
+                log.warning(f"Could not migrate {path.name}: {e}")
+    return migrated
+
+
+def _load_config() -> dict:
+    """Read pi/config.json, falling back to defaults for missing keys.
+    On first run (no config.json yet), migrate any legacy .txt files
+    and persist the merged result."""
+    cfg = dict(_CONFIG_DEFAULTS)
+    if CONFIG_FILE.exists():
+        try:
+            on_disk = json.loads(CONFIG_FILE.read_text())
+            if isinstance(on_disk, dict):
+                cfg.update(on_disk)
+        except Exception as e:
+            log.warning(f"Could not parse {CONFIG_FILE.name}: {e} — using defaults")
+        return cfg
+    if _migrate_legacy_files(cfg):
+        try:
+            CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n")
+        except Exception as e:
+            log.warning(f"Could not write {CONFIG_FILE.name}: {e}")
+    return cfg
+
+
+def _save_config(updates: dict):
+    """Read-modify-write: load current config, apply updates, write back.
+    Quiet about partial failures — settings that don't persist still
+    take effect for the running process."""
+    cfg = dict(_CONFIG_DEFAULTS)
+    if CONFIG_FILE.exists():
+        try:
+            on_disk = json.loads(CONFIG_FILE.read_text())
+            if isinstance(on_disk, dict):
+                cfg.update(on_disk)
+        except Exception:
+            pass
+    cfg.update(updates)
     try:
-        val = int(float(FOCUS_DISTANCE_FILE.read_text().strip()))
-        if val < 0:
-            return 0
-        return val
-    except FileNotFoundError:
-        return DEFAULT_FOCUS_DISTANCE_MM
+        CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n")
     except Exception as e:
-        log.warning(
-            f"Could not parse {FOCUS_DISTANCE_FILE.name}: {e} — "
-            f"using default {DEFAULT_FOCUS_DISTANCE_MM}mm"
-        )
-        return DEFAULT_FOCUS_DISTANCE_MM
+        log.warning(f"Could not persist config update {updates}: {e}")
 # Flasks default request logger writes one line per POST /slots/N/scan,
 # which the host polls multiple times per second during guided dealing.
 # Quiet it down to warnings so the interesting scan-state-change logs are
@@ -110,18 +168,14 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 class Flash:
     """Flash LED controller with PWM brightness. No-op if GPIO unavailable."""
-    BRIGHTNESS_FILE = Path(__file__).parent / "flash_brightness.txt"
 
     def __init__(self, pin: int):
         self.pin = pin
         self.led = None
         self.held = False
-        # Load persisted brightness or default to full.
-        try:
-            self.brightness = float(self.BRIGHTNESS_FILE.read_text().strip())
-        except Exception:
-            self.brightness = 1.0
-        self.brightness = max(0.0, min(1.0, self.brightness))
+        cfg = _load_config()
+        self.brightness = max(0.0, min(1.0, float(cfg.get(
+            "flash_brightness", DEFAULT_FLASH_BRIGHTNESS))))
         if _GPIO_OK:
             try:
                 self.led = PWMLED(pin)
@@ -134,10 +188,7 @@ class Flash:
         """Set 0.0–1.0 target brightness. Persists across restarts. If the
         LED is currently on (or held), the change takes effect immediately."""
         self.brightness = max(0.0, min(1.0, float(value)))
-        try:
-            self.BRIGHTNESS_FILE.write_text(f"{self.brightness:.3f}\n")
-        except Exception as e:
-            log.warning(f"Could not persist brightness: {e}")
+        _save_config({"flash_brightness": round(self.brightness, 3)})
         if self.led is not None and (self.held or float(self.led.value) > 0):
             self.led.value = self.brightness
 
@@ -252,7 +303,12 @@ class Camera:
         self.available = False
         self.exposure_us = 40000    # 40ms
         self.gain = 2.0             # analogue gain
-        self.focus_distance_mm = _load_focus_distance_mm()
+        cfg = _load_config()
+        try:
+            self.focus_distance_mm = max(0, int(cfg.get(
+                "focus_distance_mm", DEFAULT_FOCUS_DISTANCE_MM)))
+        except (TypeError, ValueError):
+            self.focus_distance_mm = DEFAULT_FOCUS_DISTANCE_MM
         self._lock = Lock()
         if not _CAMERA_OK:
             log.warning(
@@ -431,17 +487,15 @@ class AppState:
 
     def _load_presence_threshold(self) -> float:
         try:
-            return float(SLOT_PRESENCE_FILE.read_text().strip())
-        except Exception:
+            return float(_load_config().get(
+                "presence_threshold", DEFAULT_PRESENCE_BRIGHTNESS))
+        except (TypeError, ValueError):
             return DEFAULT_PRESENCE_BRIGHTNESS
 
     def set_presence_threshold(self, value: float):
         # uint8 mean grayscale is 0-255.
         self.presence_threshold = max(0.0, min(255.0, float(value)))
-        try:
-            SLOT_PRESENCE_FILE.write_text(f"{self.presence_threshold:.1f}\n")
-        except Exception as e:
-            log.warning(f"Could not persist presence threshold: {e}")
+        _save_config({"presence_threshold": round(self.presence_threshold, 1)})
 
     # Minimum time the flash needs to be on before the sensor reads a
     # consistently-exposed frame. LED drivers and the rail take a couple of
