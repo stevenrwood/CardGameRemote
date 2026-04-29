@@ -42,9 +42,15 @@ def _load_host_config() -> dict:
 
 
 def _save_host_config(updates: dict) -> None:
-    """Merge updates into the persisted host config and write back to disk."""
+    """Merge updates into the persisted host config and write back to disk.
+    A value of ``None`` is treated as a delete sentinel — the key is
+    removed from the persisted config rather than stored as JSON null."""
     cfg = _load_host_config()
-    cfg.update(updates)
+    for k, v in updates.items():
+        if v is None:
+            cfg.pop(k, None)
+        else:
+            cfg[k] = v
     try:
         HOST_CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
     except OSError as e:

@@ -187,18 +187,27 @@ def main():
             log.log(f"Camera: '{args.camera_name}' not found in avfoundation devices, "
                     f"falling back to index {camera_index}")
 
-    # OpenCV VideoCapture index can differ from AVFoundations enumeration
-    # when multiple 4K cameras are attached. Persist whatever value the user
-    # passes via --cv-camera-index so the next run picks up the Brio without
-    # having to re-specify it.
+    # OpenCV VideoCapture index can differ from AVFoundation's enumeration
+    # if a different backend is in play, but the PyObjC enumeration in
+    # FrameCapture.find_index_by_name shares ordering with OpenCV's
+    # AVFoundation backend, so the matched index works directly. We only
+    # honor --cv-camera-index when it's explicitly passed this run.
+    # Persisting it across launches caused stale overrides to win after
+    # the camera lineup changed (e.g. plugging in a second 4K device for
+    # Teams) — the saved index would point at the wrong camera, leading
+    # to silent zoom failures and read() retry storms.
     _persisted_cfg = _load_host_config()
     cv_idx = args.cv_camera_index
     if cv_idx is not None:
-        _save_host_config({"cv_camera_index": cv_idx})
-        log.log(f"[CAPTURE] Saved cv_camera_index={cv_idx} to host config")
-    elif "cv_camera_index" in _persisted_cfg:
-        cv_idx = _persisted_cfg["cv_camera_index"]
-        log.log(f"[CAPTURE] Loaded cv_camera_index={cv_idx} from host config")
+        log.log(f"[CAPTURE] Using --cv-camera-index={cv_idx} override")
+    if "cv_camera_index" in _persisted_cfg:
+        # One-shot cleanup: drop the legacy persisted value so future
+        # launches use the live AVF match instead of a frozen index.
+        log.log(
+            f"[CAPTURE] Discarded stale cv_camera_index="
+            f"{_persisted_cfg['cv_camera_index']} from host config"
+        )
+        _save_host_config({"cv_camera_index": None})
 
     # Brio manual focus override — autofocus hunts on the low-contrast
     # felt background, so pin a focus position once and keep it.
