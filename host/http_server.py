@@ -24,6 +24,7 @@ from threading import Thread
 import cv2
 
 import runtime_state
+import ptz_camera
 from log_buffer import log
 from speech import speech
 from ui_templates import (
@@ -191,6 +192,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "/console": self._console_page,
             "/table": self._table_page,
             "/table/state": self._table_state,
+            "/api/table/ptz/status": lambda s: self._r(
+                200, "application/json", json.dumps(ptz_camera.status())),
         }
         if p in routes:
             routes[p](s)
@@ -390,6 +393,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._r(200,"application/json",'{"ok":true}')
 
         # --- Observer table view ---
+
+        elif p == "/api/table/ptz":
+            # PTZ control for the EMEET PIXY (the camera Teams uses).
+            # Body: {"action": "pan_left|pan_right|tilt_up|tilt_down|zoom_in|zoom_out|home",
+            #        "step_deg": float (degrees per pan/tilt click; clamped server-side)}
+            action = str(data.get("action", "")).strip()
+            step_deg = data.get("step_deg", ptz_camera.DEFAULT_STEP_DEG)
+            ok, err = ptz_camera.step(action, step_deg)
+            if ok:
+                self._r(200, "application/json", '{"ok":true}')
+            else:
+                self._r(400, "application/json",
+                        json.dumps({"ok": False, "error": err}))
 
         elif p == "/api/table/pi_start":
             _pi_poll_start(s)

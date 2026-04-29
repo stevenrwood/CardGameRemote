@@ -18,6 +18,27 @@ header button{padding:6px 12px;background:#0f3460;color:#fff;border:none;border-
   cursor:pointer;font-size:.85em}
 header button:hover{background:#1a5a9a}
 
+/* PTZ control panel — top middle of /table, between Bill and David */
+#ptz-panel{display:flex;flex-direction:column;align-items:center;gap:4px;
+  padding:6px 10px;background:#0d2540;border:1px solid #1f3560;border-radius:8px;
+  align-self:flex-start}
+#ptz-panel.unavailable{opacity:.5;pointer-events:none}
+#ptz-panel .ptz-row{display:flex;align-items:center;gap:6px}
+#ptz-panel .ptz-grid{display:grid;grid-template-columns:repeat(3, 30px);
+  grid-template-rows:repeat(3, 26px);gap:3px}
+#ptz-panel button{padding:0;width:30px;height:26px;background:#1a5a9a;
+  color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:.9em;
+  display:flex;align-items:center;justify-content:center}
+#ptz-panel button:hover{background:#2674c2}
+#ptz-panel button:active{background:#0f3460}
+#ptz-panel .ptz-zoom{display:flex;flex-direction:column;gap:3px}
+#ptz-panel .ptz-step{display:flex;align-items:center;gap:4px;color:#8faacc;font-size:.78em}
+#ptz-panel input[type=number]{width:46px;padding:3px 4px;border-radius:4px;
+  border:1px solid #1f3560;background:#0d1b2a;color:#e0e0e0;font-size:.85em;
+  font-family:inherit}
+#ptz-panel .ptz-err{color:#ff8a80;font-size:.72em;max-width:140px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-height:.9em}
+
 /* Table area split into three rows */
 .table{flex:1 1 auto;display:grid;grid-template-rows:1fr 1fr 1fr;gap:8px;padding:10px;min-height:0}
 .row{display:flex;align-items:center;min-height:0}
@@ -93,6 +114,31 @@ header button:hover{background:#1a5a9a}
 <div class="table">
   <div class="row top">
     <div class="hand-box" id="box-Bill"></div>
+    <div id="ptz-panel" class="unavailable" title="Camera PTZ control">
+      <div class="ptz-row">
+        <div class="ptz-grid">
+          <span></span>
+          <button onclick="ptzStep('tilt_up')" title="Tilt up">&#9650;</button>
+          <span></span>
+          <button onclick="ptzStep('pan_left')" title="Pan left">&#9664;</button>
+          <button onclick="ptzStep('home')" title="Home (recenter)">&#9678;</button>
+          <button onclick="ptzStep('pan_right')" title="Pan right">&#9654;</button>
+          <span></span>
+          <button onclick="ptzStep('tilt_down')" title="Tilt down">&#9660;</button>
+          <span></span>
+        </div>
+        <div class="ptz-zoom">
+          <button onclick="ptzStep('zoom_in')" title="Zoom in">+</button>
+          <button onclick="ptzStep('zoom_out')" title="Zoom out">&minus;</button>
+        </div>
+      </div>
+      <div class="ptz-step">
+        <span>step</span>
+        <input id="ptz-step-deg" type="number" min="1" max="20" step="1" value="8">
+        <span>&deg;</span>
+      </div>
+      <div class="ptz-err" id="ptz-err"></div>
+    </div>
     <div class="hand-box" id="box-David"></div>
   </div>
   <div class="row middle">
@@ -169,6 +215,53 @@ function openLogs() {
   if (_logWin && !_logWin.closed) { _logWin.focus(); return; }
   _logWin = window.open('/logview', '_tablelogs', 'width=900,height=500,scrollbars=yes');
 }
+
+var _ptzMaxDeg = 20;
+var _ptzMinDeg = 1;
+
+function ptzInit() {
+  fetch('/api/table/ptz/status').then(function(r){return r.json();}).then(function(st){
+    var panel = document.getElementById('ptz-panel');
+    if (!panel) return;
+    if (st && st.available) {
+      panel.classList.remove('unavailable');
+    } else {
+      panel.classList.add('unavailable');
+      panel.title = 'PTZ unavailable (uvc-util or camera missing)';
+    }
+    if (st && typeof st.min_step_deg === 'number') _ptzMinDeg = st.min_step_deg;
+    if (st && typeof st.max_step_deg === 'number') _ptzMaxDeg = st.max_step_deg;
+    var inp = document.getElementById('ptz-step-deg');
+    if (inp && st) {
+      inp.min = _ptzMinDeg;
+      inp.max = _ptzMaxDeg;
+      if (typeof st.default_step_deg === 'number') inp.value = st.default_step_deg;
+    }
+  }).catch(function(){
+    var panel = document.getElementById('ptz-panel');
+    if (panel) panel.classList.add('unavailable');
+  });
+}
+
+function ptzStep(action) {
+  var inp = document.getElementById('ptz-step-deg');
+  var deg = inp ? parseFloat(inp.value) : 8;
+  if (!(deg >= _ptzMinDeg)) deg = _ptzMinDeg;
+  if (deg > _ptzMaxDeg) { deg = _ptzMaxDeg; if (inp) inp.value = _ptzMaxDeg; }
+  var errEl = document.getElementById('ptz-err');
+  if (errEl) errEl.textContent = '';
+  fetch('/api/table/ptz', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({action: action, step_deg: deg})
+  }).then(function(r){return r.json();}).then(function(d){
+    if (d && !d.ok && errEl) errEl.textContent = d.error || 'PTZ failed';
+  }).catch(function(){
+    if (errEl) errEl.textContent = 'network error';
+  });
+}
+
+window.addEventListener('load', ptzInit);
 
 function cardImgUrl(rank, suit) {
   var r = RANK_FILE[rank];
