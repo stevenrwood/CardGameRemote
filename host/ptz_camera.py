@@ -102,16 +102,6 @@ def _pick_device(devices: list[tuple[int, str]]) -> int | None:
     return None
 
 
-def _parse_range(text: str) -> tuple[int, int] | None:
-    m = re.search(r"(-?\d+)\s*(?:to|\.\.)\s*(-?\d+)", text)
-    if m:
-        return int(m.group(1)), int(m.group(2))
-    nums = re.findall(r"-?\d+", text)
-    if len(nums) >= 2:
-        return int(nums[0]), int(nums[1])
-    return None
-
-
 def _parse_pan_tilt(text: str) -> tuple[int, int] | None:
     nums = re.findall(r"-?\d+", text)
     if len(nums) >= 2:
@@ -119,11 +109,47 @@ def _parse_pan_tilt(text: str) -> tuple[int, int] | None:
     return None
 
 
-def _read_range(ctrl: str) -> tuple[int, int] | None:
-    rc, out, _ = _run(["-I", str(_device_index), "-r", ctrl])
+def _show_control(name: str) -> str | None:
+    """`-S NAME` returns multi-line structure info:
+        zoom-abs {
+          minimum: 100
+          maximum: 400
+          ...
+        }
+    or for multi-component:
+        pan-tilt-abs {
+          minimum: {pan=-648000,tilt=-648000}
+          maximum: {pan=648000,tilt=648000}
+          ...
+        }
+    """
+    rc, out, _ = _run(["-I", str(_device_index), "-S", name])
     if rc != 0:
         return None
-    return _parse_range(out)
+    return out
+
+
+def _parse_show_pair(text: str, key: str) -> tuple[int, int] | None:
+    for line in text.splitlines():
+        ls = line.lstrip()
+        if ls.startswith(key + ":") or ls.startswith(key + " ="):
+            payload = line.split(":", 1)[1] if ":" in line else line
+            m_pan = re.search(r"pan\s*=\s*(-?\d+)", payload)
+            m_tilt = re.search(r"tilt\s*=\s*(-?\d+)", payload)
+            if m_pan and m_tilt:
+                return int(m_pan.group(1)), int(m_tilt.group(1))
+    return None
+
+
+def _parse_show_scalar(text: str, key: str) -> int | None:
+    for line in text.splitlines():
+        ls = line.lstrip()
+        if ls.startswith(key + ":") or ls.startswith(key + " ="):
+            payload = line.split(":", 1)[1] if ":" in line else line
+            m = re.search(r"-?\d+", payload)
+            if m:
+                return int(m.group(0))
+    return None
 
 
 def _resolve():
@@ -150,14 +176,20 @@ def _resolve():
 
     log.log(f"[PTZ] using device {_device_index} (uvc-util at {_binary})")
 
-    rc, out, _ = _run(["-I", str(_device_index), "-r", "pan-tilt-abs"])
-    if rc == 0:
-        nums = re.findall(r"-?\d+", out)
-        if len(nums) >= 4:
-            _pan_range = (int(nums[0]), int(nums[1]))
-            _tilt_range = (int(nums[2]), int(nums[3]))
+    pt = _show_control("pan-tilt-abs")
+    if pt:
+        lo = _parse_show_pair(pt, "minimum")
+        hi = _parse_show_pair(pt, "maximum")
+        if lo and hi:
+            _pan_range = (lo[0], hi[0])
+            _tilt_range = (lo[1], hi[1])
 
-    _zoom_range = _read_range("zoom-abs")
+    zm = _show_control("zoom-abs")
+    if zm:
+        lo_z = _parse_show_scalar(zm, "minimum")
+        hi_z = _parse_show_scalar(zm, "maximum")
+        if lo_z is not None and hi_z is not None:
+            _zoom_range = (lo_z, hi_z)
 
     if _pan_range:
         _pan_home = (_pan_range[0] + _pan_range[1]) // 2
