@@ -157,6 +157,11 @@ pip install --quiet mlx-whisper
 # overhead capture opens the Logitech Brio rather than whichever other 4K
 # webcam OpenCV happens to enumerate first.
 pip install --quiet pyobjc-framework-AVFoundation
+# ultralytics drives YOLO-based up-card recognition from the Brio. Without
+# it, host/zone_monitor.py logs "YOLO load failed" at startup and every
+# up-card falls through to the Claude API path (slower + costs credits).
+# Bundles its own torch/torchvision wheels — first install is ~200MB.
+pip install --quiet ultralytics
 
 # --- Create training data directory ---
 mkdir -p "$REPO_DIR/host/training_data"
