@@ -71,9 +71,34 @@ SLOT_LED_GOOD_CONF = 0.50
 # Persisted + runtime-tunable from /test_slots.
 SLOT_PRESENCE_FILE = Path(__file__).parent / "slot_presence.txt"
 DEFAULT_PRESENCE_BRIGHTNESS = 140.0
+# Fixed-focus distance (mm) from camera lens to card cutout, measured along
+# the folded optical path (camera → mirror → card). Single integer in this
+# file; 0 or missing → fall back to Continuous AF. The camera converts mm
+# to dioptres (1000/mm) and sets LensPosition with AfMode=Manual.
+FOCUS_DISTANCE_FILE = Path(__file__).parent / "focus_distance_mm.txt"
+DEFAULT_FOCUS_DISTANCE_MM = 210
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("scan")
+
+
+def _load_focus_distance_mm() -> int:
+    """Read the manual-focus distance from FOCUS_DISTANCE_FILE. Falls back
+    to DEFAULT_FOCUS_DISTANCE_MM if the file is missing or unparseable.
+    Returns 0 to mean 'use Continuous AF'."""
+    try:
+        val = int(float(FOCUS_DISTANCE_FILE.read_text().strip()))
+        if val < 0:
+            return 0
+        return val
+    except FileNotFoundError:
+        return DEFAULT_FOCUS_DISTANCE_MM
+    except Exception as e:
+        log.warning(
+            f"Could not parse {FOCUS_DISTANCE_FILE.name}: {e} — "
+            f"using default {DEFAULT_FOCUS_DISTANCE_MM}mm"
+        )
+        return DEFAULT_FOCUS_DISTANCE_MM
 # Flasks default request logger writes one line per POST /slots/N/scan,
 # which the host polls multiple times per second during guided dealing.
 # Quiet it down to warnings so the interesting scan-state-change logs are
@@ -227,6 +252,7 @@ class Camera:
         self.available = False
         self.exposure_us = 40000    # 40ms
         self.gain = 2.0             # analogue gain
+        self.focus_distance_mm = _load_focus_distance_mm()
         self._lock = Lock()
         if not _CAMERA_OK:
             log.warning(
@@ -272,7 +298,13 @@ class Camera:
         }
         try:
             from libcamera import controls as libc
-            controls["AfMode"] = libc.AfModeEnum.Continuous
+            if self.focus_distance_mm and self.focus_distance_mm > 0:
+                # Fixed focus: lock the lens at 1000/mm dioptres so every
+                # capture is sharp without paying ~200-400ms for AF.
+                controls["AfMode"] = libc.AfModeEnum.Manual
+                controls["LensPosition"] = 1000.0 / float(self.focus_distance_mm)
+            else:
+                controls["AfMode"] = libc.AfModeEnum.Continuous
         except Exception:
             pass
         self.cam.set_controls(controls)
