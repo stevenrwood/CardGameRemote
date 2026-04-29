@@ -372,6 +372,14 @@ class Camera:
             self.gain = float(gain)
         self._apply_controls()
 
+    def set_focus_distance(self, mm: int):
+        """Switch fixed-focus distance at runtime. Pass 0 to revert to
+        Continuous AF. Caller is responsible for persisting via
+        _save_config — this only updates the live camera."""
+        self.focus_distance_mm = max(0, int(mm))
+        if self.cam is not None:
+            self._apply_controls()
+
     def capture(self) -> np.ndarray:
         with self._lock:
             frame_rgb = self.cam.capture_array()
@@ -1321,6 +1329,34 @@ def flash_brightness_get():
     return jsonify({"brightness": _state.flash.brightness})
 
 
+@app.post("/focus_distance")
+def set_focus_distance():
+    """Apply a new fixed-focus distance (mm) to every camera and persist.
+    Body: {"value": int_mm}. value=0 reverts to Continuous AF.
+    Used by the calibration UI's focus-tuning input field."""
+    assert _state is not None
+    body = request.get_json(silent=True) or {}
+    v = body.get("value")
+    try:
+        mm = max(0, int(v))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "value must be an integer"}), 400
+    for cam in _state.cameras.values():
+        cam.set_focus_distance(mm)
+    _save_config({"focus_distance_mm": mm})
+    log.info(f"Focus distance set to {mm}mm")
+    return jsonify({"ok": True, "focus_distance_mm": mm})
+
+
+@app.get("/focus_distance")
+def get_focus_distance():
+    assert _state is not None
+    cams = list(_state.cameras.values())
+    mm = cams[0].focus_distance_mm if cams else _load_config().get(
+        "focus_distance_mm", DEFAULT_FOCUS_DISTANCE_MM)
+    return jsonify({"focus_distance_mm": mm})
+
+
 # Backward-compat aliases for the old /train/flash/* paths
 app.add_url_rule("/train/flash/hold", view_func=flash_hold, methods=["POST"])
 app.add_url_rule("/train/flash/release", view_func=flash_release, methods=["POST"])
@@ -2102,8 +2138,14 @@ canvas{border:1px solid #444;cursor:crosshair;display:block;max-width:100%;heigh
 <div>
   <button onclick="refreshCaptures()">Refresh Images</button>
   <button class="btn-green" onclick="saveSlots()">Save Calibration</button>
-  <button onclick="undoLastSlot()" title="Undo last rectangle (⌥Z)">Undo</button>
+  <button onclick="undoLastSlot()" title="Undo last rectangle (⌃Z / ⌥Z)">Undo</button>
   <button class="btn-red" onclick="clearSlots()">Clear All</button>
+</div>
+<div style="margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+  <label for="focus-mm" style="color:#aaa;font-size:.9em">Focus distance (mm):</label>
+  <input id="focus-mm" type="number" min="0" max="2000" step="1" style="width:80px;padding:6px;border-radius:6px;border:1px solid #333;background:#0d1b2a;color:#e0e0e0">
+  <button onclick="applyFocus()">Apply &amp; Refresh</button>
+  <span id="focus-status" style="color:#8faacc;font-size:.85em"></span>
 </div>
 <p style="font-size:.9em;color:#aaa">
   Currently marking slot <b id="next-slot">1</b> of 5.
@@ -2313,12 +2355,51 @@ function undoLastSlot() {
   [0, 1].forEach(redrawCam);
 }
 
-// Option+Z (Alt+Z) anywhere on the page undoes the last rectangle.
+// Ctrl+Z / Cmd+Z / Alt+Z anywhere on the page undoes the last rectangle.
+// (Ctrl is the new addition; Alt is preserved for muscle memory.)
 window.addEventListener('keydown', function(ev) {
-  if (ev.altKey && (ev.key === 'z' || ev.key === 'Z' ||
-                    ev.code === 'KeyZ' || ev.code === 'Ω')) {
+  // Skip when the focus is in a text input so typing 'z' in the
+  // focus-distance field doesn't pop a slot.
+  var t = ev.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
+    return;
+  }
+  var modZ = (ev.ctrlKey || ev.metaKey || ev.altKey) &&
+             (ev.key === 'z' || ev.key === 'Z' ||
+              ev.code === 'KeyZ' || ev.code === 'Ω');
+  if (modZ) {
     ev.preventDefault();
     undoLastSlot();
+  }
+});
+
+function applyFocus() {
+  var mm = parseInt(document.getElementById('focus-mm').value, 10);
+  if (!(mm >= 0)) {
+    document.getElementById('focus-status').textContent = 'enter a non-negative integer';
+    return;
+  }
+  document.getElementById('focus-status').textContent = 'applying ' + mm + 'mm…';
+  fetch('/focus_distance', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({value: mm})
+  }).then(function(r){return r.json()}).then(function(d) {
+    if (d && d.ok) {
+      document.getElementById('focus-status').textContent =
+        'set to ' + d.focus_distance_mm + 'mm — refreshing…';
+      refreshCaptures();
+    } else {
+      document.getElementById('focus-status').textContent =
+        'error: ' + (d && d.error || 'unknown');
+    }
+  });
+}
+
+// Pre-fill the input with the current focus distance.
+fetch('/focus_distance').then(function(r){return r.json()}).then(function(d) {
+  if (d && typeof d.focus_distance_mm === 'number') {
+    document.getElementById('focus-mm').value = d.focus_distance_mm;
   }
 });
 
