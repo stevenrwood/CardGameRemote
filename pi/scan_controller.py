@@ -632,16 +632,25 @@ def ping():
     })
 
 
-def _pick_camera(default: int = 0) -> int:
-    """Read ?camera=N from query string, default to first available camera."""
+def _pick_camera(default: int = 0) -> int | None:
+    """Read ?camera=N from query string, default to first available camera.
+    Returns None if an explicit ?camera=N was passed but that camera isn't
+    registered — caller is responsible for surfacing a 404 instead of
+    silently returning a different camera's frame (which masks loose
+    ribbon cables / disabled dtoverlay lines as 'both cams identical').
+    No ?camera= argument still falls through to the first available."""
     assert _state is not None
+    raw = request.args.get("camera")
+    if raw is None:
+        if default in _state.cameras:
+            return default
+        return next(iter(_state.cameras), None)
     try:
-        idx = int(request.args.get("camera", default))
+        idx = int(raw)
     except ValueError:
-        idx = default
+        return None
     if idx not in _state.cameras:
-        # Fall back to any available camera
-        return next(iter(_state.cameras))
+        return None
     return idx
 
 
@@ -650,6 +659,9 @@ def _pick_camera(default: int = 0) -> int:
 def capture():
     assert _state is not None
     idx = _pick_camera()
+    if idx is None:
+        return jsonify({"error": "requested camera not available",
+                        "available": sorted(_state.cameras.keys())}), 404
     frame = _state.capture_with_flash(idx)
     result = _state.recognize(frame)
     result["size"] = f"{frame.shape[1]}x{frame.shape[0]}"
@@ -663,6 +675,9 @@ def capture():
 def capture_image():
     assert _state is not None
     idx = _pick_camera()
+    if idx is None:
+        return ("requested camera not available "
+                f"(have {sorted(_state.cameras.keys())})", 404)
     focus = request.args.get("focus") in ("1", "true", "yes")
     frame = _state.capture_with_flash(idx, focus=focus)
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
