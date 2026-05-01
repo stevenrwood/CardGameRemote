@@ -57,7 +57,8 @@ GAME_NAMES = [
     "High, Low, High",
     "Low, High, Low",
     "Low, Low, High",
-    "7 27",
+    "7/27",
+    "7/27 (one up)",
     "Texas Hold'em",
 ]
 
@@ -126,9 +127,18 @@ GAME_ALIASES = {
     "low low high challenge": "Low, Low, High",
     "low low high": "Low, Low, High",
     "low, low, high": "Low, Low, High",
-    "seven twenty-seven": "7 27",
-    "seven twenty seven": "7 27",
-    "7 27": "7 27",
+    # 7/27: Whisper transcribes "seven twenty seven" or "727". The
+    # game-engine template name is "7/27" (with slash), so the alias
+    # values must include the slash or /api/console/deal returns 400.
+    "seven twenty-seven": "7/27",
+    "seven twenty seven": "7/27",
+    "7 27": "7/27",
+    "7/27": "7/27",
+    "727": "7/27",
+    "seven twenty seven one up": "7/27 (one up)",
+    "seven twenty-seven one up": "7/27 (one up)",
+    "7 27 one up": "7/27 (one up)",
+    "7/27 one up": "7/27 (one up)",
     "texas hold'em": "Texas Hold'em",
     "texas holdem": "Texas Hold'em",
     "texas hold them": "Texas Hold'em",
@@ -289,7 +299,11 @@ def _fuzzy_match_game(text):
     # low-high".
     text_lower = re.sub(r"[-,/_]+", " ", text.lower()).strip()
     text_lower = re.sub(r"\s+", " ", text_lower)
-    for alias, canonical in GAME_ALIASES.items():
+    # Match longest aliases first so "seven twenty seven one up" maps
+    # to "7/27 (one up)" before the shorter "seven twenty seven"
+    # entry consumes it.
+    for alias, canonical in sorted(
+            GAME_ALIASES.items(), key=lambda kv: -len(kv[0])):
         if alias in text_lower:
             return canonical, 1.0
     best_score = 0.0
