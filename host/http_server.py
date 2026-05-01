@@ -1422,6 +1422,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/confirm":
             ge = s.game_engine
+            # Pre-deal states: no cards to confirm yet. A stale
+            # "Confirm Cards" button visible from a prior hand's
+            # betting state used to be clickable for the brief
+            # window between Deal and the next /api/console/state
+            # poll, prematurely advancing console_state past "ante"
+            # before _finish_ante_and_start_deal could fire — which
+            # silently skipped the guided deal (no LEDs, no scan).
+            if s.console_state in ("ante", "idle", "hand_over"):
+                self._r(400, "application/json", json.dumps({
+                    "ok": False,
+                    "error": f"confirm rejected in {s.console_state} state",
+                }))
+                return
             # Idempotency guard: after confirm processes a round, scan
             # phase transitions to "confirmed" (mid-hand) or "idle"
             # (last up round). A second click before the next scan
@@ -1536,6 +1549,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif p == "/api/console/next_round":
             ge = s.game_engine
+            # Pre-deal states: nothing to advance. Same race as
+            # /api/console/confirm above — a stale "Pot is right"
+            # button left clickable from a prior hand could fire
+            # here during the ANTE phase and skip the guided deal.
+            if s.console_state in ("ante", "idle", "hand_over"):
+                return self._r(400, "application/json", json.dumps({
+                    "ok": False,
+                    "error": f"next_round rejected in {s.console_state} state",
+                }))
             # Per-game "should this hand end now?" hook. For 7/27 this
             # catches the "all remaining players are frozen" case
             # without waiting for a phantom hit round; for everyone
