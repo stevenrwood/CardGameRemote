@@ -246,6 +246,17 @@ class SevenTwentySevenGame(BaseGame):
         ordered = sorted(set(values), reverse=True)
         tail = (_speak_value(ordered[0]) if len(ordered) == 1
                 else _format_values_phrase(ordered))
+        # Detect when the high (Aces=11) interpretation busted: if the
+        # unfiltered set has values above 27 that the cap dropped, the
+        # surviving "best" is forced to be Ace-low. Speech should make
+        # that clear so the table doesn't hear a 21.5 announced as
+        # "high" when the player is actually playing Ace low.
+        unfiltered = compute_values(cards, max_total=float("inf"))
+        if unfiltered and max(unfiltered) > 27:
+            return ScoreResult(
+                value=best,
+                speech=f"your bet, ace low, total of {tail}",
+            )
         return ScoreResult(
             value=best,
             speech=f"your bet with high of {tail}",

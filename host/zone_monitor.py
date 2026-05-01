@@ -197,7 +197,8 @@ class ZoneMonitor:
                 self.pending[name] = True
             Thread(target=self._recognize_batch, args=(changed,), daemon=True).start()
 
-    def _recognize_batch(self, zone_crops, force_claude_names=None):
+    def _recognize_batch(self, zone_crops, force_claude_names=None,
+                         silent=False):
         """Run YOLO on all zones, then batch Claude call for low-confidence ones.
 
         ``force_claude_names`` — optional iterable of zone names that must
@@ -205,7 +206,15 @@ class ZoneMonitor:
         Used for zones that already came back empty earlier in this round;
         a subsequent YOLO hit on those zones is almost always a
         hallucination (phantom 2 of Spades on an empty zone), so Claude's
-        verdict wins before we commit a card that never existed."""
+        verdict wins before we commit a card that never existed.
+
+        ``silent`` — when True, suppress per-card speech (no
+        "{name}, {card}" announcements). Used by the 7/27 hit-round
+        per-zone auto-scan that fires a provisional reading the
+        moment a zone stabilizes — speaking every provisional read
+        across 5 players × N hit rounds would be unbearable, so the
+        dealer just sees the cards populate in "Up cards seen" and
+        Confirm Cards finalizes them."""
         force_claude = set(force_claude_names or ())
         need_claude = {}  # name -> (crop, yolo_result, yolo_conf)
 
@@ -246,7 +255,8 @@ class ZoneMonitor:
                         self._stats_cb("yolo_right")
                         log.log(f"[{name}] RECOGNIZED: {result} (total {total_ms:.0f}ms)")
                         self._save(name, crop, result)
-                        self._announce_card(name, result)
+                        if not silent:
+                            self._announce_card(name, result)
                     else:
                         if (presence_low and result != "No card"
                                 and conf >= self.yolo_min_conf):
@@ -274,7 +284,7 @@ class ZoneMonitor:
 
         # Phase 2: Batch Claude call for all low-confidence zones
         if need_claude and self.client:
-            self._recognize_claude_batch(need_claude)
+            self._recognize_claude_batch(need_claude, silent=silent)
         else:
             # No Claude available — mark remaining as empty
             for name, (crop, details) in need_claude.items():
@@ -288,15 +298,18 @@ class ZoneMonitor:
                     self._stats_cb("yolo_right")
                     log.log(f"[{name}] RECOGNIZED (low conf, no Claude): {yolo_result}")
                     self._save(name, crop, yolo_result)
-                    self._announce_card(name, yolo_result)
+                    if not silent:
+                        self._announce_card(name, yolo_result)
                 else:
                     self.zone_state[name] = "empty"
                 self.recognition_details[name] = details
                 self.recognition_crops[name] = crop
                 self.pending[name] = False
 
-    def _recognize_claude_batch(self, need_claude):
-        """Single Claude API call with all zone images."""
+    def _recognize_claude_batch(self, need_claude, silent=False):
+        """Single Claude API call with all zone images. ``silent``
+        suppresses per-card speech (provisional 7/27 hit-round
+        scans use this so the table doesn't hear every read)."""
         names = list(need_claude.keys())
         log.log(f"[CLAUDE] Batch call for {len(names)} zones: {', '.join(names)}")
 
@@ -379,7 +392,8 @@ class ZoneMonitor:
                             self.zone_state[name] = "recognized"
                             log.log(f"[{name}] RECOGNIZED (Claude): {result}")
                             self._save(name, crop, result)
-                            self._announce_card(name, result)
+                            if not silent:
+                                self._announce_card(name, result)
                         else:
                             details["claude"] = "No card"
                             self.zone_state[name] = "empty"
@@ -410,7 +424,8 @@ class ZoneMonitor:
                         self.zone_state[name] = "recognized"
                         log.log(f"[{name}] RECOGNIZED (YOLO fallback): {yolo_result}")
                         self._save(name, crop, yolo_result)
-                        self._announce_card(name, yolo_result)
+                        if not silent:
+                            self._announce_card(name, yolo_result)
                     else:
                         self.zone_state[name] = "empty"
                     self.recognition_details[name] = details
@@ -433,7 +448,8 @@ class ZoneMonitor:
                     self.zone_state[name] = "recognized"
                     log.log(f"[{name}] RECOGNIZED (YOLO, Claude failed): {yolo_result}")
                     self._save(name, crop, yolo_result)
-                    self._announce_card(name, yolo_result)
+                    if not silent:
+                        self._announce_card(name, yolo_result)
                 else:
                     self.zone_state[name] = "empty"
                 self.recognition_details[name] = details

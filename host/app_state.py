@@ -53,6 +53,11 @@ class AppState:
         self._missing_speech_count = {}
         self._empty_scan_count = {}
         self._zone_prev_pending = {}
+        # During HIT_ROUND (7/27): per-zone "this round's auto-scan
+        # already fired" tracker — name -> int (the up-round number it
+        # was scanned for). Re-armed on Next Round so each round only
+        # auto-scans each zone once. Stays empty for non-hit games.
+        self._hit_zone_scanned: dict[str, int] = {}
         # Name of the most recently-dealt game this session. Used by the
         # "Same game again" / "Let's run that back" voice command to
         # repeat the previous hand without having to say its name again.

@@ -882,6 +882,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # the dealer can't commit up cards mid-deal for the
                 # leading-down guided flow in stud games.
                 action_enabled = has_up and s.guided_deal is None
+            elif s.console_state == "hit_round":
+                phase_label = "Hit or freeze"
+                action_label = "Confirm Cards"
+                action_endpoint = "/api/console/confirm"
+                action_enabled = True
             elif s.console_state == "betting":
                 rnd = s.console_betting_round or max(1, s.console_up_round)
                 phase_label = f"Betting (round {rnd})"
@@ -1649,7 +1654,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     s.console_state = "hand_over"
                 else:
                     log.log(f"[CONSOLE] Baselines recaptured, watching {ge.get_dealer().name}'s zone")
-                    s.console_state = "dealing"
+                    # 7/27 hit rounds: console_state = "hit_round" so the
+                    # banner reads "Hit or freeze" instead of "Dealing".
+                    # Detected by checking whether the game has any
+                    # HIT_ROUND phase — only 7/27 variants do today.
+                    is_hit_round = bool(
+                        ge.current_game and any(
+                            ph.type.value == "hit_round"
+                            for ph in ge.current_game.phases
+                        )
+                    )
+                    s.console_state = "hit_round" if is_hit_round else "dealing"
+                    s._hit_zone_scanned = {}
             log.log(f"[CONSOLE] Next Round — up round {s.console_up_round}/{s.console_total_up_rounds}")
             # Also queue any pending down-card scans so games with a final
             # down (no Confirm Cards) still get a chance to verify.

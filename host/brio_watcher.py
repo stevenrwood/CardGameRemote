@@ -120,6 +120,71 @@ def _all_active_zones_present(s, frame, watched, dealer_name):
     return True
 
 
+def _hit_round_per_zone_auto_scan(s, frame, watched, dealer_name):
+    """Per-zone auto-scan for HIT_ROUND (7/27 hit rounds).
+
+    Each watched zone is monitored independently; when a zone shows
+    ZONE_STABLE_FRAMES consecutive stable, non-empty frames after
+    the round started, a single-zone scan fires and the result
+    populates ``monitor.last_card`` silently (no per-card speech).
+    The dealer sees a provisional reading appear in "Up cards seen"
+    while still going around the table, and most rounds end with
+    Confirm Cards just rubber-stamping the auto-discovered cards.
+
+    Each zone gets at most one auto-scan per up-round (tracked in
+    ``s._hit_zone_scanned``). ``watched`` is already filtered to
+    non-folded, non-frozen players via the game's ``zones_to_scan``
+    so frozen zones never re-scan their stale card.
+    """
+    monitor = s.monitor
+    current_round = s.console_up_round
+    for nm in watched:
+        if s._hit_zone_scanned.get(nm) == current_round:
+            continue
+        if monitor.zone_state.get(nm) in (
+                "recognized", "corrected", "processing"):
+            continue
+        zone = next((z for z in s.cal.zones if z["name"] == nm), None)
+        if zone is None:
+            continue
+        baseline = monitor.baselines.get(nm)
+        crop = monitor._crop(frame, zone)
+        if (baseline is None or crop is None
+                or crop.size == 0 or crop.shape != baseline.shape):
+            continue
+        fr, _db = _zone_presence_metric(crop, baseline)
+        if fr < ZONE_PRESENCE_FRACTION:
+            monitor.stable_count[nm] = 0
+            monitor.prev_crop[nm] = None
+            continue
+        prev = monitor.prev_crop.get(nm)
+        monitor.prev_crop[nm] = crop.copy()
+        if prev is None or prev.shape != crop.shape:
+            monitor.stable_count[nm] = 1
+            continue
+        diff_prev = float(np.mean(cv2.absdiff(crop, prev)))
+        if diff_prev > ZONE_STABILITY_THRESHOLD:
+            monitor.stable_count[nm] = 1
+            continue
+        monitor.stable_count[nm] = (
+            monitor.stable_count.get(nm, 0) + 1
+        )
+        if monitor.stable_count[nm] < ZONE_STABLE_FRAMES:
+            continue
+        log.log(
+            f"[CONSOLE] {nm}'s zone stable in hit round — "
+            f"silent auto-scan"
+        )
+        s._hit_zone_scanned[nm] = current_round
+        monitor.pending[nm] = True
+        zone_crops = {nm: crop.copy()}
+        Thread(
+            target=monitor._recognize_batch,
+            kwargs={"zone_crops": zone_crops, "silent": True},
+            daemon=True,
+        ).start()
+
+
 def _auto_scan_all_zones(s, frame, watched):
     """Internal helper: fire the same batch scan that
     /api/console/force_scan does. Called when the dealer's zone
@@ -197,6 +262,16 @@ def _console_watch_dealer(s, frame):
         return
 
     monitor = s.monitor
+
+    # 7/27 hit rounds get a per-zone auto-scan instead of the dealer-
+    # zone batch trigger. Each player's zone is watched independently
+    # and scans the moment that zone stabilizes after a card lands —
+    # no waiting on the dealer to fill last (they may not place
+    # anything if they freeze). Provisional results appear silently
+    # in "Up cards seen" so the dealer can just hit Confirm at the
+    # end without ever clicking Scan / Rescan.
+    if s.console_state == "hit_round" and phase == "watching":
+        _hit_round_per_zone_auto_scan(s, frame, watched, dealer_name)
 
     # Auto-trigger: dealer's zone has been stable for the threshold
     # frame count → batch-scan everything. One-shot per round (the
