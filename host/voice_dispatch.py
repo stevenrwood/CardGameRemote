@@ -69,6 +69,7 @@ def _voice_post(path, body=None):
     """Internal-HTTP helper so voice commands go through the same
     endpoints the buttons do — guarantees identical side effects
     (state transitions, announce, stats, table version bumps)."""
+    import urllib.error
     import urllib.request
     url = f"http://localhost:8888{path}"
     data = json.dumps(body or {}).encode()
@@ -79,6 +80,20 @@ def _voice_post(path, body=None):
     try:
         urllib.request.urlopen(req, timeout=3).read()
         return True
+    except urllib.error.HTTPError as e:
+        # Surface the server's JSON {"error": "..."} body — without it
+        # the log only shows the generic "HTTP Error 400: Bad Request"
+        # phrase, hiding which validation actually rejected the call.
+        try:
+            body_bytes = e.read()
+            body_text = body_bytes.decode(errors="replace").strip()
+        except Exception:
+            body_text = ""
+        log.log(
+            f"[VOICE] POST {path} failed: HTTPError {e.code} {e.reason}"
+            + (f" — {body_text}" if body_text else "")
+        )
+        return False
     except Exception as e:
         log.log(f"[VOICE] POST {path} failed: {type(e).__name__}: {e}")
         return False
