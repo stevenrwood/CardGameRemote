@@ -208,8 +208,7 @@ def _build_table_state(s):
     # Open-ended games (e.g. 7/27) report total=0 so the UI drops "of N".
     if ge.current_game is not None:
         has_hit_round = any(
-            ph.type.value == "hit_round" and ph.card_type == "up"
-            for ph in ge.current_game.phases
+            ph.type.value == "hit_round" for ph in ge.current_game.phases
         )
         if has_hit_round:
             total_rounds = 0

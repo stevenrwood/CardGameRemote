@@ -27,7 +27,6 @@ class Phase:
     max_draw: int = 0
     select_cards: int = 0
     label: str = ""
-    card_type: str = "up"  # for hit_round
 
 
 @dataclass
@@ -300,7 +299,7 @@ class GameEngine:
                 return phase.pattern[self.card_in_phase]
             return None
         elif phase.type == PhaseType.HIT_ROUND:
-            return phase.card_type
+            return "up"
         elif phase.type == PhaseType.DRAW:
             return "down"  # replacement cards are always down
 
@@ -574,7 +573,6 @@ def _substitute_phase(phase: Phase, params: dict) -> Phase:
         max_draw=phase.max_draw,
         select_cards=phase.select_cards,
         label=sub(phase.label),
-        card_type=phase.card_type,
     )
 
 
@@ -709,7 +707,7 @@ def _default_templates() -> list[GameTemplate]:
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down", "down"]),
                 Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.HIT_ROUND, card_type="up"),
+                Phase(type=PhaseType.HIT_ROUND),
             ],
             notes="Each player dealt 2 down initially; Rodney flips one of "
                   "the two face-up, then hit rounds (card or freeze). "
@@ -722,7 +720,7 @@ def _default_templates() -> list[GameTemplate]:
             phases=[
                 Phase(type=PhaseType.DEAL, pattern=["down", "up"]),
                 Phase(type=PhaseType.BETTING),
-                Phase(type=PhaseType.HIT_ROUND, card_type="up"),
+                Phase(type=PhaseType.HIT_ROUND),
             ],
             notes="Each player dealt 1 down + 1 up initially, then hit "
                   "rounds (card or freeze). Freeze 3x → frozen.",

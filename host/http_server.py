@@ -1222,8 +1222,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 s.console_up_round = 0
                 # `tpl` was looked up earlier for ante/betting defaults.
                 has_hit_round = any(
-                    phase.type.value == "hit_round" and phase.card_type == "up"
-                    for phase in tpl.phases
+                    phase.type.value == "hit_round" for phase in tpl.phases
                 )
                 if has_hit_round:
                     up_rounds = 0  # 0 = unbounded
